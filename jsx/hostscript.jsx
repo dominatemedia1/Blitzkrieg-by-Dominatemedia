@@ -91,14 +91,8 @@ function getStashedComps(libraryPath) {
 
 
 /**
- * THE INVISIBLE STASH FUNCTION - This is the definitive solution to avoid populating the "Recent Files" list.
- * How it works (The "Trick"):
- * 1. All project saving (`app.project.save`) happens on a SECRET temporary file in the system's temp folder.
- * 2. After Effects only ever knows about this secret temp file.
- * 3. Once the temp file is perfected (reduced, footage collected), we use a file system `copy()` command, NOT an AE command,
- *    to place a copy in the user's library.
- * 4. Since After Effects never "saved" or "opened" the file in the library, it NEVER appears in the Recent Files list.
- * 5. The secret temp file is deleted, leaving no trace.
+ * STASH FUNCTION - Saves the selected composition to the library
+ * This version prioritizes reliability over the "invisible" approach
  */
 function stashSelectedComp(libraryPath, categoryName) {
     // Validate inputs
@@ -109,115 +103,152 @@ function stashSelectedComp(libraryPath, categoryName) {
         return "Error: Invalid category name. Names cannot contain path separators.";
     }
 
-    var originalProject = app.project;
-    var originalProjectFile = originalProject.file;
-    var tempUnsavedBackup = null;
-    var secretTempAEP = null; // Our secret file
+    var originalProjectFile = null;
+    var projectWasDirty = false;
 
     try {
-        if (!originalProject) throw new Error("Please open a project first.");
-        var selectedItems = originalProject.selection;
-        if (selectedItems.length !== 1 || !(selectedItems[0] instanceof CompItem)) {
-            throw new Error("Please select exactly one composition in the Project Panel.");
+        if (!app.project) {
+            return "Error: Please open a project first.";
         }
+
+        // Store original project reference
+        originalProjectFile = app.project.file;
+        projectWasDirty = app.project.dirty;
+
+        var selectedItems = app.project.selection;
+        if (selectedItems.length !== 1 || !(selectedItems[0] instanceof CompItem)) {
+            return "Error: Please select exactly one composition in the Project Panel.";
+        }
+
         var compToSave = selectedItems[0];
-        
-        var compToSaveID = compToSave.id;
         var compToSaveName = compToSave.name;
         var safeCompName = compToSaveName.replace(/[^a-z0-9]/gi, '_').replace(/_{2,}/g, '_');
-        
-        // Safety check for unsaved projects
-        if (!originalProjectFile) {
-            tempUnsavedBackup = new File(Folder.temp.fsName + "/blitzkrieg_unsaved_backup_" + new Date().getTime() + ".aep");
-            originalProject.save(tempUnsavedBackup);
-            originalProjectFile = tempUnsavedBackup;
-        }
 
         // --- Create folder structure ---
         var categoryFolder = new Folder(libraryPath + "/" + categoryName);
-        if (!categoryFolder.exists) categoryFolder.create();
-        
+        if (!categoryFolder.exists) {
+            if (!categoryFolder.create()) {
+                return "Error: Could not create category folder.";
+            }
+        }
+
         var timestamp = new Date().getTime();
         var compFolderName = safeCompName + '_' + timestamp;
         var compFolder = new Folder(categoryFolder.fsName + "/" + compFolderName);
-        compFolder.create();
-        
-        // --- Save Thumbnail & Metadata ---
+        if (!compFolder.create()) {
+            return "Error: Could not create composition folder.";
+        }
+
+        // --- Save Thumbnail ---
         var thumbFile = new File(compFolder.fsName + "/comp.png");
         try {
             var frameTime = compToSave.workAreaStart + (compToSave.workAreaDuration / 2);
             compToSave.saveFrameToPng(frameTime, thumbFile);
         } catch(e) {
-            // Thumbnail generation can fail for various reasons (codec issues, empty comp, etc.)
-            // This is non-critical, so we log and continue
             $.writeln("Blitzkrieg: Warning - Could not generate thumbnail: " + e.toString());
         }
 
+        // --- Save Metadata ---
         var metadataFile = new File(compFolder.fsName + "/metadata.json");
         metadataFile.open('w');
         metadataFile.encoding = 'UTF-8';
-        metadataFile.write(JSON.stringify({ displayName: compToSaveName }));
+        metadataFile.write(JSON.stringify({
+            displayName: compToSaveName,
+            created: timestamp,
+            category: categoryName
+        }));
         metadataFile.close();
 
-        // The "Invisible Save" Workflow
+        // --- Save the project first if it hasn't been saved ---
+        if (!originalProjectFile) {
+            // Project hasn't been saved yet - we need to save it first
+            var tempProjectFile = new File(Folder.temp.fsName + "/blitzkrieg_temp_" + timestamp + ".aep");
+            app.project.save(tempProjectFile);
+            originalProjectFile = tempProjectFile;
+        } else if (projectWasDirty) {
+            // Save current changes
+            app.project.save(originalProjectFile);
+        }
+
+        // --- Create a duplicate project for the library ---
         app.beginUndoGroup("Blitzkrieg Stash");
 
-        // 1. Create a secret temp file and save the current project to it. AE will only add THIS to recents.
-        secretTempAEP = new File(Folder.temp.fsName + "/blitzkrieg_secret_temp_" + timestamp + ".aep");
-        app.project.save(secretTempAEP);
+        // Find the comp ID before any modifications
+        var compId = compToSave.id;
 
-        // 2. Reduce the secret temp project.
-        var compInTempProject = null;
-        for (var k = 1; k <= app.project.numItems; k++) {
-            if (app.project.item(k).id === compToSaveID) {
-                compInTempProject = app.project.item(k);
-                break;
-            }
-        }
-        if (!compInTempProject) throw new Error("Could not find the composition in the new project.");
-        app.project.reduceProject([compInTempProject]);
+        // Reduce project to only include selected comp and its dependencies
+        app.project.reduceProject([compToSave]);
 
-        // 3. Collect footage.
-        var footageSubFolder = new Folder(compFolder.fsName + "/(Footage)");
-        footageSubFolder.create();
+        // Create footage folder and collect files
+        var footageFolder = new Folder(compFolder.fsName + "/(Footage)");
+        footageFolder.create();
+
+        // Collect all footage items
+        var collectedFiles = {};
         for (var i = 1; i <= app.project.numItems; i++) {
             var item = app.project.item(i);
             if (item instanceof FootageItem && item.mainSource && item.mainSource.file) {
                 var sourceFile = item.mainSource.file;
-                if (sourceFile.fsName.indexOf("Adobe") === -1 && sourceFile.fsName.indexOf("Plug-ins") === -1) {
-                    var newFile = new File(footageSubFolder.fsName + "/" + sourceFile.name);
-                    if (!newFile.exists) sourceFile.copy(newFile);
-                    item.replace(newFile);
+                // Skip system files and already collected files
+                if (sourceFile.exists && !collectedFiles[sourceFile.fsName]) {
+                    // Skip Adobe system files
+                    var pathLower = sourceFile.fsName.toLowerCase();
+                    if (pathLower.indexOf("adobe") === -1 &&
+                        pathLower.indexOf("plug-ins") === -1 &&
+                        pathLower.indexOf("plugins") === -1) {
+
+                        var destFile = new File(footageFolder.fsName + "/" + sourceFile.name);
+                        // Handle duplicate filenames
+                        var counter = 1;
+                        while (destFile.exists) {
+                            var nameParts = sourceFile.name.split('.');
+                            var ext = nameParts.pop();
+                            var baseName = nameParts.join('.');
+                            destFile = new File(footageFolder.fsName + "/" + baseName + "_" + counter + "." + ext);
+                            counter++;
+                        }
+
+                        if (sourceFile.copy(destFile)) {
+                            try {
+                                item.replace(destFile);
+                                collectedFiles[sourceFile.fsName] = true;
+                            } catch (replaceErr) {
+                                $.writeln("Blitzkrieg: Warning - Could not replace footage: " + replaceErr.toString());
+                            }
+                        }
+                    }
                 }
             }
         }
-        
-        // 4. Save the secret temp project one last time.
-        app.project.save(secretTempAEP);
 
-        // 5. THE MAGIC STEP: Copy the secret file to the final destination without telling AE.
+        // Save the reduced project to library
         var finalAEPFile = new File(compFolder.fsName + "/" + safeCompName + ".aep");
-        if (!secretTempAEP.copy(finalAEPFile)) {
-            throw new Error("Could not copy the temporary project to the library.");
-        }
-        
+        app.project.save(finalAEPFile);
+
         app.endUndoGroup();
+
+        // --- Restore original project ---
+        if (originalProjectFile && originalProjectFile.exists) {
+            app.open(originalProjectFile);
+        }
+
+        // Clean up temp file if we created one
+        if (originalProjectFile && originalProjectFile.fsName.indexOf("blitzkrieg_temp_") !== -1) {
+            // Don't delete - user might need it
+        }
 
         return "Success! '" + compToSaveName + "' was added to your library.";
 
     } catch (e) {
+        // Try to restore original project on error
+        try {
+            if (originalProjectFile && originalProjectFile.exists) {
+                app.open(originalProjectFile);
+            }
+        } catch (restoreErr) {
+            $.writeln("Blitzkrieg: Error restoring project: " + restoreErr.toString());
+        }
         return "Error: " + e.toString();
-    } finally {
-        // Cleanup and Restore
-        if (originalProjectFile && originalProjectFile.exists) {
-            app.open(originalProjectFile); 
-        }
-        if (secretTempAEP && secretTempAEP.exists) {
-            secretTempAEP.remove(); // Delete the secret file
-        }
-        if (tempUnsavedBackup && tempUnsavedBackup.exists) {
-            tempUnsavedBackup.remove();
-        }
     }
 }
 
@@ -231,42 +262,87 @@ function importComp(aepPath) {
     try {
         if (!app.project) return "Error: Please open a project first.";
         var fileToImport = new File(aepPath);
-        if (!fileToImport.exists) return "Error: Source AEP file not found.";
+        if (!fileToImport.exists) return "Error: Source AEP file not found at: " + aepPath;
 
         var metadataFile = new File(fileToImport.parent.fsName + "/metadata.json");
         var compName = "Imported Comp";
         if (metadataFile.exists) {
             try {
                 metadataFile.open('r');
+                metadataFile.encoding = 'UTF-8';
                 var metadata = JSON.parse(metadataFile.read());
                 compName = metadata.displayName || compName;
                 metadataFile.close();
             } catch(e) {
-                // Log warning but continue with default name
                 $.writeln("Blitzkrieg: Warning - Could not read metadata during import: " + e.toString());
             }
         }
-        
+
         app.beginUndoGroup("Blitzkrieg Import");
+
+        // Import the project file
         var importOptions = new ImportOptions(fileToImport);
-        var importedFolder = app.project.importFile(importOptions);
-        importedFolder.name = compName + " [Blitzkrieg]";
-        
-        var mainComp = null;
-        for (var i = 1; i <= importedFolder.numItems; i++) {
-            if (importedFolder.item(i) instanceof CompItem) {
-                mainComp = importedFolder.item(i);
-                if(mainComp.name === compName) break;
+        importOptions.importAs = ImportAsType.PROJECT;
+
+        var importedItem;
+        try {
+            importedItem = app.project.importFile(importOptions);
+        } catch (importErr) {
+            // If import fails, it might be due to missing plugins
+            // Try to provide a helpful error message
+            var errMsg = importErr.toString();
+            if (errMsg.indexOf("plugin") !== -1 || errMsg.indexOf("effect") !== -1) {
+                return "Error: Import failed - missing plugins or effects. The composition may require plugins that are not installed.";
             }
+            throw importErr;
         }
-        if(mainComp && mainComp.name !== compName) {
+
+        if (!importedItem) {
+            return "Error: Import returned no items.";
+        }
+
+        // Handle different import results
+        var mainComp = null;
+
+        if (importedItem instanceof FolderItem) {
+            // Project was imported as a folder
+            importedItem.name = compName + " [Blitzkrieg]";
+
+            // Find the main composition
+            for (var i = 1; i <= importedItem.numItems; i++) {
+                var item = importedItem.item(i);
+                if (item instanceof CompItem) {
+                    mainComp = item;
+                    // Prefer comp with matching name
+                    if (item.name === compName || item.name.indexOf(compName) !== -1) {
+                        break;
+                    }
+                }
+            }
+        } else if (importedItem instanceof CompItem) {
+            mainComp = importedItem;
+        }
+
+        // Rename the main comp if found
+        if (mainComp && mainComp.name !== compName) {
             mainComp.name = compName;
         }
 
         app.endUndoGroup();
-        return "Success: '" + compName + "' imported.";
+
+        if (mainComp) {
+            return "Success: '" + compName + "' imported.";
+        } else {
+            return "Success: Project imported, but no composition was found inside.";
+        }
+
     } catch (e) {
-        return "Error: " + e.toString();
+        var errorMsg = e.toString();
+        // Check for common plugin-related errors
+        if (errorMsg.indexOf("25") !== -1 || errorMsg.indexOf("plugin") !== -1) {
+            return "Error: Import failed - this may be due to missing plugins. " + errorMsg;
+        }
+        return "Error: " + errorMsg;
     }
 }
 
