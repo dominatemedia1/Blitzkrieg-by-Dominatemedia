@@ -1,5 +1,36 @@
 // jsx/hostscript.jsx
 
+/**
+ * Validates a file/folder path for basic security.
+ * @param {string} path - Path to validate
+ * @returns {boolean} - True if path is valid
+ */
+function isValidPath(path) {
+    if (!path || typeof path !== 'string') return false;
+    // Check for null bytes (could be used for injection)
+    if (path.indexOf('\0') !== -1) return false;
+    // Reasonable length check
+    if (path.length > 1000) return false;
+    return true;
+}
+
+/**
+ * Validates a name for file system safety (no path separators).
+ * @param {string} name - Name to validate
+ * @returns {boolean} - True if name is safe
+ */
+function isValidName(name) {
+    if (!name || typeof name !== 'string') return false;
+    // Prevent path traversal
+    if (name.indexOf('/') !== -1 || name.indexOf('\\') !== -1) return false;
+    if (name.indexOf('..') !== -1) return false;
+    // Prevent null bytes
+    if (name.indexOf('\0') !== -1) return false;
+    // Reasonable length
+    if (name.length > 255) return false;
+    return true;
+}
+
 function selectLibraryFolder() {
     var folder = Folder.selectDialog("Select your CompBuddy Library Folder");
     if (folder) {
@@ -9,6 +40,7 @@ function selectLibraryFolder() {
 }
 
 function getStashedComps(libraryPath) {
+    if (!isValidPath(libraryPath)) return "[]";
     var mainFolder = new Folder(libraryPath);
     if (!mainFolder.exists) return "[]";
 
@@ -38,7 +70,10 @@ function getStashedComps(libraryPath) {
                         var metadata = JSON.parse(metadataFile.read());
                         displayName = metadata.displayName || displayName;
                         metadataFile.close();
-                    } catch (e) { /* ignore corrupt json */ }
+                    } catch (e) {
+                        // Log error but continue with default display name
+                        $.writeln("CompBuddy: Warning - Could not parse metadata.json for " + compFolder.name + ": " + e.toString());
+                    }
                 }
 
                 compsData.push({
@@ -66,6 +101,14 @@ function getStashedComps(libraryPath) {
  * 5. The secret temp file is deleted, leaving no trace.
  */
 function stashSelectedComp(libraryPath, categoryName) {
+    // Validate inputs
+    if (!isValidPath(libraryPath)) {
+        return "Error: Invalid library path.";
+    }
+    if (!isValidName(categoryName)) {
+        return "Error: Invalid category name. Names cannot contain path separators.";
+    }
+
     var originalProject = app.project;
     var originalProjectFile = originalProject.file;
     var tempUnsavedBackup = null;
@@ -104,7 +147,11 @@ function stashSelectedComp(libraryPath, categoryName) {
         try {
             var frameTime = compToSave.workAreaStart + (compToSave.workAreaDuration / 2);
             compToSave.saveFrameToPng(frameTime, thumbFile);
-        } catch(e) { /* Fails silently */ }
+        } catch(e) {
+            // Thumbnail generation can fail for various reasons (codec issues, empty comp, etc.)
+            // This is non-critical, so we log and continue
+            $.writeln("CompBuddy: Warning - Could not generate thumbnail: " + e.toString());
+        }
 
         var metadataFile = new File(compFolder.fsName + "/metadata.json");
         metadataFile.open('w');
@@ -176,6 +223,11 @@ function stashSelectedComp(libraryPath, categoryName) {
 
 
 function importComp(aepPath) {
+    // Validate input
+    if (!isValidPath(aepPath)) {
+        return "Error: Invalid file path.";
+    }
+
     try {
         if (!app.project) return "Error: Please open a project first.";
         var fileToImport = new File(aepPath);
@@ -189,7 +241,10 @@ function importComp(aepPath) {
                 var metadata = JSON.parse(metadataFile.read());
                 compName = metadata.displayName || compName;
                 metadataFile.close();
-            } catch(e) { /* use default */ }
+            } catch(e) {
+                // Log warning but continue with default name
+                $.writeln("CompBuddy: Warning - Could not read metadata during import: " + e.toString());
+            }
         }
         
         app.beginUndoGroup("CompBuddy Import");
@@ -217,6 +272,17 @@ function importComp(aepPath) {
 
 
 function renameStashedComp(libraryPath, category, uniqueId, newName) {
+    // Validate inputs
+    if (!isValidPath(libraryPath)) {
+        return "Error: Invalid library path.";
+    }
+    if (!isValidName(category) || !isValidName(uniqueId)) {
+        return "Error: Invalid category or ID.";
+    }
+    if (!isValidName(newName)) {
+        return "Error: Invalid name. Names cannot contain path separators.";
+    }
+
     try {
         var aepFolder = new Folder(libraryPath + "/" + category + "/" + uniqueId);
         var metadataFile = new File(aepFolder.fsName + "/metadata.json");
@@ -247,6 +313,14 @@ function renameStashedComp(libraryPath, category, uniqueId, newName) {
 }
 
 function deleteStashedComp(libraryPath, category, uniqueId) {
+    // Validate inputs
+    if (!isValidPath(libraryPath)) {
+        return "Error: Invalid library path.";
+    }
+    if (!isValidName(category) || !isValidName(uniqueId)) {
+        return "Error: Invalid category or ID.";
+    }
+
     try {
         var compFolderPath = libraryPath + "/" + category + "/" + uniqueId;
         var compFolder = new Folder(compFolderPath);
