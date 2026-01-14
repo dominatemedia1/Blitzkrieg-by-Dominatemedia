@@ -33,6 +33,7 @@
     var creditBtn = document.getElementById('credit-button');
     var toastElement = document.getElementById('toast-notification');
     var settingsBtn = document.getElementById('settings-btn');
+    var refreshBtn = document.getElementById('refresh-btn');
 
     // Settings modal elements
     var settingsModal = document.getElementById('settings-modal');
@@ -183,12 +184,25 @@
     function masterInit() {
         creditBtn.addEventListener('click', function (e) {
             e.preventDefault();
-            csInterface.openURLInDefaultBrowser('https://www.instagram.com/kuldeep.mp4/');
+            csInterface.openURLInDefaultBrowser('https://dominatemedia.com');
         });
 
         // Settings button
         if (settingsBtn) {
             settingsBtn.addEventListener('click', openSettings);
+        }
+
+        // Refresh button - manually refresh the library
+        if (refreshBtn) {
+            refreshBtn.addEventListener('click', function() {
+                var libraryPath = getLibraryPath();
+                if (libraryPath) {
+                    loadLibrary(libraryPath);
+                    showToast('Library refreshed.');
+                } else {
+                    showToast('Please select a library folder first.', true);
+                }
+            });
         }
 
         // Settings modal handlers
@@ -197,6 +211,14 @@
         if (settingsBrowseBtn) settingsBrowseBtn.addEventListener('click', function () {
             // open folder selector via hostscript.jsx
             selectLibraryFolderFromUI();
+        });
+
+        // Auto-refresh library when panel gains focus (ensures categories stay in sync)
+        window.addEventListener('focus', function() {
+            var libraryPath = getLibraryPath();
+            if (libraryPath && !isLoading) {
+                loadLibrary(libraryPath);
+            }
         });
 
         // App is freely available - initialize directly
