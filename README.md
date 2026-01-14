@@ -1,1 +1,1 @@
-# Domiantebuddy
+# Blitzkrieg by Dominate Media
