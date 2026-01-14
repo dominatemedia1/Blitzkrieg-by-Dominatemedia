@@ -32,7 +32,7 @@ function isValidName(name) {
 }
 
 function selectLibraryFolder() {
-    var folder = Folder.selectDialog("Select your CompBuddy Library Folder");
+    var folder = Folder.selectDialog("Select your Blitzkrieg Library Folder");
     if (folder) {
         return folder.fsName;
     }
@@ -72,7 +72,7 @@ function getStashedComps(libraryPath) {
                         metadataFile.close();
                     } catch (e) {
                         // Log error but continue with default display name
-                        $.writeln("CompBuddy: Warning - Could not parse metadata.json for " + compFolder.name + ": " + e.toString());
+                        $.writeln("Blitzkrieg: Warning - Could not parse metadata.json for " + compFolder.name + ": " + e.toString());
                     }
                 }
 
@@ -128,7 +128,7 @@ function stashSelectedComp(libraryPath, categoryName) {
         
         // Safety check for unsaved projects
         if (!originalProjectFile) {
-            tempUnsavedBackup = new File(Folder.temp.fsName + "/compbuddy_unsaved_backup_" + new Date().getTime() + ".aep");
+            tempUnsavedBackup = new File(Folder.temp.fsName + "/blitzkrieg_unsaved_backup_" + new Date().getTime() + ".aep");
             originalProject.save(tempUnsavedBackup);
             originalProjectFile = tempUnsavedBackup;
         }
@@ -150,7 +150,7 @@ function stashSelectedComp(libraryPath, categoryName) {
         } catch(e) {
             // Thumbnail generation can fail for various reasons (codec issues, empty comp, etc.)
             // This is non-critical, so we log and continue
-            $.writeln("CompBuddy: Warning - Could not generate thumbnail: " + e.toString());
+            $.writeln("Blitzkrieg: Warning - Could not generate thumbnail: " + e.toString());
         }
 
         var metadataFile = new File(compFolder.fsName + "/metadata.json");
@@ -160,10 +160,10 @@ function stashSelectedComp(libraryPath, categoryName) {
         metadataFile.close();
 
         // The "Invisible Save" Workflow
-        app.beginUndoGroup("CompBuddy Stash");
+        app.beginUndoGroup("Blitzkrieg Stash");
 
         // 1. Create a secret temp file and save the current project to it. AE will only add THIS to recents.
-        secretTempAEP = new File(Folder.temp.fsName + "/compbuddy_secret_temp_" + timestamp + ".aep");
+        secretTempAEP = new File(Folder.temp.fsName + "/blitzkrieg_secret_temp_" + timestamp + ".aep");
         app.project.save(secretTempAEP);
 
         // 2. Reduce the secret temp project.
@@ -243,14 +243,14 @@ function importComp(aepPath) {
                 metadataFile.close();
             } catch(e) {
                 // Log warning but continue with default name
-                $.writeln("CompBuddy: Warning - Could not read metadata during import: " + e.toString());
+                $.writeln("Blitzkrieg: Warning - Could not read metadata during import: " + e.toString());
             }
         }
         
-        app.beginUndoGroup("CompBuddy Import");
+        app.beginUndoGroup("Blitzkrieg Import");
         var importOptions = new ImportOptions(fileToImport);
         var importedFolder = app.project.importFile(importOptions);
-        importedFolder.name = compName + " [CompBuddy]";
+        importedFolder.name = compName + " [Blitzkrieg]";
         
         var mainComp = null;
         for (var i = 1; i <= importedFolder.numItems; i++) {
@@ -341,6 +341,61 @@ function deleteStashedComp(libraryPath, category, uniqueId) {
         }
         return "Error: Folder not found.";
     } catch(e) {
+        return "Error: " + e.toString();
+    }
+}
+
+/**
+ * Gets the path to the settings file in user's app data folder.
+ * This ensures settings persist across After Effects restarts.
+ * @returns {string} - Path to settings file
+ */
+function getSettingsFilePath() {
+    var settingsFolder = new Folder(Folder.userData.fsName + "/Blitzkrieg");
+    if (!settingsFolder.exists) {
+        settingsFolder.create();
+    }
+    return settingsFolder.fsName + "/settings.json";
+}
+
+/**
+ * Loads Blitzkrieg settings from persistent file storage.
+ * @returns {string} - JSON string of settings or empty object
+ */
+function loadBlitzkriegSettings() {
+    try {
+        var settingsFile = new File(getSettingsFilePath());
+        if (settingsFile.exists) {
+            settingsFile.open('r');
+            settingsFile.encoding = 'UTF-8';
+            var content = settingsFile.read();
+            settingsFile.close();
+            // Validate it's valid JSON
+            JSON.parse(content);
+            return content;
+        }
+    } catch (e) {
+        $.writeln("Blitzkrieg: Warning - Could not load settings: " + e.toString());
+    }
+    return "{}";
+}
+
+/**
+ * Saves Blitzkrieg settings to persistent file storage.
+ * @param {string} settingsJson - JSON string of settings to save
+ * @returns {string} - Success or error message
+ */
+function saveBlitzkriegSettings(settingsJson) {
+    try {
+        // Validate JSON before saving
+        JSON.parse(settingsJson);
+        var settingsFile = new File(getSettingsFilePath());
+        settingsFile.open('w');
+        settingsFile.encoding = 'UTF-8';
+        settingsFile.write(settingsJson);
+        settingsFile.close();
+        return "Success";
+    } catch (e) {
         return "Error: " + e.toString();
     }
 }

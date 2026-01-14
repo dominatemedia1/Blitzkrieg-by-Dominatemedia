@@ -47,6 +47,62 @@
     var currentDeleteInfo = null;
     var currentRenameInfo = null;
     var isLoading = false; // Prevents race conditions in async operations
+    var cachedLibraryPath = null; // In-memory cache for library path
+
+    /* --------- Persistent Settings Storage --------- */
+
+    /**
+     * Loads settings from file-based storage (more reliable than localStorage).
+     * Falls back to localStorage if file load fails.
+     * @param {function} callback - Called with settings object
+     */
+    function loadPersistentSettings(callback) {
+        csInterface.evalScript('loadBlitzkriegSettings()', function(result) {
+            try {
+                var settings = JSON.parse(result || '{}');
+                // Also sync to localStorage as cache
+                if (settings.libraryPath) {
+                    window.localStorage.setItem('ae_asset_stash_path', settings.libraryPath);
+                }
+                callback(settings);
+            } catch (e) {
+                console.warn('Blitzkrieg: Could not parse settings from file, using localStorage fallback');
+                // Fallback to localStorage
+                var path = window.localStorage.getItem('ae_asset_stash_path');
+                callback({ libraryPath: path || null });
+            }
+        });
+    }
+
+    /**
+     * Saves settings to file-based storage for persistence across AE restarts.
+     * Also saves to localStorage as cache.
+     * @param {object} settings - Settings object to save
+     * @param {function} callback - Optional callback called with success status
+     */
+    function savePersistentSettings(settings, callback) {
+        // Save to localStorage as cache
+        if (settings.libraryPath) {
+            window.localStorage.setItem('ae_asset_stash_path', settings.libraryPath);
+            cachedLibraryPath = settings.libraryPath;
+        }
+
+        // Save to file for persistence
+        var safeSettings = escapeForExtendScript(JSON.stringify(settings));
+        csInterface.evalScript('saveBlitzkriegSettings("' + safeSettings + '")', function(result) {
+            if (callback) {
+                callback(result && result.indexOf('Success') === 0);
+            }
+        });
+    }
+
+    /**
+     * Gets the current library path from cache, localStorage, or file.
+     * @returns {string|null} - Library path or null
+     */
+    function getLibraryPath() {
+        return cachedLibraryPath || window.localStorage.getItem('ae_asset_stash_path') || null;
+    }
 
     /* --------- Utility / UI helpers --------- */
 
@@ -150,7 +206,7 @@
     /* --------- Settings modal functions --------- */
     function openSettings() {
         // populate current library path into settings
-        var savedPath = window.localStorage.getItem('ae_asset_stash_path') || '';
+        var savedPath = getLibraryPath() || '';
         settingsLibraryPath.value = savedPath;
         settingsModal.style.display = 'flex';
     }
@@ -163,7 +219,12 @@
         // Save any changed path (settingsLibraryPath is readonly and only changed via browse)
         var saved = settingsLibraryPath.value;
         if (saved) {
-            window.localStorage.setItem('ae_asset_stash_path', saved);
+            // Save to persistent file storage (fixes restart bug)
+            savePersistentSettings({ libraryPath: saved }, function(success) {
+                if (!success) {
+                    console.warn('Blitzkrieg: Could not save settings to file');
+                }
+            });
             pathDisplay.textContent = saved;
             pathDisplay.title = saved;
             loadLibrary(saved);
@@ -186,12 +247,17 @@
 
     /* --------- App initialization & core UI logic (kept original behavior) --------- */
     function initializeAppLogic() {
-        var savedPath = window.localStorage.getItem('ae_asset_stash_path');
-        if (savedPath) {
-            pathDisplay.textContent = savedPath;
-            pathDisplay.title = savedPath;
-            loadLibrary(savedPath);
-        }
+        // Load settings from persistent file storage (fixes categories not showing after restart)
+        loadPersistentSettings(function(settings) {
+            var savedPath = settings.libraryPath;
+            if (savedPath) {
+                cachedLibraryPath = savedPath;
+                pathDisplay.textContent = savedPath;
+                pathDisplay.title = savedPath;
+                loadLibrary(savedPath);
+            }
+        });
+
         // removed main Browse button usage (it was removed from UI). Folder selection available in Settings.
         var addBtn = document.getElementById('add-comp-btn');
         addBtn.addEventListener('click', addSelectedComp);
@@ -219,7 +285,7 @@
         }
         // Prevent concurrent library loads (race condition fix)
         if (isLoading) {
-            console.log("CompBuddy: Library load already in progress, skipping...");
+            console.log("Blitzkrieg: Library load already in progress, skipping...");
             return;
         }
         isLoading = true;
@@ -254,7 +320,7 @@
         var searchTerm = searchInput.value.toLowerCase();
         var filteredComps = allComps.filter(function (comp) { return (activeCategory === 'All' || comp.category === activeCategory) && comp.name.toLowerCase().includes(searchTerm); });
         if (filteredComps.length === 0) {
-            if (allComps.length === 0 && !window.localStorage.getItem('ae_asset_stash_path')) {
+            if (allComps.length === 0 && !getLibraryPath()) {
                 showPlaceholder("Select a library folder to begin.");
             } else {
                 showPlaceholder("No comps found. Try a different search or category.");
@@ -312,10 +378,10 @@
     }
 
     /* --------- folder selection + add/rename/delete/import flows (kept original) --------- */
-    function selectLibraryFolder() { showSpinner(); csInterface.evalScript('selectLibraryFolder()', function (path) { hideSpinner(); if (path && path !== 'null') { window.localStorage.setItem('ae_asset_stash_path', path); pathDisplay.textContent = path; pathDisplay.title = path; activeCategory = 'All'; searchInput.value = ''; loadLibrary(path); } }); }
+    function selectLibraryFolder() { showSpinner(); csInterface.evalScript('selectLibraryFolder()', function (path) { hideSpinner(); if (path && path !== 'null') { savePersistentSettings({ libraryPath: path }); pathDisplay.textContent = path; pathDisplay.title = path; activeCategory = 'All'; searchInput.value = ''; loadLibrary(path); } }); }
 
     function addSelectedComp() {
-        var libraryPath = window.localStorage.getItem('ae_asset_stash_path');
+        var libraryPath = getLibraryPath();
         if (!libraryPath) { showToast('Please select a library folder first.', true); return; }
         var categories = Array.from(new Set(allComps.map(function(c) { return c.category; }))).sort();
         existingCategorySelect.innerHTML = categories.map(function (cat) { return '<option value="' + cat + '">' + cat + '</option>'; }).join('');
@@ -326,7 +392,7 @@
     }
 
     function executeAddComp() {
-        var libraryPath = window.localStorage.getItem('ae_asset_stash_path');
+        var libraryPath = getLibraryPath();
         var newCatName = newCategoryInput.value.trim();
         var existingCatName = existingCategorySelect.value;
         var categoryName = newCatName || existingCatName;
@@ -377,7 +443,7 @@
         var info = currentDeleteInfo;
         if (!info) return;
 
-        var libraryPath = window.localStorage.getItem('ae_asset_stash_path');
+        var libraryPath = getLibraryPath();
         if (!isValidPath(libraryPath)) {
             showToast('Invalid library path.', true);
             deleteModal.style.display = 'none';
@@ -423,7 +489,7 @@
             return;
         }
 
-        var libraryPath = window.localStorage.getItem('ae_asset_stash_path');
+        var libraryPath = getLibraryPath();
         if (!isValidPath(libraryPath)) {
             showToast('Invalid library path.', true);
             renameModal.style.display = 'none';
