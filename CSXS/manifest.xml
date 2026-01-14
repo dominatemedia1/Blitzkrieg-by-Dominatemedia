@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<ExtensionManifest Version="7.0" ExtensionBundleId="com.compbuddy.ext" ExtensionBundleVersion="1.1.0" ExtensionBundleName="CompBuddy" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<ExtensionManifest Version="7.0" ExtensionBundleId="com.blitzkrieg.dominatemedia" ExtensionBundleVersion="1.2.0" ExtensionBundleName="Blitzkrieg by Dominate Media" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
     <ExtensionList>
-        <Extension Id="com.compbuddy.ext" Version="1.1.0" />
+        <Extension Id="com.blitzkrieg.dominatemedia" Version="1.2.0" />
     </ExtensionList>
     <ExecutionEnvironment>
         <HostList>
@@ -15,7 +15,7 @@
         </RequiredRuntimeList>
     </ExecutionEnvironment>
     <DispatchInfoList>
-        <Extension Id="com.compbuddy.ext">
+        <Extension Id="com.blitzkrieg.dominatemedia">
             <DispatchInfo>
                 <Resources>
                     <MainPath>./index.html</MainPath>
@@ -27,7 +27,7 @@
                 </Lifecycle>
                 <UI>
                     <Type>Panel</Type>
-                    <Menu>CompBuddy</Menu>
+                    <Menu>Blitzkrieg</Menu>
                     <Geometry>
                         <Size>
                             <Height>600</Height>
