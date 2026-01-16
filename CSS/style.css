@@ -390,3 +390,107 @@ footer {
 #toast-notification.show { opacity: 1; transform: translate(-50%, 0); }
 #toast-notification.error { background: var(--danger-color); }
 #toast-notification.success { background: var(--primary-color); }
+
+/* ============================================
+   PREVIEW ANIMATION STYLES
+   ============================================ */
+
+/* Preview indicator badge */
+.preview-indicator {
+    position: absolute;
+    bottom: 8px;
+    left: 8px;
+    background-color: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(4px);
+    color: white;
+    padding: 4px 6px;
+    border-radius: 4px;
+    font-size: 10px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    opacity: 0.7;
+    transition: all 0.2s ease;
+    z-index: 5;
+}
+
+.preview-indicator svg {
+    width: 10px;
+    height: 10px;
+}
+
+/* Playing state - green indicator */
+.preview-indicator.playing {
+    background-color: var(--primary-color);
+    opacity: 1;
+}
+
+/* Hover effect on cards with preview */
+.stash-item.has-preview .thumbnail {
+    position: relative;
+}
+
+.stash-item.has-preview:hover .preview-indicator {
+    opacity: 1;
+}
+
+/* Thumbnail transition for smooth frame changes */
+.stash-item .thumbnail img {
+    transition: opacity 0.05s ease;
+}
+
+/* Generate preview button (for items without preview) */
+.generate-preview-btn {
+    position: absolute;
+    bottom: 8px;
+    right: 8px;
+    background-color: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(4px);
+    color: white;
+    border: none;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 10px;
+    cursor: pointer;
+    opacity: 0;
+    transition: all 0.2s ease;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.stash-item:hover .generate-preview-btn {
+    opacity: 0.8;
+}
+
+.generate-preview-btn:hover {
+    opacity: 1;
+    background-color: var(--primary-color);
+}
+
+/* Regenerate preview button (shown even when preview exists) */
+.regenerate-preview-btn {
+    position: absolute;
+    bottom: 8px;
+    right: 8px;
+    background-color: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(4px);
+    color: white;
+    border: none;
+    padding: 4px;
+    border-radius: 4px;
+    cursor: pointer;
+    opacity: 0;
+    transition: all 0.2s ease;
+    z-index: 5;
+}
+
+.stash-item:hover .regenerate-preview-btn {
+    opacity: 0.6;
+}
+
+.regenerate-preview-btn:hover {
+    opacity: 1;
+    background-color: var(--primary-color);
+}
