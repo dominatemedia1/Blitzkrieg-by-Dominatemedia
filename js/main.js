@@ -338,7 +338,78 @@
         }).join('');
     }
 
+    // Preview animation state
+    var previewAnimations = {};
+    var PREVIEW_FRAME_INTERVAL = 100; // ms between frames (10 FPS preview)
+
+    /**
+     * Starts playing preview animation on hover
+     * @param {HTMLElement} thumbnailContainer - The thumbnail container element
+     * @param {Array} previewFrames - Array of preview frame paths
+     * @param {string} uniqueId - Unique identifier for this comp
+     */
+    function startPreviewAnimation(thumbnailContainer, previewFrames, uniqueId) {
+        if (!previewFrames || previewFrames.length === 0) return;
+
+        var img = thumbnailContainer.querySelector('.comp-thumbnail');
+        if (!img) return;
+
+        var frameIndex = 0;
+        var originalSrc = img.src;
+
+        // Store original src for restoration
+        img.dataset.originalSrc = originalSrc;
+
+        // Add preview indicator
+        var indicator = thumbnailContainer.querySelector('.preview-indicator');
+        if (!indicator) {
+            indicator = document.createElement('div');
+            indicator.className = 'preview-indicator';
+            indicator.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>';
+            thumbnailContainer.appendChild(indicator);
+        }
+        indicator.classList.add('playing');
+
+        // Start animation loop
+        previewAnimations[uniqueId] = setInterval(function() {
+            var framePath = previewFrames[frameIndex];
+            var frameSrc = 'file:///' + framePath.replace(/\\/g, '/').replace(/"/g, '%22');
+            img.src = frameSrc;
+            frameIndex = (frameIndex + 1) % previewFrames.length;
+        }, PREVIEW_FRAME_INTERVAL);
+    }
+
+    /**
+     * Stops preview animation and restores original thumbnail
+     * @param {HTMLElement} thumbnailContainer - The thumbnail container element
+     * @param {string} uniqueId - Unique identifier for this comp
+     */
+    function stopPreviewAnimation(thumbnailContainer, uniqueId) {
+        // Clear animation interval
+        if (previewAnimations[uniqueId]) {
+            clearInterval(previewAnimations[uniqueId]);
+            delete previewAnimations[uniqueId];
+        }
+
+        var img = thumbnailContainer.querySelector('.comp-thumbnail');
+        if (img && img.dataset.originalSrc) {
+            img.src = img.dataset.originalSrc;
+        }
+
+        // Remove playing indicator
+        var indicator = thumbnailContainer.querySelector('.preview-indicator');
+        if (indicator) {
+            indicator.classList.remove('playing');
+        }
+    }
+
     function renderCompsGrid() {
+        // Clear any existing preview animations
+        Object.keys(previewAnimations).forEach(function(id) {
+            clearInterval(previewAnimations[id]);
+        });
+        previewAnimations = {};
+
         var searchTerm = searchInput.value.toLowerCase();
         var filteredComps = allComps.filter(function (comp) { return (activeCategory === 'All' || comp.category === activeCategory) && comp.name.toLowerCase().includes(searchTerm); });
         if (filteredComps.length === 0) {
@@ -358,13 +429,23 @@
             var thumbSrc = comp.thumbPath ? 'file:///' + comp.thumbPath.replace(/\\/g, '/').replace(/"/g, '%22') : '';
             var safeThumbSrc = escapeHTML(thumbSrc);
 
-            return '<div class="stash-item" data-unique-id="' + safeUniqueId + '" data-category="' + safeCategory + '" data-aep-path="' + safeAepPath + '" data-name="' + safeName + '">' +
+            // Prepare preview frames data attribute (JSON encoded)
+            var hasPreview = comp.previewFrames && comp.previewFrames.length > 0;
+            var previewDataAttr = hasPreview ? ' data-preview-frames="' + escapeHTML(JSON.stringify(comp.previewFrames)) + '"' : '';
+            var previewClass = hasPreview ? ' has-preview' : '';
+
+            // Generate preview button for items without preview
+            var generatePreviewBtn = !hasPreview ? '<button class="generate-preview-btn" title="Generate Preview Animation"><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> Preview</button>' : '';
+
+            return '<div class="stash-item' + previewClass + '" data-unique-id="' + safeUniqueId + '" data-category="' + safeCategory + '" data-aep-path="' + safeAepPath + '" data-name="' + safeName + '"' + previewDataAttr + '>' +
                 '<div class="item-actions">' +
                     '<button class="action-btn rename-btn" title="Rename"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg></button>' +
                     '<button class="action-btn delete-btn" title="Delete"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg></button>' +
                 '</div>' +
                 '<div class="thumbnail">' +
                     (thumbSrc ? '<img src="' + safeThumbSrc + '" alt="Thumbnail" class="comp-thumbnail">' : '<div class="no-preview">No Preview</div>') +
+                    (hasPreview ? '<div class="preview-indicator"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg></div>' : '') +
+                    generatePreviewBtn +
                 '</div>' +
                 '<div class="item-info">' +
                     '<p class="item-name" title="' + safeName + '">' + safeName + '</p>' +
@@ -384,6 +465,33 @@
                 this.parentElement.appendChild(noPreview);
             };
         });
+
+        // Add hover event listeners for preview animation
+        var stashItems = stashGrid.querySelectorAll('.stash-item.has-preview');
+        stashItems.forEach(function(item) {
+            var thumbnailContainer = item.querySelector('.thumbnail');
+            var uniqueId = item.dataset.uniqueId;
+            var previewFramesJson = item.dataset.previewFrames;
+
+            if (thumbnailContainer && previewFramesJson) {
+                try {
+                    var previewFrames = JSON.parse(previewFramesJson);
+                    if (previewFrames && previewFrames.length > 0) {
+                        // Mouse enter - start preview
+                        item.addEventListener('mouseenter', function() {
+                            startPreviewAnimation(thumbnailContainer, previewFrames, uniqueId);
+                        });
+
+                        // Mouse leave - stop preview
+                        item.addEventListener('mouseleave', function() {
+                            stopPreviewAnimation(thumbnailContainer, uniqueId);
+                        });
+                    }
+                } catch (e) {
+                    console.warn('Blitzkrieg: Could not parse preview frames for ' + uniqueId);
+                }
+            }
+        });
     }
 
     function showPlaceholder(message) { stashGrid.innerHTML = '<p class="placeholder-text">' + message + '</p>'; }
@@ -397,6 +505,41 @@
         if (e.target.closest('.import-btn')) { importComp(aepPath); }
         else if (e.target.closest('.rename-btn')) { renameComp(uniqueId, category, name); }
         else if (e.target.closest('.delete-btn')) { promptDelete(uniqueId, category, name); }
+        else if (e.target.closest('.generate-preview-btn')) { generatePreview(aepPath, name); }
+    }
+
+    /**
+     * Generates preview frames for an existing stashed composition
+     * @param {string} aepPath - Path to the .aep file
+     * @param {string} compName - Name of the composition (for toast messages)
+     */
+    function generatePreview(aepPath, compName) {
+        if (!isValidPath(aepPath)) {
+            showToast('Invalid file path.', true);
+            return;
+        }
+
+        showSpinner();
+        showToast('Generating preview for "' + compName + '"...');
+
+        var safePath = escapeForExtendScript(aepPath);
+        csInterface.evalScript('generatePreviewFrames("' + safePath + '")', function(result) {
+            hideSpinner();
+            if (!result) {
+                showToast('Unexpected error generating preview.', true);
+                return;
+            }
+            if (result.indexOf('Success') === 0 || result.indexOf('Warning') === 0) {
+                showToast(result.replace(/^(Success:|Warning:)\s*/, ''));
+                // Reload library to show the new preview
+                var libraryPath = getLibraryPath();
+                if (libraryPath) {
+                    loadLibrary(libraryPath);
+                }
+            } else {
+                showToast(result, true);
+            }
+        });
     }
 
     /* --------- folder selection + add/rename/delete/import flows (kept original) --------- */
