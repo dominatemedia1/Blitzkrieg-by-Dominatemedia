@@ -337,6 +337,12 @@
         categoryFiltersContainer.addEventListener('click', handleCategoryClick);
         stashGrid.addEventListener('click', handleStashGridClick);
 
+        // Add click listeners for sidebar navigation (including "All Templates" and category items)
+        var sidebarNav = document.querySelector('.sidebar-nav');
+        if (sidebarNav) {
+            sidebarNav.addEventListener('click', handleCategoryClick);
+        }
+
         cancelDeleteBtn.addEventListener('click', function () { deleteModal.style.display = 'none'; });
         confirmDeleteBtn.addEventListener('click', executeDelete);
 
@@ -380,10 +386,41 @@
     function renderUI() { renderCategories(); renderCompsGrid(); }
 
     function renderCategories() {
-        var categories = ['All'].concat(Array.from(new Set(allComps.map(function(comp) { return comp.category; }))));
+        // Get unique categories from loaded comps
+        var categories = Array.from(new Set(allComps.map(function(comp) { return comp.category; }))).sort();
+
+        // Update the "All Templates" nav item in sidebar
+        var allTemplatesItem = document.querySelector('.nav-item[data-category="All"]');
+        if (allTemplatesItem) {
+            if (activeCategory === 'All') {
+                allTemplatesItem.classList.add('active');
+            } else {
+                allTemplatesItem.classList.remove('active');
+            }
+            // Update count badge
+            var existingCount = allTemplatesItem.querySelector('.nav-count');
+            if (existingCount) {
+                existingCount.textContent = allComps.length;
+            } else if (allComps.length > 0) {
+                var countBadge = document.createElement('span');
+                countBadge.className = 'nav-count';
+                countBadge.textContent = allComps.length;
+                allTemplatesItem.appendChild(countBadge);
+            }
+        }
+
+        // Render categories in the sidebar
         categoryFiltersContainer.innerHTML = categories.map(function(cat) {
             var safeCat = escapeHTML(cat);
-            return '<button class="category-btn ' + (cat === activeCategory ? 'active' : '') + '" data-category="' + safeCat + '">' + safeCat + '</button>';
+            var count = allComps.filter(function(c) { return c.category === cat; }).length;
+            var isActive = cat === activeCategory;
+            return '<div class="nav-item' + (isActive ? ' active' : '') + '" data-category="' + safeCat + '">' +
+                '<svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+                    '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>' +
+                '</svg>' +
+                '<span class="nav-label">' + safeCat + '</span>' +
+                '<span class="nav-count">' + count + '</span>' +
+            '</div>';
         }).join('');
     }
 
@@ -545,7 +582,14 @@
 
     function showPlaceholder(message) { stashGrid.innerHTML = '<p class="placeholder-text">' + message + '</p>'; }
 
-    function handleCategoryClick(e) { if (e.target.classList.contains('category-btn')) { activeCategory = e.target.dataset.category; renderUI(); } }
+    function handleCategoryClick(e) {
+        // Handle clicks on sidebar nav items (including the label or icon inside)
+        var navItem = e.target.closest('.nav-item');
+        if (navItem && navItem.dataset.category) {
+            activeCategory = navItem.dataset.category;
+            renderUI();
+        }
+    }
 
     function handleStashGridClick(e) {
         var item = e.target.closest('.stash-item');
