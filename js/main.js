@@ -32,8 +32,14 @@
 
     var creditBtn = document.getElementById('credit-button');
     var toastElement = document.getElementById('toast-notification');
-    var settingsBtn = document.getElementById('settings-btn');
-    var refreshBtn = document.getElementById('refresh-btn');
+
+    // Dropdown menu elements
+    var dropdownContainer = document.getElementById('main-dropdown');
+    var dropdownToggleBtn = document.getElementById('dropdown-toggle-btn');
+    var dropdownMenu = document.getElementById('dropdown-menu');
+    var dropdownRefresh = document.getElementById('dropdown-refresh');
+    var dropdownSettings = document.getElementById('dropdown-settings');
+    var dropdownBecomeEditor = document.getElementById('dropdown-become-editor');
 
     // Settings modal elements
     var settingsModal = document.getElementById('settings-modal');
@@ -187,23 +193,8 @@
             csInterface.openURLInDefaultBrowser('https://dominatemedia.com');
         });
 
-        // Settings button
-        if (settingsBtn) {
-            settingsBtn.addEventListener('click', openSettings);
-        }
-
-        // Refresh button - manually refresh the library
-        if (refreshBtn) {
-            refreshBtn.addEventListener('click', function() {
-                var libraryPath = getLibraryPath();
-                if (libraryPath) {
-                    loadLibrary(libraryPath);
-                    showToast('Library refreshed.');
-                } else {
-                    showToast('Please select a library folder first.', true);
-                }
-            });
-        }
+        // Initialize dropdown menu
+        initDropdownMenu();
 
         // Settings modal handlers
         if (settingsCloseBtn) settingsCloseBtn.addEventListener('click', closeSettings);
@@ -223,6 +214,64 @@
 
         // App is freely available - initialize directly
         initializeAppLogic();
+    }
+
+    /* --------- Dropdown Menu Functions --------- */
+    function initDropdownMenu() {
+        // Toggle dropdown on button click
+        if (dropdownToggleBtn) {
+            dropdownToggleBtn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                dropdownContainer.classList.toggle('open');
+            });
+        }
+
+        // Close dropdown when clicking outside
+        document.addEventListener('click', function(e) {
+            if (dropdownContainer && !dropdownContainer.contains(e.target)) {
+                dropdownContainer.classList.remove('open');
+            }
+        });
+
+        // Close dropdown on escape key
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape' && dropdownContainer) {
+                dropdownContainer.classList.remove('open');
+            }
+        });
+
+        // Refresh Library action
+        if (dropdownRefresh) {
+            dropdownRefresh.addEventListener('click', function(e) {
+                e.preventDefault();
+                dropdownContainer.classList.remove('open');
+                var libraryPath = getLibraryPath();
+                if (libraryPath) {
+                    loadLibrary(libraryPath);
+                    showToast('Library refreshed.');
+                } else {
+                    showToast('Please select a library folder first.', true);
+                }
+            });
+        }
+
+        // Settings action
+        if (dropdownSettings) {
+            dropdownSettings.addEventListener('click', function(e) {
+                e.preventDefault();
+                dropdownContainer.classList.remove('open');
+                openSettings();
+            });
+        }
+
+        // Become an Editor action - opens external URL
+        if (dropdownBecomeEditor) {
+            dropdownBecomeEditor.addEventListener('click', function(e) {
+                e.preventDefault();
+                dropdownContainer.classList.remove('open');
+                csInterface.openURLInDefaultBrowser('https://www.dominatemedia.io/apply-to-join-our-team');
+            });
+        }
     }
 
     /* --------- Settings modal functions --------- */

@@ -23,7 +23,7 @@
 
             <div class="modal-buttons" style="justify-content:flex-end; margin-top: 18px;">
                 <button id="settings-close-btn" class="button-secondary">Close</button>
-                <button id="settings-save-btn" class="button-primary">Save</button>
+                <button id="settings-save-btn" class="button-primary" style="width:auto; margin-bottom:0;">Save</button>
             </div>
         </div>
     </div>
@@ -54,7 +54,7 @@
             </div>
             <div class="modal-buttons">
                 <button id="cancel-add-btn" class="button-secondary">Cancel</button>
-                <button id="confirm-add-btn" class="button-primary">Add Comp</button>
+                <button id="confirm-add-btn" class="button-primary" style="width:auto; margin-bottom:0;">Add Comp</button>
             </div>
         </div>
     </div>
@@ -69,7 +69,7 @@
             </div>
             <div class="modal-buttons">
                 <button id="cancel-rename-btn" class="button-secondary">Cancel</button>
-                <button id="confirm-rename-btn" class="button-primary">Save Changes</button>
+                <button id="confirm-rename-btn" class="button-primary" style="width:auto; margin-bottom:0;">Save Changes</button>
             </div>
         </div>
     </div>
@@ -83,23 +83,59 @@
             <div class="header-row">
                 <div class="logo-and-search">
                     <img src="img/logo.png" alt="Blitzkrieg Logo" id="logo-img">
-                    <input type="search" id="search-input" placeholder="Search comps...">
+                    <input type="search" id="search-input" placeholder="Search templates...">
                 </div>
                 <div class="top-actions">
-                    <button id="refresh-btn" title="Refresh Library" class="action-icon">
-                        <!-- refresh icon -->
-                        <svg class="icon" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
-                    </button>
-                    <button id="settings-btn" title="Settings" class="action-icon">
-                        <!-- simple gear icon -->
-                        <svg class="icon" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15.5A3.5 3.5 0 1 0 12 8.5a3.5 3.5 0 0 0 0 7z"></path><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09c.67 0 1.27-.39 1.51-1a1.65 1.65 0 0 0-.33-1.82l-.06-.06A2 2 0 0 1 6.9 2.9l.06.06c.44.44 1.05.66 1.66.5.5-.12 1-.17 1.51-.17H12c.51 0 1.01.05 1.51.17.61.16 1.22-.06 1.66-.5l.06-.06A2 2 0 0 1 19.1 4.1l-.06.06a1.65 1.65 0 0 0-.33 1.82c.12.5.17 1 .17 1.51V9a1.65 1.65 0 0 0 1.51 1c.7 0 1.31.39 1.51 1z"></path></svg>
-                    </button>
+                    <!-- Dropdown Menu -->
+                    <div class="dropdown-container" id="main-dropdown">
+                        <button class="dropdown-toggle" id="dropdown-toggle-btn">
+                            <span>Menu</span>
+                            <svg class="chevron" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <polyline points="6 9 12 15 18 9"></polyline>
+                            </svg>
+                        </button>
+                        <div class="dropdown-menu" id="dropdown-menu">
+                            <a href="#" class="dropdown-item" id="dropdown-refresh">
+                                <svg class="item-icon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <polyline points="23 4 23 10 17 10"></polyline>
+                                    <polyline points="1 20 1 14 7 14"></polyline>
+                                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                                </svg>
+                                <div class="item-text">
+                                    <div>Refresh Library</div>
+                                    <div class="item-subtitle">Reload all templates</div>
+                                </div>
+                            </a>
+                            <a href="#" class="dropdown-item" id="dropdown-settings">
+                                <svg class="item-icon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M12 15.5A3.5 3.5 0 1 0 12 8.5a3.5 3.5 0 0 0 0 7z"></path>
+                                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                                </svg>
+                                <div class="item-text">
+                                    <div>Settings</div>
+                                    <div class="item-subtitle">Configure library folder</div>
+                                </div>
+                            </a>
+                            <div class="dropdown-divider"></div>
+                            <a href="#" class="dropdown-item cta-item" id="dropdown-become-editor">
+                                <svg class="item-icon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                                    <circle cx="8.5" cy="7" r="4"></circle>
+                                    <line x1="20" y1="8" x2="20" y2="14"></line>
+                                    <line x1="23" y1="11" x2="17" y2="11"></line>
+                                </svg>
+                                <div class="item-text">
+                                    <div>Become an Editor</div>
+                                    <div class="item-subtitle">Join the Dominate Media team</div>
+                                </div>
+                            </a>
+                        </div>
+                    </div>
                 </div>
             </div>
 
             <div id="path-manager" aria-live="polite">
                 <span id="library-path-display">No library folder selected</span>
-                <!-- Browse removed from main panel per request -->
             </div>
 
             <div id="category-row">
@@ -119,7 +155,7 @@
             <a href="#" id="credit-button">Created by Dominate Media</a>
         </footer>
     </div>
-    
+
     <!-- === TOAST NOTIFICATION ELEMENT === -->
     <div id="toast-notification"></div>
 
