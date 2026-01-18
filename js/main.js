@@ -243,7 +243,7 @@
     function masterInit() {
         creditBtn.addEventListener('click', function (e) {
             e.preventDefault();
-            csInterface.openURLInDefaultBrowser('https://dominatemedia.com');
+            csInterface.openURLInDefaultBrowser('https://dominatemedia.io');
         });
 
         // Initialize dropdown menu
