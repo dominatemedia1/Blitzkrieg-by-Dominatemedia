@@ -118,7 +118,7 @@ body {
 }
 
 .sidebar-logo img {
-    height: 28px;
+    height: 36px;
     width: auto;
 }
 
@@ -1239,10 +1239,6 @@ header {
 }
 
 .logo-and-search {
-    display: none;
-}
-
-#logo-img {
     display: none;
 }
 
