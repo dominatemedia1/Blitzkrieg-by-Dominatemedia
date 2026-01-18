@@ -455,7 +455,6 @@ function stashSelectedComp(libraryPath, categoryName) {
         // --- Save Thumbnail and Preview Frames ---
         var thumbFile = new File(compFolder.fsName + "/comp.png");
         var previewFrameCount = 0;
-        var PREVIEW_FRAME_TARGET = 12; // Number of preview frames for animation
 
         try {
             // Save main thumbnail (middle frame)
@@ -473,17 +472,24 @@ function stashSelectedComp(libraryPath, categoryName) {
                 var previewFolder = new Folder(compFolder.fsName + "/preview");
                 previewFolder.create();
 
-                // Calculate frame interval to get PREVIEW_FRAME_TARGET frames
-                var frameInterval = Math.max(1, Math.floor(totalFrames / PREVIEW_FRAME_TARGET));
-                var actualFrameCount = Math.min(PREVIEW_FRAME_TARGET, totalFrames);
+                // DYNAMIC frame count: ~6 FPS preview, min 12, max 72 frames
+                // This ensures the full animation is captured at reasonable quality
+                var targetPreviewFPS = 6;
+                var minFrames = 12;
+                var maxFrames = 72;
+                var dynamicFrameCount = Math.ceil(compDuration * targetPreviewFPS);
+                var actualFrameCount = Math.max(minFrames, Math.min(maxFrames, dynamicFrameCount));
+
+                // Ensure we don't exceed actual composition frames
+                actualFrameCount = Math.min(actualFrameCount, totalFrames);
 
                 for (var pf = 0; pf < actualFrameCount; pf++) {
                     try {
-                        var previewTime = compToSave.workAreaStart + (pf * frameInterval / frameRate);
-                        // Clamp to work area
-                        if (previewTime > compToSave.workAreaStart + compToSave.workAreaDuration) {
-                            previewTime = compToSave.workAreaStart + compToSave.workAreaDuration - (1 / frameRate);
-                        }
+                        // FIXED: Evenly distribute frames across ENTIRE duration
+                        // Frame 0 = start, Last frame = end (ensures full coverage)
+                        var progress = (actualFrameCount > 1) ? (pf / (actualFrameCount - 1)) : 0;
+                        var previewTime = compToSave.workAreaStart + (progress * compDuration);
+
                         var previewFile = new File(previewFolder.fsName + "/frame_" + pf + ".png");
                         compToSave.saveFrameToPng(previewTime, previewFile);
                         previewFrameCount++;
@@ -775,7 +781,6 @@ function generatePreviewFrames(aepPath) {
 
     var originalProjectFile = null;
     var projectWasDirty = false;
-    var PREVIEW_FRAME_TARGET = 12;
 
     try {
         if (!app.project) {
@@ -842,16 +847,24 @@ function generatePreviewFrames(aepPath) {
         var totalFrames = Math.floor(compDuration * frameRate);
 
         if (totalFrames > 1) {
-            var frameInterval = Math.max(1, Math.floor(totalFrames / PREVIEW_FRAME_TARGET));
-            var actualFrameCount = Math.min(PREVIEW_FRAME_TARGET, totalFrames);
+            // DYNAMIC frame count: ~6 FPS preview, min 12, max 72 frames
+            // This ensures the full animation is captured at reasonable quality
+            var targetPreviewFPS = 6;
+            var minFrames = 12;
+            var maxFrames = 72;
+            var dynamicFrameCount = Math.ceil(compDuration * targetPreviewFPS);
+            var actualFrameCount = Math.max(minFrames, Math.min(maxFrames, dynamicFrameCount));
+
+            // Ensure we don't exceed actual composition frames
+            actualFrameCount = Math.min(actualFrameCount, totalFrames);
 
             for (var pf = 0; pf < actualFrameCount; pf++) {
                 try {
-                    var previewTime = mainComp.workAreaStart + (pf * frameInterval / frameRate);
-                    // Clamp to work area
-                    if (previewTime > mainComp.workAreaStart + mainComp.workAreaDuration) {
-                        previewTime = mainComp.workAreaStart + mainComp.workAreaDuration - (1 / frameRate);
-                    }
+                    // FIXED: Evenly distribute frames across ENTIRE duration
+                    // Frame 0 = start, Last frame = end (ensures full coverage)
+                    var progress = (actualFrameCount > 1) ? (pf / (actualFrameCount - 1)) : 0;
+                    var previewTime = mainComp.workAreaStart + (progress * compDuration);
+
                     var previewFile = new File(previewFolder.fsName + "/frame_" + pf + ".png");
                     mainComp.saveFrameToPng(previewTime, previewFile);
                     previewFrameCount++;

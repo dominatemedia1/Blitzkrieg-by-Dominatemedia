@@ -56,6 +56,14 @@
     var isLoading = false; // Prevents race conditions in async operations
     var cachedLibraryPath = null; // In-memory cache for library path
 
+    // UI State - Sorting and Grid Size
+    var currentSortOrder = 'name-asc'; // Default sort
+    var currentGridSize = 'normal'; // Default grid size
+
+    // UI Elements for sorting and grid
+    var sortSelect = null;
+    var gridSizeButtons = null;
+
     /* --------- Performance Utilities --------- */
 
     /**
@@ -108,6 +116,127 @@
     var debouncedRenderComps = debounce(function() {
         renderCompsGrid();
     }, 150);
+
+    /* --------- Sorting Functions --------- */
+
+    /**
+     * Sort compositions based on current sort order
+     * @param {Array} comps - Array of composition objects
+     * @returns {Array} - Sorted array
+     */
+    function sortComps(comps) {
+        var sorted = comps.slice(); // Create a copy
+
+        switch (currentSortOrder) {
+            case 'name-asc':
+                sorted.sort(function(a, b) { return a.name.localeCompare(b.name); });
+                break;
+            case 'name-desc':
+                sorted.sort(function(a, b) { return b.name.localeCompare(a.name); });
+                break;
+            case 'date-desc':
+                // Use uniqueId which contains timestamp
+                sorted.sort(function(a, b) {
+                    var timeA = parseInt(a.uniqueId.split('_').pop()) || 0;
+                    var timeB = parseInt(b.uniqueId.split('_').pop()) || 0;
+                    return timeB - timeA;
+                });
+                break;
+            case 'date-asc':
+                sorted.sort(function(a, b) {
+                    var timeA = parseInt(a.uniqueId.split('_').pop()) || 0;
+                    var timeB = parseInt(b.uniqueId.split('_').pop()) || 0;
+                    return timeA - timeB;
+                });
+                break;
+            case 'duration-desc':
+                sorted.sort(function(a, b) { return (b.duration || 0) - (a.duration || 0); });
+                break;
+            case 'duration-asc':
+                sorted.sort(function(a, b) { return (a.duration || 0) - (b.duration || 0); });
+                break;
+            default:
+                sorted.sort(function(a, b) { return a.name.localeCompare(b.name); });
+        }
+
+        return sorted;
+    }
+
+    /**
+     * Handle sort order change
+     * @param {string} newOrder - New sort order value
+     */
+    function handleSortChange(newOrder) {
+        currentSortOrder = newOrder;
+        // Save preference
+        try {
+            window.localStorage.setItem('blitzkrieg_sort_order', newOrder);
+        } catch(e) {}
+        renderCompsGrid();
+    }
+
+    /**
+     * Handle grid size change
+     * @param {string} newSize - New grid size (compact, normal, large)
+     */
+    function handleGridSizeChange(newSize) {
+        currentGridSize = newSize;
+
+        // Update grid class
+        stashGrid.classList.remove('grid-compact', 'grid-normal', 'grid-large');
+        stashGrid.classList.add('grid-' + newSize);
+
+        // Update button states
+        var buttons = document.querySelectorAll('.grid-size-btn');
+        buttons.forEach(function(btn) {
+            btn.classList.remove('active');
+            if (btn.dataset.size === newSize) {
+                btn.classList.add('active');
+            }
+        });
+
+        // Save preference
+        try {
+            window.localStorage.setItem('blitzkrieg_grid_size', newSize);
+        } catch(e) {}
+    }
+
+    /**
+     * Initialize sorting and grid size controls
+     */
+    function initSortAndGridControls() {
+        // Load saved preferences
+        try {
+            var savedSort = window.localStorage.getItem('blitzkrieg_sort_order');
+            if (savedSort) {
+                currentSortOrder = savedSort;
+            }
+            var savedGridSize = window.localStorage.getItem('blitzkrieg_grid_size');
+            if (savedGridSize) {
+                currentGridSize = savedGridSize;
+            }
+        } catch(e) {}
+
+        // Initialize sort select
+        sortSelect = document.getElementById('sort-select');
+        if (sortSelect) {
+            sortSelect.value = currentSortOrder;
+            sortSelect.addEventListener('change', function() {
+                handleSortChange(this.value);
+            });
+        }
+
+        // Initialize grid size buttons
+        var gridButtons = document.querySelectorAll('.grid-size-btn');
+        gridButtons.forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                handleGridSizeChange(this.dataset.size);
+            });
+        });
+
+        // Apply initial grid size
+        handleGridSizeChange(currentGridSize);
+    }
 
     /* --------- Persistent Settings Storage --------- */
 
@@ -248,6 +377,9 @@
 
         // Initialize dropdown menu
         initDropdownMenu();
+
+        // Initialize sorting and grid size controls
+        initSortAndGridControls();
 
         // Settings modal handlers
         if (settingsCloseBtn) settingsCloseBtn.addEventListener('click', closeSettings);
@@ -493,30 +625,102 @@
 
     // Preview animation state - optimized with requestAnimationFrame
     var previewAnimations = {};
-    var PREVIEW_FRAME_INTERVAL = 83; // ~12 FPS (faster preview)
+    var currentlyAnimatingId = null; // Track current animation to limit to 1 at a time
+
+    // MEMORY OPTIMIZATION: Single IntersectionObserver instance, reused across renders
+    var lazyLoadObserver = null;
+
+    /**
+     * Get or create the lazy loading observer (singleton pattern)
+     * @returns {IntersectionObserver|null}
+     */
+    function getLazyLoadObserver() {
+        if (!('IntersectionObserver' in window)) {
+            return null;
+        }
+
+        if (!lazyLoadObserver) {
+            lazyLoadObserver = new IntersectionObserver(function(entries) {
+                entries.forEach(function(entry) {
+                    if (entry.isIntersecting) {
+                        var img = entry.target;
+                        if (img.dataset.src) {
+                            img.src = img.dataset.src;
+                            img.classList.remove('lazy-thumb');
+                            lazyLoadObserver.unobserve(img);
+                        }
+                    }
+                });
+            }, {
+                rootMargin: '100px',
+                threshold: 0.01
+            });
+        }
+
+        return lazyLoadObserver;
+    }
+
+    /**
+     * Calculate dynamic frame interval based on composition duration
+     * This ensures the preview plays at the correct speed to show the FULL animation
+     * @param {number} duration - Composition duration in seconds
+     * @param {number} frameCount - Number of preview frames
+     * @returns {number} - Milliseconds between frames
+     */
+    function calculateFrameInterval(duration, frameCount) {
+        if (!duration || duration <= 0 || !frameCount || frameCount <= 1) {
+            return 100; // Default fallback
+        }
+        // Calculate interval to match actual duration
+        var interval = (duration * 1000) / frameCount;
+        // Clamp to reasonable range: 50ms min (20 FPS max), 250ms max (4 FPS min)
+        return Math.max(50, Math.min(250, interval));
+    }
 
     /**
      * OPTIMIZED: Starts playing preview animation on hover
      * Uses requestAnimationFrame for smoother animations and better CPU usage
+     * Now plays at correct speed to show FULL animation duration
      * @param {HTMLElement} thumbnailContainer - The thumbnail container element
      * @param {Array} previewFrames - Array of preview frame paths
      * @param {string} uniqueId - Unique identifier for this comp
+     * @param {number} duration - Composition duration in seconds (optional)
      */
-    function startPreviewAnimation(thumbnailContainer, previewFrames, uniqueId) {
+    function startPreviewAnimation(thumbnailContainer, previewFrames, uniqueId, duration) {
         if (!previewFrames || previewFrames.length === 0) return;
 
         var img = thumbnailContainer.querySelector('.comp-thumbnail');
         if (!img) return;
+
+        // MEMORY OPTIMIZATION: Stop any OTHER running animation (limit to 1 concurrent)
+        if (currentlyAnimatingId && currentlyAnimatingId !== uniqueId) {
+            var otherContainer = document.querySelector('[data-unique-id="' + currentlyAnimatingId + '"] .thumbnail');
+            if (otherContainer) {
+                stopPreviewAnimation(otherContainer, currentlyAnimatingId);
+            } else {
+                // Cleanup orphaned animation
+                if (previewAnimations[currentlyAnimatingId]) {
+                    if (previewAnimations[currentlyAnimatingId].stop) previewAnimations[currentlyAnimatingId].stop();
+                    if (previewAnimations[currentlyAnimatingId].rafId) cancelAnimationFrame(previewAnimations[currentlyAnimatingId].rafId);
+                    delete previewAnimations[currentlyAnimatingId];
+                }
+            }
+        }
 
         // Stop any existing animation for this item
         if (previewAnimations[uniqueId]) {
             stopPreviewAnimation(thumbnailContainer, uniqueId);
         }
 
+        currentlyAnimatingId = uniqueId;
+
         var frameIndex = 0;
         var originalSrc = img.src;
         var lastFrameTime = 0;
         var isRunning = true;
+
+        // DYNAMIC PLAYBACK: Calculate interval to match actual composition duration
+        var frameInterval = calculateFrameInterval(duration, previewFrames.length);
 
         // Store original src for restoration
         img.dataset.originalSrc = originalSrc;
@@ -536,11 +740,11 @@
         }
         indicator.classList.add('playing');
 
-        // Animation loop using requestAnimationFrame
+        // Animation loop using requestAnimationFrame with DYNAMIC frame interval
         function animate(timestamp) {
             if (!isRunning) return;
 
-            if (timestamp - lastFrameTime >= PREVIEW_FRAME_INTERVAL) {
+            if (timestamp - lastFrameTime >= frameInterval) {
                 img.src = frameSrcs[frameIndex];
                 frameIndex = (frameIndex + 1) % frameSrcs.length;
                 lastFrameTime = timestamp;
@@ -561,6 +765,11 @@
      * @param {string} uniqueId - Unique identifier for this comp
      */
     function stopPreviewAnimation(thumbnailContainer, uniqueId) {
+        // Clear currently animating tracker
+        if (currentlyAnimatingId === uniqueId) {
+            currentlyAnimatingId = null;
+        }
+
         // Clear animation
         if (previewAnimations[uniqueId]) {
             if (previewAnimations[uniqueId].stop) {
@@ -595,7 +804,7 @@
         previewAnimations = {};
 
         var searchTerm = searchInput.value.toLowerCase();
-        var filteredComps = allComps.filter(function (comp) { return (activeCategory === 'All' || comp.category === activeCategory) && comp.name.toLowerCase().includes(searchTerm); });
+        var filteredComps = sortComps(allComps.filter(function (comp) { return (activeCategory === 'All' || comp.category === activeCategory) && comp.name.toLowerCase().includes(searchTerm); }));
         if (filteredComps.length === 0) {
             if (allComps.length === 0 && !getLibraryPath()) {
                 showPlaceholder("Select a library folder to begin.");
@@ -623,6 +832,7 @@
             // Prepare preview frames data attribute (JSON encoded)
             var hasPreview = comp.previewFrames && comp.previewFrames.length > 0;
             var previewDataAttr = hasPreview ? ' data-preview-frames="' + escapeHTML(JSON.stringify(comp.previewFrames)) + '"' : '';
+            var durationAttr = comp.duration ? ' data-duration="' + comp.duration + '"' : '';
             var previewClass = hasPreview ? ' has-preview' : '';
 
             // Generate preview button for items without preview
@@ -633,7 +843,7 @@
                 ? '<img data-src="' + safeThumbSrc + '" alt="Thumbnail" class="comp-thumbnail lazy-thumb" loading="lazy">'
                 : '<div class="no-preview">No Preview</div>';
 
-            htmlParts.push('<div class="stash-item' + previewClass + '" data-unique-id="' + safeUniqueId + '" data-category="' + safeCategory + '" data-aep-path="' + safeAepPath + '" data-name="' + safeName + '"' + previewDataAttr + '>' +
+            htmlParts.push('<div class="stash-item' + previewClass + '" data-unique-id="' + safeUniqueId + '" data-category="' + safeCategory + '" data-aep-path="' + safeAepPath + '" data-name="' + safeName + '"' + previewDataAttr + durationAttr + '>' +
                 '<div class="item-actions">' +
                     '<button class="action-btn rename-btn" title="Rename"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg></button>' +
                     '<button class="action-btn delete-btn" title="Delete"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg></button>' +
@@ -652,27 +862,14 @@
 
         stashGrid.innerHTML = htmlParts.join('');
 
-        // Lazy load thumbnails using Intersection Observer for better performance
+        // MEMORY OPTIMIZED: Lazy load thumbnails using singleton Intersection Observer
         var lazyThumbnails = stashGrid.querySelectorAll('.lazy-thumb');
-        if ('IntersectionObserver' in window) {
-            var lazyObserver = new IntersectionObserver(function(entries) {
-                entries.forEach(function(entry) {
-                    if (entry.isIntersecting) {
-                        var img = entry.target;
-                        if (img.dataset.src) {
-                            img.src = img.dataset.src;
-                            img.classList.remove('lazy-thumb');
-                            lazyObserver.unobserve(img);
-                        }
-                    }
-                });
-            }, {
-                rootMargin: '100px', // Start loading 100px before visible
-                threshold: 0.01
-            });
+        var observer = getLazyLoadObserver();
 
+        if (observer) {
+            // Use singleton observer - no need to create new one each render
             lazyThumbnails.forEach(function(img) {
-                lazyObserver.observe(img);
+                observer.observe(img);
                 // Handle load errors
                 img.onerror = function() {
                     this.style.display = 'none';
@@ -705,14 +902,15 @@
             var thumbnailContainer = item.querySelector('.thumbnail');
             var uniqueId = item.dataset.uniqueId;
             var previewFramesJson = item.dataset.previewFrames;
+            var duration = parseFloat(item.dataset.duration) || 0;
 
             if (thumbnailContainer && previewFramesJson) {
                 try {
                     var previewFrames = JSON.parse(previewFramesJson);
                     if (previewFrames && previewFrames.length > 0) {
-                        // Mouse enter - start preview
+                        // Mouse enter - start preview with DYNAMIC playback speed
                         item.addEventListener('mouseenter', function() {
-                            startPreviewAnimation(thumbnailContainer, previewFrames, uniqueId);
+                            startPreviewAnimation(thumbnailContainer, previewFrames, uniqueId, duration);
                         });
 
                         // Mouse leave - stop preview
