@@ -56,6 +56,59 @@
     var isLoading = false; // Prevents race conditions in async operations
     var cachedLibraryPath = null; // In-memory cache for library path
 
+    /* --------- Performance Utilities --------- */
+
+    /**
+     * Debounce function - delays execution until after wait milliseconds
+     * have elapsed since the last time the debounced function was invoked.
+     * @param {function} func - Function to debounce
+     * @param {number} wait - Wait time in milliseconds
+     * @returns {function} - Debounced function
+     */
+    function debounce(func, wait) {
+        var timeout;
+        return function() {
+            var context = this;
+            var args = arguments;
+            clearTimeout(timeout);
+            timeout = setTimeout(function() {
+                func.apply(context, args);
+            }, wait);
+        };
+    }
+
+    /**
+     * Throttle function - limits function execution to once per limit milliseconds.
+     * @param {function} func - Function to throttle
+     * @param {number} limit - Minimum time between executions in milliseconds
+     * @returns {function} - Throttled function
+     */
+    function throttle(func, limit) {
+        var lastFunc;
+        var lastRan;
+        return function() {
+            var context = this;
+            var args = arguments;
+            if (!lastRan) {
+                func.apply(context, args);
+                lastRan = Date.now();
+            } else {
+                clearTimeout(lastFunc);
+                lastFunc = setTimeout(function() {
+                    if ((Date.now() - lastRan) >= limit) {
+                        func.apply(context, args);
+                        lastRan = Date.now();
+                    }
+                }, limit - (Date.now() - lastRan));
+            }
+        };
+    }
+
+    // Debounced search function for better performance
+    var debouncedRenderComps = debounce(function() {
+        renderCompsGrid();
+    }, 150);
+
     /* --------- Persistent Settings Storage --------- */
 
     /**
@@ -268,9 +321,23 @@
         if (dropdownBecomeEditor) {
             dropdownBecomeEditor.addEventListener('click', function(e) {
                 e.preventDefault();
+                e.stopPropagation();
                 dropdownContainer.classList.remove('open');
-                csInterface.openURLInDefaultBrowser('https://www.dominatemedia.io/apply-to-join-our-team');
+                var editorUrl = 'https://www.dominatemedia.io/apply-to-join-our-team';
+                try {
+                    if (csInterface && typeof csInterface.openURLInDefaultBrowser === 'function') {
+                        csInterface.openURLInDefaultBrowser(editorUrl);
+                    } else {
+                        // Fallback for environments where csInterface isn't available
+                        window.open(editorUrl, '_blank');
+                    }
+                } catch (err) {
+                    console.error('Blitzkrieg: Failed to open URL', err);
+                    window.open(editorUrl, '_blank');
+                }
             });
+        } else {
+            console.warn('Blitzkrieg: dropdown-become-editor element not found');
         }
     }
 
@@ -333,7 +400,7 @@
         var addBtn = document.getElementById('add-comp-btn');
         addBtn.addEventListener('click', addSelectedComp);
 
-        searchInput.addEventListener('input', renderCompsGrid);
+        searchInput.addEventListener('input', debouncedRenderComps);
         categoryFiltersContainer.addEventListener('click', handleCategoryClick);
         stashGrid.addEventListener('click', handleStashGridClick);
 
@@ -424,12 +491,13 @@
         }).join('');
     }
 
-    // Preview animation state
+    // Preview animation state - optimized with requestAnimationFrame
     var previewAnimations = {};
-    var PREVIEW_FRAME_INTERVAL = 100; // ms between frames (10 FPS preview)
+    var PREVIEW_FRAME_INTERVAL = 83; // ~12 FPS (faster preview)
 
     /**
-     * Starts playing preview animation on hover
+     * OPTIMIZED: Starts playing preview animation on hover
+     * Uses requestAnimationFrame for smoother animations and better CPU usage
      * @param {HTMLElement} thumbnailContainer - The thumbnail container element
      * @param {Array} previewFrames - Array of preview frame paths
      * @param {string} uniqueId - Unique identifier for this comp
@@ -440,11 +508,23 @@
         var img = thumbnailContainer.querySelector('.comp-thumbnail');
         if (!img) return;
 
+        // Stop any existing animation for this item
+        if (previewAnimations[uniqueId]) {
+            stopPreviewAnimation(thumbnailContainer, uniqueId);
+        }
+
         var frameIndex = 0;
         var originalSrc = img.src;
+        var lastFrameTime = 0;
+        var isRunning = true;
 
         // Store original src for restoration
         img.dataset.originalSrc = originalSrc;
+
+        // Pre-convert frame paths for faster access
+        var frameSrcs = previewFrames.map(function(path) {
+            return 'file:///' + path.replace(/\\/g, '/').replace(/"/g, '%22');
+        });
 
         // Add preview indicator
         var indicator = thumbnailContainer.querySelector('.preview-indicator');
@@ -456,24 +536,39 @@
         }
         indicator.classList.add('playing');
 
-        // Start animation loop
-        previewAnimations[uniqueId] = setInterval(function() {
-            var framePath = previewFrames[frameIndex];
-            var frameSrc = 'file:///' + framePath.replace(/\\/g, '/').replace(/"/g, '%22');
-            img.src = frameSrc;
-            frameIndex = (frameIndex + 1) % previewFrames.length;
-        }, PREVIEW_FRAME_INTERVAL);
+        // Animation loop using requestAnimationFrame
+        function animate(timestamp) {
+            if (!isRunning) return;
+
+            if (timestamp - lastFrameTime >= PREVIEW_FRAME_INTERVAL) {
+                img.src = frameSrcs[frameIndex];
+                frameIndex = (frameIndex + 1) % frameSrcs.length;
+                lastFrameTime = timestamp;
+            }
+
+            previewAnimations[uniqueId].rafId = requestAnimationFrame(animate);
+        }
+
+        previewAnimations[uniqueId] = {
+            rafId: requestAnimationFrame(animate),
+            stop: function() { isRunning = false; }
+        };
     }
 
     /**
-     * Stops preview animation and restores original thumbnail
+     * OPTIMIZED: Stops preview animation and restores original thumbnail
      * @param {HTMLElement} thumbnailContainer - The thumbnail container element
      * @param {string} uniqueId - Unique identifier for this comp
      */
     function stopPreviewAnimation(thumbnailContainer, uniqueId) {
-        // Clear animation interval
+        // Clear animation
         if (previewAnimations[uniqueId]) {
-            clearInterval(previewAnimations[uniqueId]);
+            if (previewAnimations[uniqueId].stop) {
+                previewAnimations[uniqueId].stop();
+            }
+            if (previewAnimations[uniqueId].rafId) {
+                cancelAnimationFrame(previewAnimations[uniqueId].rafId);
+            }
             delete previewAnimations[uniqueId];
         }
 
@@ -492,7 +587,10 @@
     function renderCompsGrid() {
         // Clear any existing preview animations
         Object.keys(previewAnimations).forEach(function(id) {
-            clearInterval(previewAnimations[id]);
+            if (previewAnimations[id]) {
+                if (previewAnimations[id].stop) previewAnimations[id].stop();
+                if (previewAnimations[id].rafId) cancelAnimationFrame(previewAnimations[id].rafId);
+            }
         });
         previewAnimations = {};
 
@@ -506,7 +604,14 @@
             }
             return;
         }
-        stashGrid.innerHTML = filteredComps.map(function (comp) {
+        // Use DocumentFragment for faster DOM updates
+        var fragment = document.createDocumentFragment();
+        var tempDiv = document.createElement('div');
+
+        // Build HTML string for all items at once
+        var htmlParts = [];
+        for (var ci = 0; ci < filteredComps.length; ci++) {
+            var comp = filteredComps[ci];
             // Escape all user-controlled data to prevent XSS
             var safeUniqueId = escapeHTML(comp.uniqueId);
             var safeCategory = escapeHTML(comp.category);
@@ -523,13 +628,18 @@
             // Generate preview button for items without preview
             var generatePreviewBtn = !hasPreview ? '<button class="generate-preview-btn" title="Generate Preview Animation"><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> Preview</button>' : '';
 
-            return '<div class="stash-item' + previewClass + '" data-unique-id="' + safeUniqueId + '" data-category="' + safeCategory + '" data-aep-path="' + safeAepPath + '" data-name="' + safeName + '"' + previewDataAttr + '>' +
+            // Use lazy loading for thumbnails - data-src instead of src, with loading="lazy"
+            var thumbHtml = thumbSrc
+                ? '<img data-src="' + safeThumbSrc + '" alt="Thumbnail" class="comp-thumbnail lazy-thumb" loading="lazy">'
+                : '<div class="no-preview">No Preview</div>';
+
+            htmlParts.push('<div class="stash-item' + previewClass + '" data-unique-id="' + safeUniqueId + '" data-category="' + safeCategory + '" data-aep-path="' + safeAepPath + '" data-name="' + safeName + '"' + previewDataAttr + '>' +
                 '<div class="item-actions">' +
                     '<button class="action-btn rename-btn" title="Rename"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg></button>' +
                     '<button class="action-btn delete-btn" title="Delete"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg></button>' +
                 '</div>' +
                 '<div class="thumbnail">' +
-                    (thumbSrc ? '<img src="' + safeThumbSrc + '" alt="Thumbnail" class="comp-thumbnail">' : '<div class="no-preview">No Preview</div>') +
+                    thumbHtml +
                     (hasPreview ? '<div class="preview-indicator"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg></div>' : '') +
                     generatePreviewBtn +
                 '</div>' +
@@ -537,20 +647,57 @@
                     '<p class="item-name" title="' + safeName + '">' + safeName + '</p>' +
                     '<button class="import-btn"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg><span>Import</span></button>' +
                 '</div>' +
-            '</div>';
-        }).join('');
+            '</div>');
+        }
 
-        // Handle thumbnail load errors after rendering
-        var thumbnails = stashGrid.querySelectorAll('.comp-thumbnail');
-        thumbnails.forEach(function(img) {
-            img.onerror = function() {
-                this.style.display = 'none';
-                var noPreview = document.createElement('div');
-                noPreview.className = 'no-preview';
-                noPreview.textContent = 'No Preview';
-                this.parentElement.appendChild(noPreview);
-            };
-        });
+        stashGrid.innerHTML = htmlParts.join('');
+
+        // Lazy load thumbnails using Intersection Observer for better performance
+        var lazyThumbnails = stashGrid.querySelectorAll('.lazy-thumb');
+        if ('IntersectionObserver' in window) {
+            var lazyObserver = new IntersectionObserver(function(entries) {
+                entries.forEach(function(entry) {
+                    if (entry.isIntersecting) {
+                        var img = entry.target;
+                        if (img.dataset.src) {
+                            img.src = img.dataset.src;
+                            img.classList.remove('lazy-thumb');
+                            lazyObserver.unobserve(img);
+                        }
+                    }
+                });
+            }, {
+                rootMargin: '100px', // Start loading 100px before visible
+                threshold: 0.01
+            });
+
+            lazyThumbnails.forEach(function(img) {
+                lazyObserver.observe(img);
+                // Handle load errors
+                img.onerror = function() {
+                    this.style.display = 'none';
+                    var noPreview = document.createElement('div');
+                    noPreview.className = 'no-preview';
+                    noPreview.textContent = 'No Preview';
+                    this.parentElement.appendChild(noPreview);
+                };
+            });
+        } else {
+            // Fallback for browsers without IntersectionObserver - load all immediately
+            lazyThumbnails.forEach(function(img) {
+                if (img.dataset.src) {
+                    img.src = img.dataset.src;
+                    img.classList.remove('lazy-thumb');
+                }
+                img.onerror = function() {
+                    this.style.display = 'none';
+                    var noPreview = document.createElement('div');
+                    noPreview.className = 'no-preview';
+                    noPreview.textContent = 'No Preview';
+                    this.parentElement.appendChild(noPreview);
+                };
+            });
+        }
 
         // Add hover event listeners for preview animation
         var stashItems = stashGrid.querySelectorAll('.stash-item.has-preview');
