@@ -140,6 +140,44 @@
                 </div>
 
                 <div class="top-bar-right">
+                    <!-- Sort Controls -->
+                    <div class="sort-controls">
+                        <select id="sort-select" title="Sort by">
+                            <option value="name-asc">Name (A-Z)</option>
+                            <option value="name-desc">Name (Z-A)</option>
+                            <option value="date-desc">Newest First</option>
+                            <option value="date-asc">Oldest First</option>
+                            <option value="duration-desc">Longest First</option>
+                            <option value="duration-asc">Shortest First</option>
+                        </select>
+                    </div>
+
+                    <!-- Grid Size Toggle -->
+                    <div class="grid-size-controls">
+                        <button class="grid-size-btn" data-size="compact" title="Compact view">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                                <rect x="3" y="3" width="7" height="7"></rect>
+                                <rect x="14" y="3" width="7" height="7"></rect>
+                                <rect x="3" y="14" width="7" height="7"></rect>
+                                <rect x="14" y="14" width="7" height="7"></rect>
+                            </svg>
+                        </button>
+                        <button class="grid-size-btn active" data-size="normal" title="Normal view">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                                <rect x="3" y="3" width="8" height="8"></rect>
+                                <rect x="13" y="3" width="8" height="8"></rect>
+                                <rect x="3" y="13" width="8" height="8"></rect>
+                                <rect x="13" y="13" width="8" height="8"></rect>
+                            </svg>
+                        </button>
+                        <button class="grid-size-btn" data-size="large" title="Large view">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                                <rect x="3" y="3" width="18" height="8"></rect>
+                                <rect x="3" y="13" width="18" height="8"></rect>
+                            </svg>
+                        </button>
+                    </div>
+
                     <!-- Dropdown Menu -->
                     <div class="dropdown-container" id="main-dropdown">
                         <button class="dropdown-toggle" id="dropdown-toggle-btn">
