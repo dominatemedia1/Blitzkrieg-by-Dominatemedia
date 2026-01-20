@@ -30,6 +30,27 @@
     var confirmRenameBtn = document.getElementById('confirm-rename-btn');
     var cancelRenameBtn = document.getElementById('cancel-rename-btn');
 
+    // Category rename modal elements
+    var renameCategoryModal = document.getElementById('rename-category-modal');
+    var categoryToRenameCurrentName = document.getElementById('category-to-rename-current-name');
+    var newCategoryNameInput = document.getElementById('new-category-name-input');
+    var confirmRenameCategoryBtn = document.getElementById('confirm-rename-category-btn');
+    var cancelRenameCategoryBtn = document.getElementById('cancel-rename-category-btn');
+
+    // Category delete modal elements
+    var deleteCategoryModal = document.getElementById('delete-category-modal');
+    var categoryToDeleteName = document.getElementById('category-to-delete-name');
+    var confirmDeleteCategoryBtn = document.getElementById('confirm-delete-category-btn');
+    var cancelDeleteCategoryBtn = document.getElementById('cancel-delete-category-btn');
+
+    // Move comp modal elements
+    var moveCompModal = document.getElementById('move-comp-modal');
+    var compToMoveName = document.getElementById('comp-to-move-name');
+    var moveToCategorySelect = document.getElementById('move-to-category-select');
+    var moveToNewCategoryInput = document.getElementById('move-to-new-category-input');
+    var confirmMoveCompBtn = document.getElementById('confirm-move-comp-btn');
+    var cancelMoveCompBtn = document.getElementById('cancel-move-comp-btn');
+
     var creditBtn = document.getElementById('credit-button');
     var toastElement = document.getElementById('toast-notification');
 
@@ -107,8 +128,15 @@
     var activeCategory = 'All';
     var currentDeleteInfo = null;
     var currentRenameInfo = null;
+    var currentCategoryRenameInfo = null;
+    var currentCategoryDeleteInfo = null;
+    var currentMoveCompInfo = null;
     var isLoading = false; // Prevents race conditions in async operations
     var cachedLibraryPath = null; // In-memory cache for library path
+
+    // Drag and drop state
+    var draggedComp = null;
+    var dragOverCategory = null;
 
     // UI State - Sorting and Grid Size
     var currentSortOrder = 'name-asc'; // Default sort
@@ -1076,6 +1104,21 @@
         cancelRenameBtn.addEventListener('click', function () { renameModal.style.display = 'none'; currentRenameInfo = null; });
         confirmRenameBtn.addEventListener('click', executeRename);
 
+        // Category rename modal handlers
+        if (cancelRenameCategoryBtn) cancelRenameCategoryBtn.addEventListener('click', function () { renameCategoryModal.style.display = 'none'; currentCategoryRenameInfo = null; });
+        if (confirmRenameCategoryBtn) confirmRenameCategoryBtn.addEventListener('click', executeCategoryRename);
+
+        // Category delete modal handlers
+        if (cancelDeleteCategoryBtn) cancelDeleteCategoryBtn.addEventListener('click', function () { deleteCategoryModal.style.display = 'none'; currentCategoryDeleteInfo = null; });
+        if (confirmDeleteCategoryBtn) confirmDeleteCategoryBtn.addEventListener('click', executeCategoryDelete);
+
+        // Move comp modal handlers
+        if (cancelMoveCompBtn) cancelMoveCompBtn.addEventListener('click', function () { moveCompModal.style.display = 'none'; currentMoveCompInfo = null; });
+        if (confirmMoveCompBtn) confirmMoveCompBtn.addEventListener('click', executeMoveComp);
+
+        // Initialize keyboard shortcuts
+        initKeyboardShortcuts();
+
         hideSpinner();
     }
 
@@ -1133,19 +1176,74 @@
             }
         }
 
-        // Render categories in the sidebar
+        // Render categories in the sidebar with action buttons
         categoryFiltersContainer.innerHTML = categories.map(function(cat) {
             var safeCat = escapeHTML(cat);
             var count = allComps.filter(function(c) { return c.category === cat; }).length;
             var isActive = cat === activeCategory;
-            return '<div class="nav-item' + (isActive ? ' active' : '') + '" data-category="' + safeCat + '">' +
+            return '<div class="nav-item' + (isActive ? ' active' : '') + '" data-category="' + safeCat + '" draggable="false">' +
                 '<svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
                     '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>' +
                 '</svg>' +
                 '<span class="nav-label">' + safeCat + '</span>' +
                 '<span class="nav-count">' + count + '</span>' +
+                '<div class="nav-item-actions">' +
+                    '<button class="nav-action-btn rename-category-btn" title="Rename category">' +
+                        '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>' +
+                    '</button>' +
+                    '<button class="nav-action-btn delete-category-btn" title="Delete category">' +
+                        '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>' +
+                    '</button>' +
+                '</div>' +
             '</div>';
         }).join('');
+
+        // Add event listeners for category actions
+        var categoryItems = categoryFiltersContainer.querySelectorAll('.nav-item');
+        categoryItems.forEach(function(item) {
+            var categoryName = item.dataset.category;
+
+            // Rename button
+            var renameBtn = item.querySelector('.rename-category-btn');
+            if (renameBtn) {
+                renameBtn.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    promptCategoryRename(categoryName);
+                });
+            }
+
+            // Delete button
+            var deleteBtn = item.querySelector('.delete-category-btn');
+            if (deleteBtn) {
+                deleteBtn.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    promptCategoryDelete(categoryName);
+                });
+            }
+
+            // Drag and drop for moving comps
+            item.addEventListener('dragover', function(e) {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'move';
+                item.classList.add('drag-over');
+            });
+
+            item.addEventListener('dragleave', function(e) {
+                item.classList.remove('drag-over');
+            });
+
+            item.addEventListener('drop', function(e) {
+                e.preventDefault();
+                item.classList.remove('drag-over');
+                if (draggedComp) {
+                    var targetCategory = item.dataset.category;
+                    if (targetCategory && targetCategory !== draggedComp.category) {
+                        executeMoveCompDirect(draggedComp.uniqueId, draggedComp.category, targetCategory, draggedComp.name);
+                    }
+                }
+                draggedComp = null;
+            });
+        });
     }
 
     // Preview animation state - optimized with requestAnimationFrame
@@ -1368,8 +1466,9 @@
                 ? '<img data-src="' + safeThumbSrc + '" alt="Thumbnail" class="comp-thumbnail lazy-thumb" loading="lazy">'
                 : '<div class="no-preview">No Preview</div>';
 
-            htmlParts.push('<div class="stash-item' + previewClass + '" data-unique-id="' + safeUniqueId + '" data-category="' + safeCategory + '" data-aep-path="' + safeAepPath + '" data-name="' + safeName + '"' + previewDataAttr + durationAttr + '>' +
+            htmlParts.push('<div class="stash-item' + previewClass + '" data-unique-id="' + safeUniqueId + '" data-category="' + safeCategory + '" data-aep-path="' + safeAepPath + '" data-name="' + safeName + '"' + previewDataAttr + durationAttr + ' draggable="true">' +
                 '<div class="item-actions">' +
+                    '<button class="action-btn move-btn" title="Move to category"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path><line x1="12" y1="11" x2="12" y2="17"></line><polyline points="9 14 12 11 15 14"></polyline></svg></button>' +
                     '<button class="action-btn rename-btn" title="Rename"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg></button>' +
                     '<button class="action-btn delete-btn" title="Delete"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg></button>' +
                 '</div>' +
@@ -1448,6 +1547,33 @@
                 }
             }
         });
+
+        // Add drag and drop event handlers for all stash items
+        var allStashItems = stashGrid.querySelectorAll('.stash-item');
+        allStashItems.forEach(function(item) {
+            // Drag start
+            item.addEventListener('dragstart', function(e) {
+                draggedComp = {
+                    uniqueId: item.dataset.uniqueId,
+                    category: item.dataset.category,
+                    name: item.dataset.name
+                };
+                item.classList.add('dragging');
+                e.dataTransfer.effectAllowed = 'move';
+                e.dataTransfer.setData('text/plain', item.dataset.uniqueId);
+            });
+
+            // Drag end
+            item.addEventListener('dragend', function(e) {
+                item.classList.remove('dragging');
+                draggedComp = null;
+                // Remove drag-over class from all categories
+                var allCategories = document.querySelectorAll('.nav-item');
+                allCategories.forEach(function(cat) {
+                    cat.classList.remove('drag-over');
+                });
+            });
+        });
     }
 
     function showPlaceholder(message) { stashGrid.innerHTML = '<p class="placeholder-text">' + message + '</p>'; }
@@ -1468,6 +1594,7 @@
         if (e.target.closest('.import-btn')) { importComp(aepPath); }
         else if (e.target.closest('.rename-btn')) { renameComp(uniqueId, category, name); }
         else if (e.target.closest('.delete-btn')) { promptDelete(uniqueId, category, name); }
+        else if (e.target.closest('.move-btn')) { promptMoveComp(uniqueId, category, name); }
         else if (e.target.closest('.generate-preview-btn')) { generatePreview(aepPath, name); }
     }
 
@@ -1659,11 +1786,337 @@
                 return;
             }
             if (result.indexOf('Success') === 0) {
-                showToast('Imported successfully.');
+                showToast('Imported and opened in timeline!');
             } else {
                 showToast(result, true);
             }
         });
+    }
+
+    /* --------- Category Operations --------- */
+
+    /**
+     * Opens the category rename modal
+     * @param {string} categoryName - Current category name
+     */
+    function promptCategoryRename(categoryName) {
+        currentCategoryRenameInfo = { category: categoryName };
+        if (categoryToRenameCurrentName) categoryToRenameCurrentName.textContent = categoryName;
+        if (newCategoryNameInput) newCategoryNameInput.value = categoryName;
+        if (renameCategoryModal) renameCategoryModal.style.display = 'flex';
+        // Focus the input
+        setTimeout(function() {
+            if (newCategoryNameInput) {
+                newCategoryNameInput.focus();
+                newCategoryNameInput.select();
+            }
+        }, 100);
+    }
+
+    /**
+     * Executes the category rename
+     */
+    function executeCategoryRename() {
+        var info = currentCategoryRenameInfo;
+        if (!info) return;
+
+        var newName = newCategoryNameInput.value.trim();
+        if (!newName) {
+            showToast('Please enter a new name.', true);
+            return;
+        }
+        // Validate new name
+        if (newName.indexOf('/') !== -1 || newName.indexOf('\\') !== -1 || newName.indexOf('..') !== -1) {
+            showToast('Name cannot contain path separators.', true);
+            return;
+        }
+
+        var libraryPath = getLibraryPath();
+        if (!isValidPath(libraryPath)) {
+            showToast('Invalid library path.', true);
+            renameCategoryModal.style.display = 'none';
+            currentCategoryRenameInfo = null;
+            return;
+        }
+
+        renameCategoryModal.style.display = 'none';
+        showSpinner();
+
+        var safePath = escapeForExtendScript(libraryPath);
+        var safeOldName = escapeForExtendScript(info.category);
+        var safeNewName = escapeForExtendScript(newName);
+
+        csInterface.evalScript('renameCategory("' + safePath + '","' + safeOldName + '","' + safeNewName + '")', function (result) {
+            hideSpinner();
+            currentCategoryRenameInfo = null;
+            if (result && result.indexOf('Success') === 0) {
+                showToast('Category renamed successfully.');
+                // Update active category if it was renamed
+                if (activeCategory === info.category) {
+                    activeCategory = newName;
+                }
+                loadLibrary(libraryPath);
+            } else {
+                showToast(result || 'Rename failed', true);
+            }
+        });
+    }
+
+    /**
+     * Opens the category delete confirmation modal
+     * @param {string} categoryName - Category to delete
+     */
+    function promptCategoryDelete(categoryName) {
+        currentCategoryDeleteInfo = { category: categoryName };
+        if (categoryToDeleteName) categoryToDeleteName.textContent = categoryName;
+        if (deleteCategoryModal) deleteCategoryModal.style.display = 'flex';
+    }
+
+    /**
+     * Executes the category deletion
+     */
+    function executeCategoryDelete() {
+        var info = currentCategoryDeleteInfo;
+        if (!info) return;
+
+        var libraryPath = getLibraryPath();
+        if (!isValidPath(libraryPath)) {
+            showToast('Invalid library path.', true);
+            deleteCategoryModal.style.display = 'none';
+            currentCategoryDeleteInfo = null;
+            return;
+        }
+
+        deleteCategoryModal.style.display = 'none';
+        showSpinner();
+
+        var safePath = escapeForExtendScript(libraryPath);
+        var safeCategoryName = escapeForExtendScript(info.category);
+
+        csInterface.evalScript('deleteCategory("' + safePath + '","' + safeCategoryName + '")', function (result) {
+            hideSpinner();
+            currentCategoryDeleteInfo = null;
+            if (result && result.indexOf('Success') === 0) {
+                showToast('Category deleted successfully.');
+                // Reset active category if it was deleted
+                if (activeCategory === info.category) {
+                    activeCategory = 'All';
+                }
+                loadLibrary(libraryPath);
+            } else {
+                showToast(result || 'Delete failed', true);
+            }
+        });
+    }
+
+    /* --------- Move Comp Operations --------- */
+
+    /**
+     * Opens the move comp modal
+     * @param {string} uniqueId - Comp unique ID
+     * @param {string} category - Current category
+     * @param {string} name - Comp display name
+     */
+    function promptMoveComp(uniqueId, category, name) {
+        currentMoveCompInfo = { uniqueId: uniqueId, category: category, name: name };
+        if (compToMoveName) compToMoveName.textContent = name;
+
+        // Populate category dropdown excluding current category
+        var categories = Array.from(new Set(allComps.map(function(c) { return c.category; }))).sort();
+        var otherCategories = categories.filter(function(cat) { return cat !== category; });
+
+        if (moveToCategorySelect) {
+            moveToCategorySelect.innerHTML = otherCategories.map(function(cat) {
+                return '<option value="' + escapeHTML(cat) + '">' + escapeHTML(cat) + '</option>';
+            }).join('');
+            moveToCategorySelect.disabled = otherCategories.length === 0;
+            if (otherCategories.length === 0) {
+                moveToCategorySelect.innerHTML = '<option value="">No other categories</option>';
+            }
+        }
+
+        if (moveToNewCategoryInput) moveToNewCategoryInput.value = '';
+        if (moveCompModal) moveCompModal.style.display = 'flex';
+    }
+
+    /**
+     * Executes the move comp operation from modal
+     */
+    function executeMoveComp() {
+        var info = currentMoveCompInfo;
+        if (!info) return;
+
+        var newCategoryName = moveToNewCategoryInput.value.trim();
+        var existingCategory = moveToCategorySelect.value;
+        var targetCategory = newCategoryName || existingCategory;
+
+        if (!targetCategory) {
+            showToast('Please select or create a category.', true);
+            return;
+        }
+
+        // Validate new category name
+        if (targetCategory.indexOf('/') !== -1 || targetCategory.indexOf('\\') !== -1 || targetCategory.indexOf('..') !== -1) {
+            showToast('Category name cannot contain path separators.', true);
+            return;
+        }
+
+        if (targetCategory === info.category) {
+            showToast('Comp is already in that category.', true);
+            return;
+        }
+
+        moveCompModal.style.display = 'none';
+        executeMoveCompDirect(info.uniqueId, info.category, targetCategory, info.name);
+        currentMoveCompInfo = null;
+    }
+
+    /**
+     * Directly executes move comp (used by drag-drop and modal)
+     * @param {string} uniqueId - Comp unique ID
+     * @param {string} oldCategory - Current category
+     * @param {string} newCategory - Target category
+     * @param {string} compName - Comp name for toast
+     */
+    function executeMoveCompDirect(uniqueId, oldCategory, newCategory, compName) {
+        var libraryPath = getLibraryPath();
+        if (!isValidPath(libraryPath)) {
+            showToast('Invalid library path.', true);
+            return;
+        }
+
+        showSpinner();
+
+        var safePath = escapeForExtendScript(libraryPath);
+        var safeUniqueId = escapeForExtendScript(uniqueId);
+        var safeOldCategory = escapeForExtendScript(oldCategory);
+        var safeNewCategory = escapeForExtendScript(newCategory);
+
+        csInterface.evalScript('moveCompToCategory("' + safePath + '","' + safeUniqueId + '","' + safeOldCategory + '","' + safeNewCategory + '")', function (result) {
+            hideSpinner();
+            if (result && result.indexOf('Success') === 0) {
+                showToast('"' + compName + '" moved to ' + newCategory + '.');
+                loadLibrary(libraryPath);
+            } else {
+                showToast(result || 'Move failed', true);
+            }
+        });
+    }
+
+    /* --------- Keyboard Shortcuts --------- */
+
+    /**
+     * Initialize keyboard shortcuts for common actions
+     */
+    function initKeyboardShortcuts() {
+        document.addEventListener('keydown', function(e) {
+            // Don't trigger shortcuts when typing in an input
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') {
+                // Allow Escape to close modals even when in input
+                if (e.key === 'Escape') {
+                    closeAllModals();
+                }
+                // Allow Enter to confirm modals
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    handleModalEnterKey(e);
+                }
+                return;
+            }
+
+            // Escape - close all modals
+            if (e.key === 'Escape') {
+                closeAllModals();
+            }
+
+            // Ctrl/Cmd + F - focus search
+            if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+                e.preventDefault();
+                searchInput.focus();
+            }
+
+            // Ctrl/Cmd + R - refresh library
+            if ((e.ctrlKey || e.metaKey) && e.key === 'r') {
+                e.preventDefault();
+                var libraryPath = getLibraryPath();
+                if (libraryPath) {
+                    loadLibrary(libraryPath);
+                    showToast('Library refreshed.');
+                }
+            }
+
+            // Ctrl/Cmd + , - open settings
+            if ((e.ctrlKey || e.metaKey) && e.key === ',') {
+                e.preventDefault();
+                openSettings();
+            }
+
+            // A - show all templates
+            if (e.key === 'a' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                activeCategory = 'All';
+                renderUI();
+            }
+
+            // 1-9 - switch to category by number
+            if (e.key >= '1' && e.key <= '9' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                var categories = Array.from(new Set(allComps.map(function(c) { return c.category; }))).sort();
+                var index = parseInt(e.key) - 1;
+                if (index < categories.length) {
+                    activeCategory = categories[index];
+                    renderUI();
+                }
+            }
+        });
+    }
+
+    /**
+     * Handle Enter key in modals to confirm
+     */
+    function handleModalEnterKey(e) {
+        if (renameModal.style.display === 'flex') {
+            e.preventDefault();
+            executeRename();
+        } else if (renameCategoryModal && renameCategoryModal.style.display === 'flex') {
+            e.preventDefault();
+            executeCategoryRename();
+        } else if (moveCompModal && moveCompModal.style.display === 'flex') {
+            e.preventDefault();
+            executeMoveComp();
+        } else if (addCompModal.style.display === 'flex') {
+            e.preventDefault();
+            executeAddComp();
+        }
+    }
+
+    /**
+     * Close all open modals
+     */
+    function closeAllModals() {
+        deleteModal.style.display = 'none';
+        currentDeleteInfo = null;
+
+        addCompModal.style.display = 'none';
+
+        renameModal.style.display = 'none';
+        currentRenameInfo = null;
+
+        if (renameCategoryModal) {
+            renameCategoryModal.style.display = 'none';
+            currentCategoryRenameInfo = null;
+        }
+
+        if (deleteCategoryModal) {
+            deleteCategoryModal.style.display = 'none';
+            currentCategoryDeleteInfo = null;
+        }
+
+        if (moveCompModal) {
+            moveCompModal.style.display = 'none';
+            currentMoveCompInfo = null;
+        }
+
+        if (settingsModal) settingsModal.style.display = 'none';
+        if (authModal) authModal.style.display = 'none';
+        if (adminModal) adminModal.style.display = 'none';
     }
 
     /* --------- Start the app --------- */

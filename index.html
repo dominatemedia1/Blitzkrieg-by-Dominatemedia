@@ -74,6 +74,54 @@
         </div>
     </div>
 
+    <!-- === RENAME CATEGORY MODAL === -->
+    <div id="rename-category-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-box">
+            <h3>Rename Category</h3>
+            <p>Enter a new name for the category "<strong id="category-to-rename-current-name"></strong>".</p>
+            <div class="form-group">
+                <label for="new-category-name-input">New Category Name</label>
+                <input type="text" id="new-category-name-input" placeholder="Enter new category name...">
+            </div>
+            <div class="modal-buttons">
+                <button id="cancel-rename-category-btn" class="button-secondary">Cancel</button>
+                <button id="confirm-rename-category-btn" class="button-primary" style="width:auto; margin-bottom:0;">Save Changes</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- === DELETE CATEGORY MODAL === -->
+    <div id="delete-category-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-box">
+            <h3>Delete Category</h3>
+            <p>Are you sure you want to permanently delete the category "<strong id="category-to-delete-name"></strong>" and ALL its compositions? This action cannot be undone.</p>
+            <div class="modal-buttons">
+                <button id="cancel-delete-category-btn" class="button-secondary">Cancel</button>
+                <button id="confirm-delete-category-btn" class="button-danger">Delete Category</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- === MOVE COMP MODAL === -->
+    <div id="move-comp-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-box">
+            <h3>Move Composition</h3>
+            <p>Move "<strong id="comp-to-move-name"></strong>" to a different category.</p>
+            <div class="form-group">
+                <label for="move-to-category-select">Select Category</label>
+                <select id="move-to-category-select"></select>
+            </div>
+            <div class="form-group">
+                <label for="move-to-new-category-input">Or Create New Category</label>
+                <input type="text" id="move-to-new-category-input" placeholder="e.g., Titles, VFX, Lower Thirds">
+            </div>
+            <div class="modal-buttons">
+                <button id="cancel-move-comp-btn" class="button-secondary">Cancel</button>
+                <button id="confirm-move-comp-btn" class="button-primary" style="width:auto; margin-bottom:0;">Move Comp</button>
+            </div>
+        </div>
+    </div>
+
     <!-- === LOADING SPINNER === -->
     <div id="loading-spinner" style="display: none;"></div>
 
