@@ -1650,3 +1650,243 @@ header {
         grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
     }
 }
+
+/* ============================================
+   CATEGORY ACTION BUTTONS
+   ============================================ */
+
+.nav-item-actions {
+    display: flex;
+    gap: 2px;
+    margin-left: auto;
+    opacity: 0;
+    transition: opacity var(--transition-fast);
+}
+
+.nav-item:hover .nav-item-actions {
+    opacity: 1;
+}
+
+.nav-action-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.nav-action-btn:hover {
+    background-color: var(--bg-card-hover);
+    color: var(--text-primary);
+}
+
+.nav-action-btn.rename-category-btn:hover {
+    color: var(--brand-green);
+}
+
+.nav-action-btn.delete-category-btn:hover {
+    color: var(--danger-color);
+    background-color: rgba(220, 53, 69, 0.15);
+}
+
+.nav-action-btn svg {
+    width: 12px;
+    height: 12px;
+}
+
+/* ============================================
+   DRAG AND DROP STYLES
+   ============================================ */
+
+/* Dragging state for comp items */
+.stash-item.dragging {
+    opacity: 0.5;
+    transform: scale(0.95);
+    border-color: var(--brand-green);
+    box-shadow: 0 0 20px var(--brand-green-glow);
+}
+
+.stash-item[draggable="true"] {
+    cursor: grab;
+}
+
+.stash-item[draggable="true"]:active {
+    cursor: grabbing;
+}
+
+/* Drop target highlight for categories */
+.nav-item.drag-over {
+    background-color: var(--brand-green-subtle) !important;
+    border-left-color: var(--brand-green) !important;
+    box-shadow: inset 0 0 0 2px var(--brand-green);
+}
+
+.nav-item.drag-over::after {
+    content: 'Drop here';
+    position: absolute;
+    right: var(--spacing-sm);
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--brand-green);
+    letter-spacing: 0.5px;
+}
+
+/* ============================================
+   MOVE BUTTON STYLES
+   ============================================ */
+
+.action-btn.move-btn:hover {
+    background-color: var(--brand-green-light);
+}
+
+/* ============================================
+   ENHANCED ANIMATIONS
+   ============================================ */
+
+/* Smooth card animations */
+.stash-item {
+    animation: fadeInUp 0.3s ease forwards;
+}
+
+@keyframes fadeInUp {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Staggered grid animation */
+.stash-item:nth-child(1) { animation-delay: 0.02s; }
+.stash-item:nth-child(2) { animation-delay: 0.04s; }
+.stash-item:nth-child(3) { animation-delay: 0.06s; }
+.stash-item:nth-child(4) { animation-delay: 0.08s; }
+.stash-item:nth-child(5) { animation-delay: 0.10s; }
+.stash-item:nth-child(6) { animation-delay: 0.12s; }
+.stash-item:nth-child(7) { animation-delay: 0.14s; }
+.stash-item:nth-child(8) { animation-delay: 0.16s; }
+
+/* Import success animation */
+@keyframes importPulse {
+    0% {
+        box-shadow: 0 0 0 0 var(--brand-green-glow);
+    }
+    50% {
+        box-shadow: 0 0 20px 10px var(--brand-green-glow);
+    }
+    100% {
+        box-shadow: 0 0 0 0 var(--brand-green-glow);
+    }
+}
+
+.stash-item.importing {
+    animation: importPulse 0.6s ease;
+}
+
+/* Category transition animations */
+.nav-item {
+    transition: all var(--transition-normal);
+}
+
+/* Toast animation enhancement */
+#toast-notification {
+    animation: none;
+}
+
+#toast-notification.show {
+    animation: toastSlideUp 0.3s ease;
+}
+
+@keyframes toastSlideUp {
+    from {
+        opacity: 0;
+        transform: translateX(-50%) translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+    }
+}
+
+/* ============================================
+   KEYBOARD SHORTCUT HINTS
+   ============================================ */
+
+/* Add subtle shortcut hints on hover */
+.nav-item[data-category="All"]::before {
+    content: 'A';
+    position: absolute;
+    right: var(--spacing-lg);
+    font-size: 9px;
+    font-weight: 600;
+    color: var(--text-muted);
+    opacity: 0;
+    transition: opacity var(--transition-fast);
+    padding: 2px 5px;
+    background: var(--bg-card);
+    border-radius: var(--radius-sm);
+}
+
+#category-filters .nav-item:nth-child(1)::before { content: '1'; }
+#category-filters .nav-item:nth-child(2)::before { content: '2'; }
+#category-filters .nav-item:nth-child(3)::before { content: '3'; }
+#category-filters .nav-item:nth-child(4)::before { content: '4'; }
+#category-filters .nav-item:nth-child(5)::before { content: '5'; }
+#category-filters .nav-item:nth-child(6)::before { content: '6'; }
+#category-filters .nav-item:nth-child(7)::before { content: '7'; }
+#category-filters .nav-item:nth-child(8)::before { content: '8'; }
+#category-filters .nav-item:nth-child(9)::before { content: '9'; }
+
+/* ============================================
+   FOCUS STATES FOR ACCESSIBILITY
+   ============================================ */
+
+.nav-item:focus-visible,
+.stash-item:focus-visible,
+.action-btn:focus-visible,
+.nav-action-btn:focus-visible,
+button:focus-visible {
+    outline: 2px solid var(--brand-green);
+    outline-offset: 2px;
+}
+
+/* ============================================
+   SCROLLBAR IMPROVEMENTS
+   ============================================ */
+
+#category-filters {
+    display: flex;
+    flex-direction: column;
+    flex-wrap: nowrap;
+    gap: 0;
+    max-height: calc(100vh - 400px);
+    overflow-y: auto;
+}
+
+#category-filters::-webkit-scrollbar {
+    width: 4px;
+}
+
+#category-filters::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+#category-filters::-webkit-scrollbar-thumb {
+    background: var(--border-color);
+    border-radius: 2px;
+}
+
+#category-filters::-webkit-scrollbar-thumb:hover {
+    background: var(--text-muted);
+}

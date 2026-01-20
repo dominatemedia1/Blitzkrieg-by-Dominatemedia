@@ -683,6 +683,16 @@ function importComp(aepPath) {
             mainComp.name = compName;
         }
 
+        // AUTO-OPEN: Open the imported comp in the viewer/timeline
+        if (mainComp) {
+            try {
+                // Open the comp in the Composition panel (timeline)
+                mainComp.openInViewer();
+            } catch (viewerErr) {
+                $.writeln("Blitzkrieg: Warning - Could not open comp in viewer: " + viewerErr.toString());
+            }
+        }
+
         app.endUndoGroup();
         return mainComp ? "Success: '" + compName + "' imported." : "Success: Project imported.";
 
@@ -762,6 +772,244 @@ function deleteStashedComp(libraryPath, category, uniqueId) {
             return "Success";
         }
         return "Error: Folder not found.";
+    } catch(e) {
+        return "Error: " + e.toString();
+    }
+}
+
+/**
+ * RENAME CATEGORY - Renames a category folder in the library
+ * @param {string} libraryPath - Path to the library root
+ * @param {string} oldName - Current category name
+ * @param {string} newName - New category name
+ * @returns {string} - Success message or error
+ */
+function renameCategory(libraryPath, oldName, newName) {
+    // Validate inputs
+    if (!isValidPath(libraryPath)) {
+        return "Error: Invalid library path.";
+    }
+    if (!isValidName(oldName) || !isValidName(newName)) {
+        return "Error: Invalid category name. Names cannot contain path separators.";
+    }
+    if (oldName === newName) {
+        return "Error: New name is the same as the current name.";
+    }
+
+    try {
+        var oldFolder = new Folder(libraryPath + "/" + oldName);
+        if (!oldFolder.exists) {
+            return "Error: Category folder not found.";
+        }
+
+        // Check if a category with the new name already exists
+        var newFolder = new Folder(libraryPath + "/" + newName);
+        if (newFolder.exists) {
+            return "Error: A category with that name already exists.";
+        }
+
+        // Rename the folder
+        if (oldFolder.rename(newName)) {
+            // Update metadata.json in each comp folder to reflect new category
+            var renamedFolder = new Folder(libraryPath + "/" + newName);
+            var compFolders = renamedFolder.getFiles(function(f) { return f instanceof Folder; });
+            for (var i = 0; i < compFolders.length; i++) {
+                var metadataFile = new File(compFolders[i].fsName + "/metadata.json");
+                if (metadataFile.exists) {
+                    try {
+                        metadataFile.open('r');
+                        metadataFile.encoding = 'UTF-8';
+                        var metadata = JSON.parse(metadataFile.read());
+                        metadataFile.close();
+
+                        metadata.category = newName;
+
+                        metadataFile.open('w');
+                        metadataFile.encoding = 'UTF-8';
+                        metadataFile.write(JSON.stringify(metadata));
+                        metadataFile.close();
+                    } catch (metaErr) {
+                        $.writeln("Blitzkrieg: Warning - Could not update metadata for comp: " + metaErr.toString());
+                    }
+                }
+            }
+            return "Success: Category renamed to '" + newName + "'.";
+        } else {
+            return "Error: Could not rename the category folder.";
+        }
+    } catch(e) {
+        return "Error: " + e.toString();
+    }
+}
+
+/**
+ * DELETE CATEGORY - Deletes an entire category and all its comps
+ * @param {string} libraryPath - Path to the library root
+ * @param {string} categoryName - Category to delete
+ * @returns {string} - Success message or error
+ */
+function deleteCategory(libraryPath, categoryName) {
+    // Validate inputs
+    if (!isValidPath(libraryPath)) {
+        return "Error: Invalid library path.";
+    }
+    if (!isValidName(categoryName)) {
+        return "Error: Invalid category name.";
+    }
+
+    try {
+        var categoryFolder = new Folder(libraryPath + "/" + categoryName);
+        if (!categoryFolder.exists) {
+            return "Error: Category folder not found.";
+        }
+
+        function removeFolderRecursive(folder) {
+            var items = folder.getFiles();
+            for (var i = 0; i < items.length; i++) {
+                if (items[i] instanceof File) {
+                    items[i].remove();
+                } else if (items[i] instanceof Folder) {
+                    removeFolderRecursive(items[i]);
+                }
+            }
+            folder.remove();
+        }
+
+        removeFolderRecursive(categoryFolder);
+        return "Success: Category '" + categoryName + "' deleted.";
+    } catch(e) {
+        return "Error: " + e.toString();
+    }
+}
+
+/**
+ * MOVE COMP TO CATEGORY - Moves a comp from one category to another
+ * @param {string} libraryPath - Path to the library root
+ * @param {string} uniqueId - The comp's unique folder ID
+ * @param {string} oldCategory - Current category name
+ * @param {string} newCategory - Target category name
+ * @returns {string} - Success message or error
+ */
+function moveCompToCategory(libraryPath, uniqueId, oldCategory, newCategory) {
+    // Validate inputs
+    if (!isValidPath(libraryPath)) {
+        return "Error: Invalid library path.";
+    }
+    if (!isValidName(uniqueId) || !isValidName(oldCategory) || !isValidName(newCategory)) {
+        return "Error: Invalid parameters.";
+    }
+    if (oldCategory === newCategory) {
+        return "Error: Comp is already in that category.";
+    }
+
+    try {
+        var sourceFolder = new Folder(libraryPath + "/" + oldCategory + "/" + uniqueId);
+        if (!sourceFolder.exists) {
+            return "Error: Source comp folder not found.";
+        }
+
+        // Ensure target category exists
+        var targetCategoryFolder = new Folder(libraryPath + "/" + newCategory);
+        if (!targetCategoryFolder.exists) {
+            if (!targetCategoryFolder.create()) {
+                return "Error: Could not create target category folder.";
+            }
+        }
+
+        var targetFolder = new Folder(libraryPath + "/" + newCategory + "/" + uniqueId);
+        if (targetFolder.exists) {
+            return "Error: A comp with the same ID already exists in the target category.";
+        }
+
+        // Move by renaming (works on same volume)
+        // First try direct rename
+        var targetPath = libraryPath + "/" + newCategory + "/" + uniqueId;
+
+        // Copy all files recursively
+        function copyFolderRecursive(source, target) {
+            if (!target.exists) target.create();
+            var items = source.getFiles();
+            for (var i = 0; i < items.length; i++) {
+                if (items[i] instanceof File) {
+                    var destFile = new File(target.fsName + "/" + items[i].name);
+                    items[i].copy(destFile);
+                } else if (items[i] instanceof Folder) {
+                    var destFolder = new Folder(target.fsName + "/" + items[i].name);
+                    copyFolderRecursive(items[i], destFolder);
+                }
+            }
+        }
+
+        function removeFolderRecursive(folder) {
+            var items = folder.getFiles();
+            for (var i = 0; i < items.length; i++) {
+                if (items[i] instanceof File) {
+                    items[i].remove();
+                } else if (items[i] instanceof Folder) {
+                    removeFolderRecursive(items[i]);
+                }
+            }
+            folder.remove();
+        }
+
+        // Copy to new location
+        copyFolderRecursive(sourceFolder, targetFolder);
+
+        // Update metadata.json with new category
+        var metadataFile = new File(targetFolder.fsName + "/metadata.json");
+        if (metadataFile.exists) {
+            try {
+                metadataFile.open('r');
+                metadataFile.encoding = 'UTF-8';
+                var metadata = JSON.parse(metadataFile.read());
+                metadataFile.close();
+
+                metadata.category = newCategory;
+
+                metadataFile.open('w');
+                metadataFile.encoding = 'UTF-8';
+                metadataFile.write(JSON.stringify(metadata));
+                metadataFile.close();
+            } catch (metaErr) {
+                $.writeln("Blitzkrieg: Warning - Could not update metadata: " + metaErr.toString());
+            }
+        }
+
+        // Remove original folder
+        removeFolderRecursive(sourceFolder);
+
+        return "Success: Comp moved to '" + newCategory + "'.";
+    } catch(e) {
+        return "Error: " + e.toString();
+    }
+}
+
+/**
+ * CREATE CATEGORY - Creates a new empty category folder
+ * @param {string} libraryPath - Path to the library root
+ * @param {string} categoryName - Name of the new category
+ * @returns {string} - Success message or error
+ */
+function createCategory(libraryPath, categoryName) {
+    // Validate inputs
+    if (!isValidPath(libraryPath)) {
+        return "Error: Invalid library path.";
+    }
+    if (!isValidName(categoryName)) {
+        return "Error: Invalid category name. Names cannot contain path separators.";
+    }
+
+    try {
+        var categoryFolder = new Folder(libraryPath + "/" + categoryName);
+        if (categoryFolder.exists) {
+            return "Error: A category with that name already exists.";
+        }
+
+        if (categoryFolder.create()) {
+            return "Success: Category '" + categoryName + "' created.";
+        } else {
+            return "Error: Could not create category folder.";
+        }
     } catch(e) {
         return "Error: " + e.toString();
     }
