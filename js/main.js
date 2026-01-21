@@ -932,6 +932,12 @@
             favCountEl.textContent = favoriteComps.length;
         }
 
+        // Update recent count in sidebar
+        var recentCountEl = document.getElementById('recent-count');
+        if (recentCountEl) {
+            recentCountEl.textContent = recentComps.length;
+        }
+
         // Update Favorites nav item active state
         var favNavItem = document.querySelector('.nav-item[data-category="Favorites"]');
         if (favNavItem) {
@@ -942,12 +948,23 @@
             }
         }
 
+        // Update Recent nav item active state
+        var recentNavItem = document.querySelector('.nav-item[data-category="Recent"]');
+        if (recentNavItem) {
+            if (activeCategory === 'Recent') {
+                recentNavItem.classList.add('active');
+            } else {
+                recentNavItem.classList.remove('active');
+            }
+        }
+
         var searchTerm = searchInput.value.toLowerCase();
         var filteredComps = sortComps(allComps.filter(function (comp) {
-            // Filter by category
-            var matchesCategory = activeCategory === 'All' ||
-                                  activeCategory === 'Favorites' && isFavorite(comp.uniqueId) ||
-                                  comp.category === activeCategory;
+            // Filter by category (parentheses for clarity)
+            var matchesCategory = (activeCategory === 'All') ||
+                                  (activeCategory === 'Favorites' && isFavorite(comp.uniqueId)) ||
+                                  (activeCategory === 'Recent' && isRecent(comp.uniqueId)) ||
+                                  (comp.category === activeCategory);
             // Filter by search
             var matchesSearch = comp.name.toLowerCase().includes(searchTerm);
             return matchesCategory && matchesSearch;
@@ -1335,6 +1352,22 @@
         } catch (e) {
             console.warn('Blitzkrieg: Could not load favorites/recent from localStorage');
         }
+        // Update counts in sidebar immediately
+        updateQuickAccessCounts();
+    }
+
+    /**
+     * Update Favorites and Recent counts in sidebar
+     */
+    function updateQuickAccessCounts() {
+        var favCountEl = document.getElementById('favorites-count');
+        if (favCountEl) {
+            favCountEl.textContent = favoriteComps.length;
+        }
+        var recentCountEl = document.getElementById('recent-count');
+        if (recentCountEl) {
+            recentCountEl.textContent = recentComps.length;
+        }
     }
 
     /**
@@ -1373,6 +1406,20 @@
      */
     function isFavorite(uniqueId) {
         return favoriteComps.indexOf(uniqueId) !== -1;
+    }
+
+    /**
+     * Check if a comp is in recent imports
+     * @param {string} uniqueId - The comp's unique ID
+     * @returns {boolean}
+     */
+    function isRecent(uniqueId) {
+        for (var i = 0; i < recentComps.length; i++) {
+            if (recentComps[i].uniqueId === uniqueId) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -1683,6 +1730,18 @@
             // A - show all templates
             if (e.key === 'a' && !e.ctrlKey && !e.metaKey && !e.altKey) {
                 activeCategory = 'All';
+                renderUI();
+            }
+
+            // F - show favorites
+            if (e.key === 'f' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                activeCategory = 'Favorites';
+                renderUI();
+            }
+
+            // R - show recent imports (without Ctrl modifier, since Ctrl+R is refresh)
+            if (e.key === 'r' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                activeCategory = 'Recent';
                 renderUI();
             }
 
