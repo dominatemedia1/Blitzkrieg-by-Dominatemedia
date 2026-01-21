@@ -78,6 +78,11 @@
     var currentCategoryDeleteInfo = null;
     var currentMoveCompInfo = null;
     var isLoading = false; // Prevents race conditions in async operations
+
+    // Favorites and recent comps
+    var favoriteComps = []; // Array of uniqueIds
+    var recentComps = []; // Array of {uniqueId, timestamp}
+    var MAX_RECENT_COMPS = 10;
     var cachedLibraryPath = null; // In-memory cache for library path
 
     // Drag and drop state
@@ -559,6 +564,9 @@
 
     /* --------- App initialization & core UI logic (kept original behavior) --------- */
     function initializeAppLogic() {
+        // Load favorites and recent comps from localStorage
+        loadFavoritesAndRecent();
+
         // Load settings from persistent file storage (fixes categories not showing after restart)
         loadPersistentSettings(function(settings) {
             var savedPath = settings.libraryPath;
@@ -577,6 +585,9 @@
         searchInput.addEventListener('input', debouncedRenderComps);
         categoryFiltersContainer.addEventListener('click', handleCategoryClick);
         stashGrid.addEventListener('click', handleStashGridClick);
+
+        // Double-click to import
+        stashGrid.addEventListener('dblclick', handleStashGridDoubleClick);
 
         // Add click listeners for sidebar navigation (including "All Templates" and category items)
         var sidebarNav = document.querySelector('.sidebar-nav');
@@ -915,8 +926,32 @@
         });
         previewAnimations = {};
 
+        // Update favorites count in sidebar
+        var favCountEl = document.getElementById('favorites-count');
+        if (favCountEl) {
+            favCountEl.textContent = favoriteComps.length;
+        }
+
+        // Update Favorites nav item active state
+        var favNavItem = document.querySelector('.nav-item[data-category="Favorites"]');
+        if (favNavItem) {
+            if (activeCategory === 'Favorites') {
+                favNavItem.classList.add('active');
+            } else {
+                favNavItem.classList.remove('active');
+            }
+        }
+
         var searchTerm = searchInput.value.toLowerCase();
-        var filteredComps = sortComps(allComps.filter(function (comp) { return (activeCategory === 'All' || comp.category === activeCategory) && comp.name.toLowerCase().includes(searchTerm); }));
+        var filteredComps = sortComps(allComps.filter(function (comp) {
+            // Filter by category
+            var matchesCategory = activeCategory === 'All' ||
+                                  activeCategory === 'Favorites' && isFavorite(comp.uniqueId) ||
+                                  comp.category === activeCategory;
+            // Filter by search
+            var matchesSearch = comp.name.toLowerCase().includes(searchTerm);
+            return matchesCategory && matchesSearch;
+        }));
         if (filteredComps.length === 0) {
             if (allComps.length === 0 && !getLibraryPath()) {
                 showPlaceholder("Select a library folder to begin.");
@@ -955,8 +990,15 @@
                 ? '<img data-src="' + safeThumbSrc + '" alt="Thumbnail" class="comp-thumbnail lazy-thumb" loading="lazy">'
                 : '<div class="no-preview">No Preview</div>';
 
-            htmlParts.push('<div class="stash-item' + previewClass + '" data-unique-id="' + safeUniqueId + '" data-category="' + safeCategory + '" data-aep-path="' + safeAepPath + '" data-name="' + safeName + '"' + previewDataAttr + durationAttr + ' draggable="true">' +
+            // Check if comp is favorited
+            var isFav = isFavorite(comp.uniqueId);
+            var favClass = isFav ? ' is-favorite' : '';
+            var favTitle = isFav ? 'Remove from favorites' : 'Add to favorites';
+            var favFill = isFav ? 'currentColor' : 'none';
+
+            htmlParts.push('<div class="stash-item' + previewClass + favClass + '" data-unique-id="' + safeUniqueId + '" data-category="' + safeCategory + '" data-aep-path="' + safeAepPath + '" data-name="' + safeName + '"' + previewDataAttr + durationAttr + ' draggable="true">' +
                 '<div class="item-actions">' +
+                    '<button class="action-btn favorite-btn" title="' + favTitle + '"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="' + favFill + '" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg></button>' +
                     '<button class="action-btn move-btn" title="Move to category"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path><line x1="12" y1="11" x2="12" y2="17"></line><polyline points="9 14 12 11 15 14"></polyline></svg></button>' +
                     '<button class="action-btn rename-btn" title="Rename"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg></button>' +
                     '<button class="action-btn delete-btn" title="Delete"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg></button>' +
@@ -1080,11 +1122,27 @@
         var item = e.target.closest('.stash-item');
         if (!item) return;
         var uniqueId = item.dataset.uniqueId, category = item.dataset.category, aepPath = item.dataset.aepPath, name = item.dataset.name;
-        if (e.target.closest('.import-btn')) { importComp(aepPath); }
+        if (e.target.closest('.import-btn')) { importComp(aepPath, uniqueId); }
         else if (e.target.closest('.rename-btn')) { renameComp(uniqueId, category, name); }
         else if (e.target.closest('.delete-btn')) { promptDelete(uniqueId, category, name); }
         else if (e.target.closest('.move-btn')) { promptMoveComp(uniqueId, category, name); }
+        else if (e.target.closest('.favorite-btn')) { toggleFavorite(uniqueId); }
         else if (e.target.closest('.generate-preview-btn')) { generatePreview(aepPath, name); }
+    }
+
+    /**
+     * Double-click on a comp card to import it instantly
+     */
+    function handleStashGridDoubleClick(e) {
+        var item = e.target.closest('.stash-item');
+        if (!item) return;
+        // Don't trigger on buttons
+        if (e.target.closest('.action-btn') || e.target.closest('.import-btn') || e.target.closest('.generate-preview-btn')) return;
+        var aepPath = item.dataset.aepPath;
+        var uniqueId = item.dataset.uniqueId;
+        if (aepPath) {
+            importComp(aepPath, uniqueId);
+        }
     }
 
     /**
@@ -1259,7 +1317,86 @@
         });
     }
 
-    function importComp(aepPath) {
+    /* --------- Favorites and Recent Comps --------- */
+
+    /**
+     * Load favorites and recent comps from localStorage
+     */
+    function loadFavoritesAndRecent() {
+        try {
+            var savedFavorites = localStorage.getItem('blitzkrieg_favorites');
+            if (savedFavorites) {
+                favoriteComps = JSON.parse(savedFavorites);
+            }
+            var savedRecent = localStorage.getItem('blitzkrieg_recent');
+            if (savedRecent) {
+                recentComps = JSON.parse(savedRecent);
+            }
+        } catch (e) {
+            console.warn('Blitzkrieg: Could not load favorites/recent from localStorage');
+        }
+    }
+
+    /**
+     * Save favorites and recent comps to localStorage
+     */
+    function saveFavoritesAndRecent() {
+        try {
+            localStorage.setItem('blitzkrieg_favorites', JSON.stringify(favoriteComps));
+            localStorage.setItem('blitzkrieg_recent', JSON.stringify(recentComps));
+        } catch (e) {
+            console.warn('Blitzkrieg: Could not save favorites/recent to localStorage');
+        }
+    }
+
+    /**
+     * Toggle favorite status for a comp
+     * @param {string} uniqueId - The comp's unique ID
+     */
+    function toggleFavorite(uniqueId) {
+        var index = favoriteComps.indexOf(uniqueId);
+        if (index === -1) {
+            favoriteComps.push(uniqueId);
+            showToast('Added to favorites');
+        } else {
+            favoriteComps.splice(index, 1);
+            showToast('Removed from favorites');
+        }
+        saveFavoritesAndRecent();
+        renderUI(); // Re-render to update star icon
+    }
+
+    /**
+     * Check if a comp is favorited
+     * @param {string} uniqueId - The comp's unique ID
+     * @returns {boolean}
+     */
+    function isFavorite(uniqueId) {
+        return favoriteComps.indexOf(uniqueId) !== -1;
+    }
+
+    /**
+     * Add a comp to recent imports
+     * @param {string} uniqueId - The comp's unique ID
+     */
+    function addToRecent(uniqueId) {
+        // Remove if already exists
+        recentComps = recentComps.filter(function(r) { return r.uniqueId !== uniqueId; });
+        // Add to front
+        recentComps.unshift({ uniqueId: uniqueId, timestamp: Date.now() });
+        // Trim to max
+        if (recentComps.length > MAX_RECENT_COMPS) {
+            recentComps = recentComps.slice(0, MAX_RECENT_COMPS);
+        }
+        saveFavoritesAndRecent();
+    }
+
+    /**
+     * Import a composition and track it as recent
+     * @param {string} aepPath - Path to the AEP file
+     * @param {string} uniqueId - Optional unique ID for tracking
+     */
+    function importComp(aepPath, uniqueId) {
         if (!isValidPath(aepPath)) {
             showToast('Invalid file path.', true);
             return;
@@ -1276,6 +1413,10 @@
             }
             if (result.indexOf('Success') === 0) {
                 showToast('Imported and opened in timeline!');
+                // Track recent import
+                if (uniqueId) {
+                    addToRecent(uniqueId);
+                }
             } else {
                 showToast(result, true);
             }
