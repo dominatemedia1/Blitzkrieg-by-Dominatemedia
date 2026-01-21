@@ -686,8 +686,16 @@ function importComp(aepPath) {
         // AUTO-OPEN: Open the imported comp in the viewer/timeline
         if (mainComp) {
             try {
-                // Open the comp in the Composition panel (timeline)
-                mainComp.openInViewer();
+                // Method 1: Select the comp in the project panel first
+                mainComp.selected = true;
+
+                // Method 2: Open the comp in the Composition panel (timeline/viewer)
+                var viewer = mainComp.openInViewer();
+
+                // Method 3: If viewer was opened, make sure it's active and maximized for visibility
+                if (viewer) {
+                    viewer.setActive();
+                }
             } catch (viewerErr) {
                 $.writeln("Blitzkrieg: Warning - Could not open comp in viewer: " + viewerErr.toString());
             }

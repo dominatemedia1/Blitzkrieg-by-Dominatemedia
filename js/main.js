@@ -69,60 +69,6 @@
     var settingsCloseBtn = document.getElementById('settings-close-btn');
     var settingsSaveBtn = document.getElementById('settings-save-btn');
 
-    // Auth modal elements
-    var authModal = document.getElementById('auth-modal');
-    var authModalTitle = document.getElementById('auth-modal-title');
-    var authCloseBtn = document.getElementById('auth-close-btn');
-
-    // Login form
-    var loginForm = document.getElementById('login-form');
-    var loginEmail = document.getElementById('login-email');
-    var loginPassword = document.getElementById('login-password');
-    var loginError = document.getElementById('login-error');
-    var loginSubmitBtn = document.getElementById('login-submit-btn');
-
-    // Signup form
-    var signupForm = document.getElementById('signup-form');
-    var signupInvite = document.getElementById('signup-invite');
-    var signupEmail = document.getElementById('signup-email');
-    var signupPassword = document.getElementById('signup-password');
-    var signupConfirm = document.getElementById('signup-confirm');
-    var signupError = document.getElementById('signup-error');
-    var signupSubmitBtn = document.getElementById('signup-submit-btn');
-
-    // Forgot password form
-    var forgotForm = document.getElementById('forgot-form');
-    var forgotEmail = document.getElementById('forgot-email');
-    var forgotError = document.getElementById('forgot-error');
-    var forgotSuccess = document.getElementById('forgot-success');
-    var forgotSubmitBtn = document.getElementById('forgot-submit-btn');
-
-    // Auth links
-    var showSignupLink = document.getElementById('show-signup-link');
-    var showLoginLink = document.getElementById('show-login-link');
-    var showForgotLink = document.getElementById('show-forgot-link');
-    var backToLoginLink = document.getElementById('back-to-login-link');
-
-    // Sidebar user elements
-    var sidebarUser = document.getElementById('sidebar-user');
-    var userLoginPrompt = document.getElementById('user-login-prompt');
-    var sidebarLoginBtn = document.getElementById('sidebar-login-btn');
-    var userProfile = document.getElementById('user-profile');
-    var userEmail = document.getElementById('user-email');
-    var userBadge = document.getElementById('user-badge');
-    var adminPanelBtn = document.getElementById('admin-panel-btn');
-    var logoutBtn = document.getElementById('logout-btn');
-
-    // Admin modal elements
-    var adminModal = document.getElementById('admin-modal');
-    var adminCloseBtn = document.getElementById('admin-close-btn');
-    var generateInviteForm = document.getElementById('generate-invite-form');
-    var inviteEmailInput = document.getElementById('invite-email');
-    var inviteMaxUsesInput = document.getElementById('invite-max-uses');
-    var generateInviteBtn = document.getElementById('generate-invite-btn');
-    var newInviteResult = document.getElementById('new-invite-result');
-    var invitesList = document.getElementById('invites-list');
-
     var toastTimeout;
     var allComps = [];
     var activeCategory = 'All';
@@ -132,6 +78,11 @@
     var currentCategoryDeleteInfo = null;
     var currentMoveCompInfo = null;
     var isLoading = false; // Prevents race conditions in async operations
+
+    // Favorites and recent comps
+    var favoriteComps = []; // Array of uniqueIds
+    var recentComps = []; // Array of {uniqueId, timestamp}
+    var MAX_RECENT_COMPS = 10;
     var cachedLibraryPath = null; // In-memory cache for library path
 
     // Drag and drop state
@@ -479,472 +430,15 @@
             }
         });
 
-        // Initialize auth system
-        initAuthSystem();
-
-        // App is freely available - initialize directly
+        // Initialize app directly
         initializeAppLogic();
     }
 
-    /* --------- Auth System --------- */
-
-    function initAuthSystem() {
-        // Check if BlitzkriegAuth is available
-        if (typeof BlitzkriegAuth === 'undefined') {
-            console.warn('BlitzkriegAuth not loaded');
-            return;
-        }
-
-        // Listen for auth state changes
-        BlitzkriegAuth.onAuthStateChange(function(event, session, user, isAdmin) {
-            updateAuthUI(user, isAdmin);
-        });
-
-        // Sidebar login button
-        if (sidebarLoginBtn) {
-            sidebarLoginBtn.addEventListener('click', function() {
-                openAuthModal('login');
-            });
-        }
-
-        // Logout button
-        if (logoutBtn) {
-            logoutBtn.addEventListener('click', async function() {
-                var result = await BlitzkriegAuth.signOut();
-                if (result.success) {
-                    showToast('Signed out successfully', 'success');
-                } else {
-                    showToast('Error signing out: ' + result.error, 'error');
-                }
-            });
-        }
-
-        // Admin panel button
-        if (adminPanelBtn) {
-            adminPanelBtn.addEventListener('click', function() {
-                openAdminModal();
-            });
-        }
-
-        // Auth modal close
-        if (authCloseBtn) {
-            authCloseBtn.addEventListener('click', closeAuthModal);
-        }
-
-        // Click outside modal to close
-        if (authModal) {
-            authModal.addEventListener('click', function(e) {
-                if (e.target === authModal) {
-                    closeAuthModal();
-                }
-            });
-        }
-
-        // Form switching links
-        if (showSignupLink) {
-            showSignupLink.addEventListener('click', function(e) {
-                e.preventDefault();
-                switchAuthForm('signup');
-            });
-        }
-        if (showLoginLink) {
-            showLoginLink.addEventListener('click', function(e) {
-                e.preventDefault();
-                switchAuthForm('login');
-            });
-        }
-        if (showForgotLink) {
-            showForgotLink.addEventListener('click', function(e) {
-                e.preventDefault();
-                switchAuthForm('forgot');
-            });
-        }
-        if (backToLoginLink) {
-            backToLoginLink.addEventListener('click', function(e) {
-                e.preventDefault();
-                switchAuthForm('login');
-            });
-        }
-
-        // Login form submit
-        if (loginForm) {
-            loginForm.addEventListener('submit', async function(e) {
-                e.preventDefault();
-                await handleLogin();
-            });
-        }
-
-        // Signup form submit
-        if (signupForm) {
-            signupForm.addEventListener('submit', async function(e) {
-                e.preventDefault();
-                await handleSignup();
-            });
-        }
-
-        // Forgot password form submit
-        if (forgotForm) {
-            forgotForm.addEventListener('submit', async function(e) {
-                e.preventDefault();
-                await handleForgotPassword();
-            });
-        }
-
-        // Admin modal
-        if (adminCloseBtn) {
-            adminCloseBtn.addEventListener('click', closeAdminModal);
-        }
-        if (adminModal) {
-            adminModal.addEventListener('click', function(e) {
-                if (e.target === adminModal) {
-                    closeAdminModal();
-                }
-            });
-        }
-
-        // Generate invite form
-        if (generateInviteForm) {
-            generateInviteForm.addEventListener('submit', async function(e) {
-                e.preventDefault();
-                await handleGenerateInvite();
-            });
-        }
-    }
-
-    function updateAuthUI(user, isAdmin) {
-        if (user) {
-            // User is logged in
-            if (userLoginPrompt) userLoginPrompt.style.display = 'none';
-            if (userProfile) userProfile.style.display = 'flex';
-            if (userEmail) userEmail.textContent = user.email || 'Unknown';
-            if (userBadge) {
-                userBadge.style.display = isAdmin ? 'inline-block' : 'none';
-            }
-            if (adminPanelBtn) {
-                adminPanelBtn.style.display = isAdmin ? 'block' : 'none';
-            }
-        } else {
-            // User is logged out
-            if (userLoginPrompt) userLoginPrompt.style.display = 'flex';
-            if (userProfile) userProfile.style.display = 'none';
-            if (adminPanelBtn) adminPanelBtn.style.display = 'none';
-        }
-    }
-
-    function openAuthModal(form) {
-        if (authModal) {
-            authModal.style.display = 'flex';
-            switchAuthForm(form || 'login');
-        }
-    }
-
-    function closeAuthModal() {
-        if (authModal) {
-            authModal.style.display = 'none';
-            clearAuthForms();
-        }
-    }
-
-    function switchAuthForm(form) {
-        // Hide all forms
-        if (loginForm) loginForm.style.display = 'none';
-        if (signupForm) signupForm.style.display = 'none';
-        if (forgotForm) forgotForm.style.display = 'none';
-
-        // Clear errors
-        clearAuthErrors();
-
-        // Show selected form
-        switch (form) {
-            case 'login':
-                if (loginForm) loginForm.style.display = 'flex';
-                if (authModalTitle) authModalTitle.textContent = 'Sign In';
-                break;
-            case 'signup':
-                if (signupForm) signupForm.style.display = 'flex';
-                if (authModalTitle) authModalTitle.textContent = 'Create Account';
-                break;
-            case 'forgot':
-                if (forgotForm) forgotForm.style.display = 'flex';
-                if (authModalTitle) authModalTitle.textContent = 'Reset Password';
-                break;
-        }
-    }
-
-    function clearAuthForms() {
-        if (loginForm) loginForm.reset();
-        if (signupForm) signupForm.reset();
-        if (forgotForm) forgotForm.reset();
-        clearAuthErrors();
-    }
-
-    function clearAuthErrors() {
-        if (loginError) { loginError.style.display = 'none'; loginError.textContent = ''; }
-        if (signupError) { signupError.style.display = 'none'; signupError.textContent = ''; }
-        if (forgotError) { forgotError.style.display = 'none'; forgotError.textContent = ''; }
-        if (forgotSuccess) { forgotSuccess.style.display = 'none'; forgotSuccess.textContent = ''; }
-    }
-
-    function showAuthError(element, message) {
-        if (element) {
-            element.textContent = message;
-            element.style.display = 'block';
-        }
-    }
-
-    function setButtonLoading(btn, loading) {
-        if (!btn) return;
-        var textEl = btn.querySelector('.btn-text');
-        var loaderEl = btn.querySelector('.btn-loader');
-        if (loading) {
-            btn.disabled = true;
-            if (textEl) textEl.style.display = 'none';
-            if (loaderEl) loaderEl.style.display = 'inline-block';
-        } else {
-            btn.disabled = false;
-            if (textEl) textEl.style.display = 'inline';
-            if (loaderEl) loaderEl.style.display = 'none';
-        }
-    }
-
-    async function handleLogin() {
-        if (!BlitzkriegAuth.isConfigured()) {
-            showAuthError(loginError, 'Cloud features not configured. Contact admin.');
-            return;
-        }
-
-        var email = loginEmail ? loginEmail.value.trim() : '';
-        var password = loginPassword ? loginPassword.value : '';
-
-        if (!email || !password) {
-            showAuthError(loginError, 'Please enter email and password');
-            return;
-        }
-
-        setButtonLoading(loginSubmitBtn, true);
-        clearAuthErrors();
-
-        try {
-            var result = await BlitzkriegAuth.signIn(email, password);
-            if (result.success) {
-                closeAuthModal();
-                showToast('Welcome back!', 'success');
-            } else {
-                showAuthError(loginError, result.error);
-            }
-        } catch (error) {
-            showAuthError(loginError, 'An error occurred. Please try again.');
-        } finally {
-            setButtonLoading(loginSubmitBtn, false);
-        }
-    }
-
-    async function handleSignup() {
-        if (!BlitzkriegAuth.isConfigured()) {
-            showAuthError(signupError, 'Cloud features not configured. Contact admin.');
-            return;
-        }
-
-        var inviteCode = signupInvite ? signupInvite.value.trim().toUpperCase() : '';
-        var email = signupEmail ? signupEmail.value.trim() : '';
-        var password = signupPassword ? signupPassword.value : '';
-        var confirm = signupConfirm ? signupConfirm.value : '';
-
-        if (!inviteCode) {
-            showAuthError(signupError, 'Invite code is required');
-            return;
-        }
-        if (!email || !password) {
-            showAuthError(signupError, 'Please enter email and password');
-            return;
-        }
-        if (password.length < 8) {
-            showAuthError(signupError, 'Password must be at least 8 characters');
-            return;
-        }
-        if (password !== confirm) {
-            showAuthError(signupError, 'Passwords do not match');
-            return;
-        }
-
-        setButtonLoading(signupSubmitBtn, true);
-        clearAuthErrors();
-
-        try {
-            var result = await BlitzkriegAuth.signUp(email, password, inviteCode);
-            if (result.success) {
-                closeAuthModal();
-                showToast(result.message || 'Account created! Check your email to verify.', 'success');
-            } else {
-                showAuthError(signupError, result.error);
-            }
-        } catch (error) {
-            showAuthError(signupError, 'An error occurred. Please try again.');
-        } finally {
-            setButtonLoading(signupSubmitBtn, false);
-        }
-    }
-
-    async function handleForgotPassword() {
-        if (!BlitzkriegAuth.isConfigured()) {
-            showAuthError(forgotError, 'Cloud features not configured. Contact admin.');
-            return;
-        }
-
-        var email = forgotEmail ? forgotEmail.value.trim() : '';
-
-        if (!email) {
-            showAuthError(forgotError, 'Please enter your email');
-            return;
-        }
-
-        setButtonLoading(forgotSubmitBtn, true);
-        clearAuthErrors();
-
-        try {
-            var result = await BlitzkriegAuth.resetPassword(email);
-            if (result.success) {
-                if (forgotSuccess) {
-                    forgotSuccess.textContent = result.message || 'Password reset email sent!';
-                    forgotSuccess.style.display = 'block';
-                }
-            } else {
-                showAuthError(forgotError, result.error);
-            }
-        } catch (error) {
-            showAuthError(forgotError, 'An error occurred. Please try again.');
-        } finally {
-            setButtonLoading(forgotSubmitBtn, false);
-        }
-    }
-
-    /* --------- Admin Panel --------- */
-
-    function openAdminModal() {
-        if (adminModal) {
-            adminModal.style.display = 'flex';
-            loadInvitesList();
-        }
-    }
-
-    function closeAdminModal() {
-        if (adminModal) {
-            adminModal.style.display = 'none';
-            if (newInviteResult) newInviteResult.style.display = 'none';
-        }
-    }
-
-    async function handleGenerateInvite() {
-        if (!BlitzkriegAuth.isAdmin()) {
-            showToast('Admin access required', 'error');
-            return;
-        }
-
-        var email = inviteEmailInput ? inviteEmailInput.value.trim() : '';
-        var maxUses = inviteMaxUsesInput ? parseInt(inviteMaxUsesInput.value, 10) : 1;
-
-        setButtonLoading(generateInviteBtn, true);
-
-        try {
-            var result = await BlitzkriegAuth.generateInvite({
-                email: email || null,
-                maxUses: maxUses || 1
-            });
-
-            if (result.success) {
-                // Show the generated code
-                if (newInviteResult) {
-                    var codeDisplay = newInviteResult.querySelector('.invite-code-display');
-                    if (codeDisplay) codeDisplay.textContent = result.code;
-                    newInviteResult.style.display = 'flex';
-
-                    // Setup copy button
-                    var copyBtn = newInviteResult.querySelector('.copy-btn');
-                    if (copyBtn) {
-                        copyBtn.onclick = function() {
-                            copyToClipboard(result.code);
-                            showToast('Invite code copied!', 'success');
-                        };
-                    }
-                }
-
-                // Clear form
-                if (inviteEmailInput) inviteEmailInput.value = '';
-                if (inviteMaxUsesInput) inviteMaxUsesInput.value = '1';
-
-                // Refresh list
-                loadInvitesList();
-            } else {
-                showToast('Error: ' + result.error, 'error');
-            }
-        } catch (error) {
-            showToast('Error generating invite', 'error');
-        } finally {
-            setButtonLoading(generateInviteBtn, false);
-        }
-    }
-
-    async function loadInvitesList() {
-        if (!invitesList) return;
-
-        invitesList.innerHTML = '<p class="loading-text">Loading invites...</p>';
-
-        try {
-            var result = await BlitzkriegAuth.getInvites();
-            if (result.success && result.invites) {
-                if (result.invites.length === 0) {
-                    invitesList.innerHTML = '<p class="loading-text">No invites yet</p>';
-                    return;
-                }
-
-                invitesList.innerHTML = result.invites.map(function(invite) {
-                    var isUsed = invite.use_count >= (invite.max_uses || 1);
-                    var usedClass = isUsed ? 'invite-item-used' : '';
-                    var statusText = isUsed ? 'Used' : (invite.use_count + '/' + (invite.max_uses || 1) + ' uses');
-
-                    return '<div class="invite-item ' + usedClass + '">' +
-                        '<div>' +
-                            '<div class="invite-item-code">' + invite.code + '</div>' +
-                            '<div class="invite-item-info">' +
-                                (invite.email ? 'For: ' + invite.email + ' | ' : '') +
-                                statusText +
-                            '</div>' +
-                        '</div>' +
-                        '<div class="invite-item-actions">' +
-                            '<button onclick="window.deleteInvite(\'' + invite.id + '\')">Delete</button>' +
-                        '</div>' +
-                    '</div>';
-                }).join('');
-            } else {
-                invitesList.innerHTML = '<p class="loading-text">Error loading invites</p>';
-            }
-        } catch (error) {
-            invitesList.innerHTML = '<p class="loading-text">Error loading invites</p>';
-        }
-    }
-
-    // Expose delete function for inline onclick
-    window.deleteInvite = async function(inviteId) {
-        if (!confirm('Delete this invite?')) return;
-
-        try {
-            var result = await BlitzkriegAuth.deleteInvite(inviteId);
-            if (result.success) {
-                showToast('Invite deleted', 'success');
-                loadInvitesList();
-            } else {
-                showToast('Error: ' + result.error, 'error');
-            }
-        } catch (error) {
-            showToast('Error deleting invite', 'error');
-        }
-    };
-
+    /* --------- Utility Functions --------- */
     function copyToClipboard(text) {
         if (navigator.clipboard && navigator.clipboard.writeText) {
             navigator.clipboard.writeText(text);
         } else {
-            // Fallback for older browsers
             var textarea = document.createElement('textarea');
             textarea.value = text;
             document.body.appendChild(textarea);
@@ -1070,6 +564,9 @@
 
     /* --------- App initialization & core UI logic (kept original behavior) --------- */
     function initializeAppLogic() {
+        // Load favorites and recent comps from localStorage
+        loadFavoritesAndRecent();
+
         // Load settings from persistent file storage (fixes categories not showing after restart)
         loadPersistentSettings(function(settings) {
             var savedPath = settings.libraryPath;
@@ -1088,6 +585,9 @@
         searchInput.addEventListener('input', debouncedRenderComps);
         categoryFiltersContainer.addEventListener('click', handleCategoryClick);
         stashGrid.addEventListener('click', handleStashGridClick);
+
+        // Double-click to import
+        stashGrid.addEventListener('dblclick', handleStashGridDoubleClick);
 
         // Add click listeners for sidebar navigation (including "All Templates" and category items)
         var sidebarNav = document.querySelector('.sidebar-nav');
@@ -1426,8 +926,32 @@
         });
         previewAnimations = {};
 
+        // Update favorites count in sidebar
+        var favCountEl = document.getElementById('favorites-count');
+        if (favCountEl) {
+            favCountEl.textContent = favoriteComps.length;
+        }
+
+        // Update Favorites nav item active state
+        var favNavItem = document.querySelector('.nav-item[data-category="Favorites"]');
+        if (favNavItem) {
+            if (activeCategory === 'Favorites') {
+                favNavItem.classList.add('active');
+            } else {
+                favNavItem.classList.remove('active');
+            }
+        }
+
         var searchTerm = searchInput.value.toLowerCase();
-        var filteredComps = sortComps(allComps.filter(function (comp) { return (activeCategory === 'All' || comp.category === activeCategory) && comp.name.toLowerCase().includes(searchTerm); }));
+        var filteredComps = sortComps(allComps.filter(function (comp) {
+            // Filter by category
+            var matchesCategory = activeCategory === 'All' ||
+                                  activeCategory === 'Favorites' && isFavorite(comp.uniqueId) ||
+                                  comp.category === activeCategory;
+            // Filter by search
+            var matchesSearch = comp.name.toLowerCase().includes(searchTerm);
+            return matchesCategory && matchesSearch;
+        }));
         if (filteredComps.length === 0) {
             if (allComps.length === 0 && !getLibraryPath()) {
                 showPlaceholder("Select a library folder to begin.");
@@ -1466,8 +990,15 @@
                 ? '<img data-src="' + safeThumbSrc + '" alt="Thumbnail" class="comp-thumbnail lazy-thumb" loading="lazy">'
                 : '<div class="no-preview">No Preview</div>';
 
-            htmlParts.push('<div class="stash-item' + previewClass + '" data-unique-id="' + safeUniqueId + '" data-category="' + safeCategory + '" data-aep-path="' + safeAepPath + '" data-name="' + safeName + '"' + previewDataAttr + durationAttr + ' draggable="true">' +
+            // Check if comp is favorited
+            var isFav = isFavorite(comp.uniqueId);
+            var favClass = isFav ? ' is-favorite' : '';
+            var favTitle = isFav ? 'Remove from favorites' : 'Add to favorites';
+            var favFill = isFav ? 'currentColor' : 'none';
+
+            htmlParts.push('<div class="stash-item' + previewClass + favClass + '" data-unique-id="' + safeUniqueId + '" data-category="' + safeCategory + '" data-aep-path="' + safeAepPath + '" data-name="' + safeName + '"' + previewDataAttr + durationAttr + ' draggable="true">' +
                 '<div class="item-actions">' +
+                    '<button class="action-btn favorite-btn" title="' + favTitle + '"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="' + favFill + '" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg></button>' +
                     '<button class="action-btn move-btn" title="Move to category"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path><line x1="12" y1="11" x2="12" y2="17"></line><polyline points="9 14 12 11 15 14"></polyline></svg></button>' +
                     '<button class="action-btn rename-btn" title="Rename"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg></button>' +
                     '<button class="action-btn delete-btn" title="Delete"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg></button>' +
@@ -1591,11 +1122,27 @@
         var item = e.target.closest('.stash-item');
         if (!item) return;
         var uniqueId = item.dataset.uniqueId, category = item.dataset.category, aepPath = item.dataset.aepPath, name = item.dataset.name;
-        if (e.target.closest('.import-btn')) { importComp(aepPath); }
+        if (e.target.closest('.import-btn')) { importComp(aepPath, uniqueId); }
         else if (e.target.closest('.rename-btn')) { renameComp(uniqueId, category, name); }
         else if (e.target.closest('.delete-btn')) { promptDelete(uniqueId, category, name); }
         else if (e.target.closest('.move-btn')) { promptMoveComp(uniqueId, category, name); }
+        else if (e.target.closest('.favorite-btn')) { toggleFavorite(uniqueId); }
         else if (e.target.closest('.generate-preview-btn')) { generatePreview(aepPath, name); }
+    }
+
+    /**
+     * Double-click on a comp card to import it instantly
+     */
+    function handleStashGridDoubleClick(e) {
+        var item = e.target.closest('.stash-item');
+        if (!item) return;
+        // Don't trigger on buttons
+        if (e.target.closest('.action-btn') || e.target.closest('.import-btn') || e.target.closest('.generate-preview-btn')) return;
+        var aepPath = item.dataset.aepPath;
+        var uniqueId = item.dataset.uniqueId;
+        if (aepPath) {
+            importComp(aepPath, uniqueId);
+        }
     }
 
     /**
@@ -1770,7 +1317,86 @@
         });
     }
 
-    function importComp(aepPath) {
+    /* --------- Favorites and Recent Comps --------- */
+
+    /**
+     * Load favorites and recent comps from localStorage
+     */
+    function loadFavoritesAndRecent() {
+        try {
+            var savedFavorites = localStorage.getItem('blitzkrieg_favorites');
+            if (savedFavorites) {
+                favoriteComps = JSON.parse(savedFavorites);
+            }
+            var savedRecent = localStorage.getItem('blitzkrieg_recent');
+            if (savedRecent) {
+                recentComps = JSON.parse(savedRecent);
+            }
+        } catch (e) {
+            console.warn('Blitzkrieg: Could not load favorites/recent from localStorage');
+        }
+    }
+
+    /**
+     * Save favorites and recent comps to localStorage
+     */
+    function saveFavoritesAndRecent() {
+        try {
+            localStorage.setItem('blitzkrieg_favorites', JSON.stringify(favoriteComps));
+            localStorage.setItem('blitzkrieg_recent', JSON.stringify(recentComps));
+        } catch (e) {
+            console.warn('Blitzkrieg: Could not save favorites/recent to localStorage');
+        }
+    }
+
+    /**
+     * Toggle favorite status for a comp
+     * @param {string} uniqueId - The comp's unique ID
+     */
+    function toggleFavorite(uniqueId) {
+        var index = favoriteComps.indexOf(uniqueId);
+        if (index === -1) {
+            favoriteComps.push(uniqueId);
+            showToast('Added to favorites');
+        } else {
+            favoriteComps.splice(index, 1);
+            showToast('Removed from favorites');
+        }
+        saveFavoritesAndRecent();
+        renderUI(); // Re-render to update star icon
+    }
+
+    /**
+     * Check if a comp is favorited
+     * @param {string} uniqueId - The comp's unique ID
+     * @returns {boolean}
+     */
+    function isFavorite(uniqueId) {
+        return favoriteComps.indexOf(uniqueId) !== -1;
+    }
+
+    /**
+     * Add a comp to recent imports
+     * @param {string} uniqueId - The comp's unique ID
+     */
+    function addToRecent(uniqueId) {
+        // Remove if already exists
+        recentComps = recentComps.filter(function(r) { return r.uniqueId !== uniqueId; });
+        // Add to front
+        recentComps.unshift({ uniqueId: uniqueId, timestamp: Date.now() });
+        // Trim to max
+        if (recentComps.length > MAX_RECENT_COMPS) {
+            recentComps = recentComps.slice(0, MAX_RECENT_COMPS);
+        }
+        saveFavoritesAndRecent();
+    }
+
+    /**
+     * Import a composition and track it as recent
+     * @param {string} aepPath - Path to the AEP file
+     * @param {string} uniqueId - Optional unique ID for tracking
+     */
+    function importComp(aepPath, uniqueId) {
         if (!isValidPath(aepPath)) {
             showToast('Invalid file path.', true);
             return;
@@ -1787,6 +1413,10 @@
             }
             if (result.indexOf('Success') === 0) {
                 showToast('Imported and opened in timeline!');
+                // Track recent import
+                if (uniqueId) {
+                    addToRecent(uniqueId);
+                }
             } else {
                 showToast(result, true);
             }
@@ -2115,8 +1745,6 @@
         }
 
         if (settingsModal) settingsModal.style.display = 'none';
-        if (authModal) authModal.style.display = 'none';
-        if (adminModal) adminModal.style.display = 'none';
     }
 
     /* --------- Start the app --------- */

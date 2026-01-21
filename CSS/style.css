@@ -1748,6 +1748,37 @@ header {
 }
 
 /* ============================================
+   FAVORITE BUTTON STYLES
+   ============================================ */
+
+.action-btn.favorite-btn {
+    color: var(--text-muted);
+}
+
+.action-btn.favorite-btn:hover {
+    color: #ffc107;
+    background-color: rgba(255, 193, 7, 0.15);
+}
+
+.stash-item.is-favorite .action-btn.favorite-btn {
+    color: #ffc107;
+}
+
+.stash-item.is-favorite .action-btn.favorite-btn svg {
+    fill: #ffc107;
+}
+
+/* Favorites nav item */
+.nav-item[data-category="Favorites"] .nav-icon {
+    color: var(--text-muted);
+}
+
+.nav-item[data-category="Favorites"].active .nav-icon,
+.nav-item[data-category="Favorites"]:hover .nav-icon {
+    color: #ffc107;
+}
+
+/* ============================================
    ENHANCED ANIMATIONS
    ============================================ */
 
