@@ -303,6 +303,26 @@ function isValidName(name) {
     return true;
 }
 
+/**
+ * Normalizes a file system path for use with ExtendScript File/Folder constructors.
+ * On macOS, .fsName returns POSIX paths (e.g., /Users/name/Library/Application Support)
+ * with literal spaces. ExtendScript interprets /-prefixed paths as URI paths where
+ * spaces are invalid, causing path construction to break silently.
+ * This function encodes spaces only in Unix-style paths (starting with /).
+ * Windows paths (starting with drive letter like C:\) are left unchanged.
+ * @param {string} path - File system path (typically from .fsName)
+ * @returns {string} - Path safe for use with new File() or new Folder()
+ */
+function normalizeFsPath(path) {
+    if (!path || typeof path !== 'string') return path;
+    // Only encode spaces for Unix-style paths (macOS/Linux)
+    // Windows paths start with a drive letter and are handled natively
+    if (path.charAt(0) === '/') {
+        return path.replace(/ /g, '%20');
+    }
+    return path;
+}
+
 function selectLibraryFolder() {
     var folder = Folder.selectDialog("Select your Blitzkrieg Library Folder");
     if (folder) {
@@ -321,7 +341,7 @@ function selectLibraryFolder() {
  */
 function getStashedComps(libraryPath) {
     if (!isValidPath(libraryPath)) return "[]";
-    var mainFolder = new Folder(libraryPath);
+    var mainFolder = new Folder(normalizeFsPath(libraryPath));
     if (!mainFolder.exists) return "[]";
 
     var compsData = [];
@@ -331,7 +351,6 @@ function getStashedComps(libraryPath) {
     for (var i = 0; i < numCategories; i++) {
         var categoryFolder = categoryFolders[i];
         var categoryName = decodeURI(categoryFolder.name);
-        var categoryPath = categoryFolder.fsName;
         var compFolders = categoryFolder.getFiles(function(f) { return f instanceof Folder; });
         var numComps = compFolders.length;
 
@@ -351,9 +370,8 @@ function getStashedComps(libraryPath) {
             var previewFrameCount = 0;
             var duration = 0;
 
-            // Read metadata - optimized with direct path construction
-            var metadataPath = compFolderPath + "/metadata.json";
-            var metadataFile = new File(metadataPath);
+            // Read metadata - use Folder object (not fsName) for macOS compatibility
+            var metadataFile = new File(compFolder + "/metadata.json");
             if (metadataFile.exists) {
                 try {
                     metadataFile.open('r');
@@ -372,9 +390,9 @@ function getStashedComps(libraryPath) {
                 }
             }
 
-            // Check thumbnail existence
+            // Check thumbnail existence - use Folder object for path construction
             var thumbPath = compFolderPath + "/comp.png";
-            var thumbFile = new File(thumbPath);
+            var thumbFile = new File(compFolder + "/comp.png");
             var hasThumb = thumbFile.exists;
 
             // Build preview frame paths only if we know they exist
@@ -437,8 +455,8 @@ function stashSelectedComp(libraryPath, categoryName) {
         var compToSaveName = compToSave.name;
         var safeCompName = compToSaveName.replace(/[^a-z0-9]/gi, '_').replace(/_{2,}/g, '_');
 
-        // --- Create folder structure ---
-        var categoryFolder = new Folder(libraryPath + "/" + categoryName);
+        // --- Create folder structure (use normalizeFsPath for macOS compatibility) ---
+        var categoryFolder = new Folder(normalizeFsPath(libraryPath + "/" + categoryName));
         if (!categoryFolder.exists) {
             if (!categoryFolder.create()) {
                 return "Error: Could not create category folder.";
@@ -447,13 +465,13 @@ function stashSelectedComp(libraryPath, categoryName) {
 
         var timestamp = new Date().getTime();
         var compFolderName = safeCompName + '_' + timestamp;
-        var compFolder = new Folder(categoryFolder.fsName + "/" + compFolderName);
+        var compFolder = new Folder(categoryFolder + "/" + compFolderName);
         if (!compFolder.create()) {
             return "Error: Could not create composition folder.";
         }
 
         // --- Save Thumbnail and Preview Frames ---
-        var thumbFile = new File(compFolder.fsName + "/comp.png");
+        var thumbFile = new File(compFolder + "/comp.png");
         var previewFrameCount = 0;
 
         try {
@@ -469,7 +487,7 @@ function stashSelectedComp(libraryPath, categoryName) {
 
             if (totalFrames > 1) {
                 // Create preview folder
-                var previewFolder = new Folder(compFolder.fsName + "/preview");
+                var previewFolder = new Folder(compFolder + "/preview");
                 previewFolder.create();
 
                 // DYNAMIC frame count: ~6 FPS preview, min 12, max 72 frames
@@ -490,7 +508,7 @@ function stashSelectedComp(libraryPath, categoryName) {
                         var progress = (actualFrameCount > 1) ? (pf / (actualFrameCount - 1)) : 0;
                         var previewTime = compToSave.workAreaStart + (progress * compDuration);
 
-                        var previewFile = new File(previewFolder.fsName + "/frame_" + pf + ".png");
+                        var previewFile = new File(previewFolder + "/frame_" + pf + ".png");
                         compToSave.saveFrameToPng(previewTime, previewFile);
                         previewFrameCount++;
                     } catch (previewErr) {
@@ -503,7 +521,7 @@ function stashSelectedComp(libraryPath, categoryName) {
         }
 
         // --- Save Metadata ---
-        var metadataFile = new File(compFolder.fsName + "/metadata.json");
+        var metadataFile = new File(compFolder + "/metadata.json");
         metadataFile.open('w');
         metadataFile.encoding = 'UTF-8';
         metadataFile.write(JSON.stringify({
@@ -522,7 +540,7 @@ function stashSelectedComp(libraryPath, categoryName) {
         // --- Save the project first if it hasn't been saved ---
         if (!originalProjectFile) {
             // Project hasn't been saved yet - we need to save it first
-            var tempProjectFile = new File(Folder.temp.fsName + "/blitzkrieg_temp_" + timestamp + ".aep");
+            var tempProjectFile = new File(Folder.temp + "/blitzkrieg_temp_" + timestamp + ".aep");
             app.project.save(tempProjectFile);
             originalProjectFile = tempProjectFile;
         } else if (projectWasDirty) {
@@ -540,7 +558,7 @@ function stashSelectedComp(libraryPath, categoryName) {
         app.project.reduceProject([compToSave]);
 
         // Create footage folder and collect files
-        var footageFolder = new Folder(compFolder.fsName + "/(Footage)");
+        var footageFolder = new Folder(compFolder + "/(Footage)");
         footageFolder.create();
 
         // Collect all footage items
@@ -557,14 +575,14 @@ function stashSelectedComp(libraryPath, categoryName) {
                         pathLower.indexOf("plug-ins") === -1 &&
                         pathLower.indexOf("plugins") === -1) {
 
-                        var destFile = new File(footageFolder.fsName + "/" + sourceFile.name);
+                        var destFile = new File(footageFolder + "/" + sourceFile.name);
                         // Handle duplicate filenames
                         var counter = 1;
                         while (destFile.exists) {
                             var nameParts = sourceFile.name.split('.');
                             var ext = nameParts.pop();
                             var baseName = nameParts.join('.');
-                            destFile = new File(footageFolder.fsName + "/" + baseName + "_" + counter + "." + ext);
+                            destFile = new File(footageFolder + "/" + baseName + "_" + counter + "." + ext);
                             counter++;
                         }
 
@@ -582,7 +600,7 @@ function stashSelectedComp(libraryPath, categoryName) {
         }
 
         // Save the reduced project to library
-        var finalAEPFile = new File(compFolder.fsName + "/" + safeCompName + ".aep");
+        var finalAEPFile = new File(compFolder + "/" + safeCompName + ".aep");
         app.project.save(finalAEPFile);
 
         app.endUndoGroup();
@@ -628,12 +646,12 @@ function importComp(aepPath) {
     try {
         if (!app.project) return "Error: Please open a project first.";
 
-        var fileToImport = new File(aepPath);
+        var fileToImport = new File(normalizeFsPath(aepPath));
         if (!fileToImport.exists) return "Error: Source AEP file not found.";
 
-        // Quick metadata read for comp name
-        var parentPath = fileToImport.parent.fsName;
-        var metadataFile = new File(parentPath + "/metadata.json");
+        // Quick metadata read for comp name - use parent Folder object for macOS compatibility
+        var parentFolder = fileToImport.parent;
+        var metadataFile = new File(parentFolder + "/metadata.json");
         var compName = "Imported Comp";
 
         if (metadataFile.exists) {
@@ -724,8 +742,8 @@ function renameStashedComp(libraryPath, category, uniqueId, newName) {
     }
 
     try {
-        var aepFolder = new Folder(libraryPath + "/" + category + "/" + uniqueId);
-        var metadataFile = new File(aepFolder.fsName + "/metadata.json");
+        var aepFolder = new Folder(normalizeFsPath(libraryPath + "/" + category + "/" + uniqueId));
+        var metadataFile = new File(aepFolder + "/metadata.json");
         var metadata = {};
         if (metadataFile.exists) {
             metadataFile.open('r');
@@ -763,7 +781,7 @@ function deleteStashedComp(libraryPath, category, uniqueId) {
 
     try {
         var compFolderPath = libraryPath + "/" + category + "/" + uniqueId;
-        var compFolder = new Folder(compFolderPath);
+        var compFolder = new Folder(normalizeFsPath(compFolderPath));
         if (compFolder.exists) {
             function removeFolderRecursive(folder) {
                 var items = folder.getFiles();
@@ -805,13 +823,13 @@ function renameCategory(libraryPath, oldName, newName) {
     }
 
     try {
-        var oldFolder = new Folder(libraryPath + "/" + oldName);
+        var oldFolder = new Folder(normalizeFsPath(libraryPath + "/" + oldName));
         if (!oldFolder.exists) {
             return "Error: Category folder not found.";
         }
 
         // Check if a category with the new name already exists
-        var newFolder = new Folder(libraryPath + "/" + newName);
+        var newFolder = new Folder(normalizeFsPath(libraryPath + "/" + newName));
         if (newFolder.exists) {
             return "Error: A category with that name already exists.";
         }
@@ -819,10 +837,10 @@ function renameCategory(libraryPath, oldName, newName) {
         // Rename the folder
         if (oldFolder.rename(newName)) {
             // Update metadata.json in each comp folder to reflect new category
-            var renamedFolder = new Folder(libraryPath + "/" + newName);
+            var renamedFolder = new Folder(normalizeFsPath(libraryPath + "/" + newName));
             var compFolders = renamedFolder.getFiles(function(f) { return f instanceof Folder; });
             for (var i = 0; i < compFolders.length; i++) {
-                var metadataFile = new File(compFolders[i].fsName + "/metadata.json");
+                var metadataFile = new File(compFolders[i] + "/metadata.json");
                 if (metadataFile.exists) {
                     try {
                         metadataFile.open('r');
@@ -866,7 +884,7 @@ function deleteCategory(libraryPath, categoryName) {
     }
 
     try {
-        var categoryFolder = new Folder(libraryPath + "/" + categoryName);
+        var categoryFolder = new Folder(normalizeFsPath(libraryPath + "/" + categoryName));
         if (!categoryFolder.exists) {
             return "Error: Category folder not found.";
         }
@@ -911,20 +929,20 @@ function moveCompToCategory(libraryPath, uniqueId, oldCategory, newCategory) {
     }
 
     try {
-        var sourceFolder = new Folder(libraryPath + "/" + oldCategory + "/" + uniqueId);
+        var sourceFolder = new Folder(normalizeFsPath(libraryPath + "/" + oldCategory + "/" + uniqueId));
         if (!sourceFolder.exists) {
             return "Error: Source comp folder not found.";
         }
 
         // Ensure target category exists
-        var targetCategoryFolder = new Folder(libraryPath + "/" + newCategory);
+        var targetCategoryFolder = new Folder(normalizeFsPath(libraryPath + "/" + newCategory));
         if (!targetCategoryFolder.exists) {
             if (!targetCategoryFolder.create()) {
                 return "Error: Could not create target category folder.";
             }
         }
 
-        var targetFolder = new Folder(libraryPath + "/" + newCategory + "/" + uniqueId);
+        var targetFolder = new Folder(normalizeFsPath(libraryPath + "/" + newCategory + "/" + uniqueId));
         if (targetFolder.exists) {
             return "Error: A comp with the same ID already exists in the target category.";
         }
@@ -933,16 +951,16 @@ function moveCompToCategory(libraryPath, uniqueId, oldCategory, newCategory) {
         // First try direct rename
         var targetPath = libraryPath + "/" + newCategory + "/" + uniqueId;
 
-        // Copy all files recursively
+        // Copy all files recursively - use Folder objects (not fsName) for macOS compatibility
         function copyFolderRecursive(source, target) {
             if (!target.exists) target.create();
             var items = source.getFiles();
             for (var i = 0; i < items.length; i++) {
                 if (items[i] instanceof File) {
-                    var destFile = new File(target.fsName + "/" + items[i].name);
+                    var destFile = new File(target + "/" + items[i].name);
                     items[i].copy(destFile);
                 } else if (items[i] instanceof Folder) {
-                    var destFolder = new Folder(target.fsName + "/" + items[i].name);
+                    var destFolder = new Folder(target + "/" + items[i].name);
                     copyFolderRecursive(items[i], destFolder);
                 }
             }
@@ -963,8 +981,8 @@ function moveCompToCategory(libraryPath, uniqueId, oldCategory, newCategory) {
         // Copy to new location
         copyFolderRecursive(sourceFolder, targetFolder);
 
-        // Update metadata.json with new category
-        var metadataFile = new File(targetFolder.fsName + "/metadata.json");
+        // Update metadata.json with new category - use Folder object for macOS compatibility
+        var metadataFile = new File(targetFolder + "/metadata.json");
         if (metadataFile.exists) {
             try {
                 metadataFile.open('r');
@@ -1008,7 +1026,7 @@ function createCategory(libraryPath, categoryName) {
     }
 
     try {
-        var categoryFolder = new Folder(libraryPath + "/" + categoryName);
+        var categoryFolder = new Folder(normalizeFsPath(libraryPath + "/" + categoryName));
         if (categoryFolder.exists) {
             return "Error: A category with that name already exists.";
         }
@@ -1047,13 +1065,13 @@ function generatePreviewFrames(aepPath) {
         originalProjectFile = app.project.file;
         projectWasDirty = app.project.dirty;
 
-        var aepFile = new File(aepPath);
+        var aepFile = new File(normalizeFsPath(aepPath));
         if (!aepFile.exists) {
             return "Error: AEP file not found at: " + aepPath;
         }
 
         var compFolder = aepFile.parent;
-        var previewFolder = new Folder(compFolder.fsName + "/preview");
+        var previewFolder = new Folder(compFolder + "/preview");
 
         // Remove existing preview folder if it exists
         if (previewFolder.exists) {
@@ -1121,7 +1139,7 @@ function generatePreviewFrames(aepPath) {
                     var progress = (actualFrameCount > 1) ? (pf / (actualFrameCount - 1)) : 0;
                     var previewTime = mainComp.workAreaStart + (progress * compDuration);
 
-                    var previewFile = new File(previewFolder.fsName + "/frame_" + pf + ".png");
+                    var previewFile = new File(previewFolder + "/frame_" + pf + ".png");
                     mainComp.saveFrameToPng(previewTime, previewFile);
                     previewFrameCount++;
                 } catch (previewErr) {
@@ -1131,7 +1149,7 @@ function generatePreviewFrames(aepPath) {
 
             // Also regenerate the main thumbnail
             try {
-                var thumbFile = new File(compFolder.fsName + "/comp.png");
+                var thumbFile = new File(compFolder + "/comp.png");
                 var thumbTime = mainComp.workAreaStart + (mainComp.workAreaDuration / 2);
                 mainComp.saveFrameToPng(thumbTime, thumbFile);
             } catch (thumbErr) {
@@ -1140,7 +1158,7 @@ function generatePreviewFrames(aepPath) {
         }
 
         // Update metadata with preview frame count
-        var metadataFile = new File(compFolder.fsName + "/metadata.json");
+        var metadataFile = new File(compFolder + "/metadata.json");
         if (metadataFile.exists) {
             try {
                 metadataFile.open('r');
@@ -1199,11 +1217,16 @@ function generatePreviewFrames(aepPath) {
  * @returns {string} - Path to settings file
  */
 function getSettingsFilePath() {
-    var settingsFolder = new Folder(Folder.userData.fsName + "/Blitzkrieg");
+    // Use Folder.userData directly (not .fsName) for cross-platform compatibility.
+    // On macOS, Folder.userData.fsName contains spaces (e.g., "Application Support")
+    // that break the Folder constructor. Folder.userData.toString() returns a
+    // properly URI-encoded path that works on all platforms.
+    var settingsFolder = new Folder(Folder.userData + "/Blitzkrieg");
     if (!settingsFolder.exists) {
         settingsFolder.create();
     }
-    return settingsFolder.fsName + "/settings.json";
+    // Return URI-based path (not fsName) so it works with new File() on macOS
+    return settingsFolder + "/settings.json";
 }
 
 /**
