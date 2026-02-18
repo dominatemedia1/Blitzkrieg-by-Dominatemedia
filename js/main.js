@@ -849,8 +849,9 @@
         img.dataset.originalSrc = originalSrc;
 
         // Pre-convert frame paths for faster access
+        // Encode spaces for macOS paths where fsName contains literal spaces
         var frameSrcs = previewFrames.map(function(path) {
-            return 'file:///' + path.replace(/\\/g, '/').replace(/"/g, '%22');
+            return 'file:///' + path.replace(/\\/g, '/').replace(/ /g, '%20').replace(/"/g, '%22');
         });
 
         // Add preview indicator
@@ -990,7 +991,8 @@
             var safeCategory = escapeHTML(comp.category);
             var safeAepPath = escapeHTML(comp.aepPath);
             var safeName = escapeHTML(comp.name);
-            var thumbSrc = comp.thumbPath ? 'file:///' + comp.thumbPath.replace(/\\/g, '/').replace(/"/g, '%22') : '';
+            // Encode spaces for macOS paths where fsName contains literal spaces
+            var thumbSrc = comp.thumbPath ? 'file:///' + comp.thumbPath.replace(/\\/g, '/').replace(/ /g, '%20').replace(/"/g, '%22') : '';
             var safeThumbSrc = escapeHTML(thumbSrc);
 
             // Prepare preview frames data attribute (JSON encoded)
