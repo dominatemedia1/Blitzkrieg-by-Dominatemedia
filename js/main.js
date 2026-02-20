@@ -383,6 +383,28 @@
         return true;
     }
 
+    /**
+     * Converts a local file system path to a proper file:// URL.
+     * Handles cross-platform differences:
+     * - macOS paths start with / (e.g., /Users/name/...) → file:///Users/name/...
+     * - Windows paths start with drive letter (e.g., C:\...) → file:///C:/...
+     * Encodes spaces and special characters for URL compatibility.
+     * @param {string} path - File system path (fsName)
+     * @returns {string} - Properly formatted file:// URL
+     */
+    function pathToFileUrl(path) {
+        if (!path) return '';
+        var normalized = path.replace(/\\/g, '/');
+        // Encode spaces and quotes for URL compatibility
+        normalized = normalized.replace(/ /g, '%20').replace(/"/g, '%22').replace(/#/g, '%23');
+        // On macOS/Linux, paths start with / so file:// + /path = file:///path (correct)
+        // On Windows, paths start with C:/ so file:/// + C:/path = file:///C:/path (correct)
+        if (normalized.charAt(0) === '/') {
+            return 'file://' + normalized;
+        }
+        return 'file:///' + normalized;
+    }
+
     function showToast(message, isError) {
         if (toastTimeout) clearTimeout(toastTimeout);
         message = message.replace(/^(Success!|Success:|Error:)\s*/, '');
@@ -848,10 +870,9 @@
         // Store original src for restoration
         img.dataset.originalSrc = originalSrc;
 
-        // Pre-convert frame paths for faster access
-        // Encode spaces for macOS paths where fsName contains literal spaces
+        // Pre-convert frame paths to proper file:// URLs
         var frameSrcs = previewFrames.map(function(path) {
-            return 'file:///' + path.replace(/\\/g, '/').replace(/ /g, '%20').replace(/"/g, '%22');
+            return pathToFileUrl(path);
         });
 
         // Add preview indicator
@@ -991,8 +1012,8 @@
             var safeCategory = escapeHTML(comp.category);
             var safeAepPath = escapeHTML(comp.aepPath);
             var safeName = escapeHTML(comp.name);
-            // Encode spaces for macOS paths where fsName contains literal spaces
-            var thumbSrc = comp.thumbPath ? 'file:///' + comp.thumbPath.replace(/\\/g, '/').replace(/ /g, '%20').replace(/"/g, '%22') : '';
+            // Convert thumbnail path to proper file:// URL
+            var thumbSrc = comp.thumbPath ? pathToFileUrl(comp.thumbPath) : '';
             var safeThumbSrc = escapeHTML(thumbSrc);
 
             // Prepare preview frames data attribute (JSON encoded)

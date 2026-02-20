@@ -20,7 +20,10 @@
                 <Resources>
                     <MainPath>./index.html</MainPath>
                     <ScriptPath>./jsx/hostscript.jsx</ScriptPath>
-                    <CEFCommandLine/>
+                    <CEFCommandLine>
+                        <Parameter>--allow-file-access-from-files</Parameter>
+                        <Parameter>--allow-file-access</Parameter>
+                    </CEFCommandLine>
                 </Resources>
                 <Lifecycle>
                     <AutoVisible>true</AutoVisible>

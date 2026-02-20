@@ -306,19 +306,28 @@ function isValidName(name) {
 /**
  * Normalizes a file system path for use with ExtendScript File/Folder constructors.
  * On macOS, .fsName returns POSIX paths (e.g., /Users/name/Library/Application Support)
- * with literal spaces. ExtendScript interprets /-prefixed paths as URI paths where
- * spaces are invalid, causing path construction to break silently.
- * This function encodes spaces only in Unix-style paths (starting with /).
- * Windows paths (starting with drive letter like C:\) are left unchanged.
+ * with literal special characters. ExtendScript interprets /-prefixed paths as URI paths,
+ * so special characters (spaces, #, etc.) must be percent-encoded.
+ * Windows paths (starting with drive letter like C:\) are handled natively by ExtendScript.
+ * This function splits the path into components and encodes each one individually,
+ * preserving the / path separators.
  * @param {string} path - File system path (typically from .fsName)
  * @returns {string} - Path safe for use with new File() or new Folder()
  */
 function normalizeFsPath(path) {
     if (!path || typeof path !== 'string') return path;
-    // Only encode spaces for Unix-style paths (macOS/Linux)
+    // Only encode for Unix-style paths (macOS/Linux)
     // Windows paths start with a drive letter and are handled natively
     if (path.charAt(0) === '/') {
-        return path.replace(/ /g, '%20');
+        // Split path into components, encode each, rejoin with /
+        // This preserves / separators while encoding special chars in folder names
+        var parts = path.split('/');
+        for (var i = 0; i < parts.length; i++) {
+            if (parts[i].length > 0) {
+                parts[i] = encodeURIComponent(parts[i]);
+            }
+        }
+        return parts.join('/');
     }
     return path;
 }
