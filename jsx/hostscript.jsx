@@ -307,10 +307,24 @@ function isValidName(name) {
  * Normalizes a file system path for use with ExtendScript File/Folder constructors.
  * On macOS, .fsName returns POSIX paths (e.g., /Users/name/Library/Application Support)
  * with literal special characters. ExtendScript interprets /-prefixed paths as URI paths,
- * so special characters (spaces, #, etc.) must be percent-encoded.
- * Windows paths (starting with drive letter like C:\) are handled natively by ExtendScript.
- * This function splits the path into components and encodes each one individually,
- * preserving the / path separators.
+ * so characters with special URI meaning (space, #, ?) must be percent-encoded.
+ *
+ * IMPORTANT: We deliberately do NOT use encodeURIComponent() here because:
+ * 1. It produces UTF-8 percent-encoding for non-ASCII characters (e.g., é → %C3%A9)
+ *    which ExtendScript may not properly decode back to UTF-16
+ * 2. It encodes characters like @, $, +, =, :, ; which are valid in URI paths
+ *    and would confuse ExtendScript's URI parser
+ * 3. Non-ASCII characters (accented letters, CJK, etc.) work fine when passed
+ *    directly to new Folder()/new File() in ExtendScript
+ *
+ * We only encode the three characters that have special meaning in URIs
+ * and commonly appear in macOS file paths:
+ * - Space → %20 (common in "Application Support", user folder names, etc.)
+ * - # → %23 (would be interpreted as fragment separator)
+ * - ? → %3F (would be interpreted as query string start)
+ *
+ * Windows paths (starting with drive letter like C:\) are returned unchanged.
+ *
  * @param {string} path - File system path (typically from .fsName)
  * @returns {string} - Path safe for use with new File() or new Folder()
  */
@@ -319,17 +333,47 @@ function normalizeFsPath(path) {
     // Only encode for Unix-style paths (macOS/Linux)
     // Windows paths start with a drive letter and are handled natively
     if (path.charAt(0) === '/') {
-        // Split path into components, encode each, rejoin with /
-        // This preserves / separators while encoding special chars in folder names
-        var parts = path.split('/');
-        for (var i = 0; i < parts.length; i++) {
-            if (parts[i].length > 0) {
-                parts[i] = encodeURIComponent(parts[i]);
-            }
-        }
-        return parts.join('/');
+        // Encode only URI-significant characters that appear in file paths
+        // Do NOT use encodeURIComponent - it breaks non-ASCII chars in ExtendScript
+        return path.replace(/ /g, '%20').replace(/#/g, '%23').replace(/\?/g, '%3F');
     }
     return path;
+}
+
+/**
+ * Creates a Folder object from an fsName path, with fallback.
+ * First tries the normalized (URI-encoded) path, then falls back to the raw path.
+ * This ensures folders are found even if normalizeFsPath produces an unexpected result.
+ * @param {string} fsPath - File system path (typically from .fsName or user input)
+ * @returns {Folder} - Folder object (may or may not exist)
+ */
+function folderFromPath(fsPath) {
+    var folder = new Folder(normalizeFsPath(fsPath));
+    if (!folder.exists) {
+        // Fallback: try the raw path in case normalization broke it
+        var rawFolder = new Folder(fsPath);
+        if (rawFolder.exists) {
+            return rawFolder;
+        }
+    }
+    return folder;
+}
+
+/**
+ * Creates a File object from an fsName path, with fallback.
+ * First tries the normalized (URI-encoded) path, then falls back to the raw path.
+ * @param {string} fsPath - File system path
+ * @returns {File} - File object (may or may not exist)
+ */
+function fileFromPath(fsPath) {
+    var file = new File(normalizeFsPath(fsPath));
+    if (!file.exists) {
+        var rawFile = new File(fsPath);
+        if (rawFile.exists) {
+            return rawFile;
+        }
+    }
+    return file;
 }
 
 function selectLibraryFolder() {
@@ -341,92 +385,127 @@ function selectLibraryFolder() {
 }
 
 /**
+ * Safely decodes a URI-encoded string. Returns the original string if decoding fails.
+ * This prevents URIError exceptions when folder names contain literal % characters
+ * (e.g., "50%OFF" would cause decodeURI to throw because %OF is not valid percent-encoding).
+ * @param {string} str - The string to decode
+ * @returns {string} - Decoded string, or original string if decoding fails
+ */
+function safeDecodeURI(str) {
+    try {
+        return decodeURI(str);
+    } catch (e) {
+        // If decoding fails (e.g., folder name contains literal % like "50%OFF"),
+        // return the original string as-is
+        return str;
+    }
+}
+
+/**
  * OPTIMIZED: Gets all stashed compositions from the library
  * Performance improvements:
  * - Minimized file object creation
  * - Batch string operations
  * - Reduced redundant existence checks
  * - Optimized loop structure
+ *
+ * IMPORTANT: This function is wrapped in try-catch because it's called via
+ * csInterface.evalScript. An uncaught exception would return "EvalScript error."
+ * instead of JSON, causing the JavaScript side to fail silently.
  */
 function getStashedComps(libraryPath) {
     if (!isValidPath(libraryPath)) return "[]";
-    var mainFolder = new Folder(normalizeFsPath(libraryPath));
-    if (!mainFolder.exists) return "[]";
 
-    var compsData = [];
-    var categoryFolders = mainFolder.getFiles(function(f) { return f instanceof Folder; });
-    var numCategories = categoryFolders.length;
+    try {
+        var mainFolder = folderFromPath(libraryPath);
+        if (!mainFolder.exists) return "[]";
 
-    for (var i = 0; i < numCategories; i++) {
-        var categoryFolder = categoryFolders[i];
-        var categoryName = decodeURI(categoryFolder.name);
-        var compFolders = categoryFolder.getFiles(function(f) { return f instanceof Folder; });
-        var numComps = compFolders.length;
+        var compsData = [];
+        var categoryFolders = mainFolder.getFiles(function(f) { return f instanceof Folder; });
+        var numCategories = categoryFolders.length;
 
-        for (var j = 0; j < numComps; j++) {
-            var compFolder = compFolders[j];
-            var compFolderPath = compFolder.fsName;
-            var compFolderName = compFolder.name;
+        for (var i = 0; i < numCategories; i++) {
+            var categoryFolder = categoryFolders[i];
+            // Use safeDecodeURI to prevent URIError on folder names with literal %
+            var categoryName = safeDecodeURI(categoryFolder.name);
+            var compFolders = categoryFolder.getFiles(function(f) { return f instanceof Folder; });
+            var numComps = compFolders.length;
 
-            // Quick check for .aep files - use glob pattern
-            var aepFiles = compFolder.getFiles("*.aep");
-            if (aepFiles.length === 0) continue;
-            var aepFile = aepFiles[0];
-            if (!(aepFile instanceof File)) continue;
-
-            // Fast path: derive display name from folder name
-            var displayName = decodeURI(compFolderName.split('_').slice(0, -1).join(' '));
-            var previewFrameCount = 0;
-            var duration = 0;
-
-            // Read metadata - use Folder object (not fsName) for macOS compatibility
-            var metadataFile = new File(compFolder + "/metadata.json");
-            if (metadataFile.exists) {
+            for (var j = 0; j < numComps; j++) {
                 try {
-                    metadataFile.open('r');
-                    metadataFile.encoding = 'UTF-8';
-                    var metaContent = metadataFile.read();
-                    metadataFile.close();
+                    var compFolder = compFolders[j];
+                    var compFolderPath = compFolder.fsName;
+                    var compFolderName = compFolder.name;
 
-                    if (metaContent) {
-                        var metadata = JSON.parse(metaContent);
-                        displayName = metadata.displayName || displayName;
-                        previewFrameCount = metadata.previewFrames || 0;
-                        duration = metadata.duration || 0;
+                    // Quick check for .aep files - use glob pattern
+                    var aepFiles = compFolder.getFiles("*.aep");
+                    if (aepFiles.length === 0) continue;
+                    var aepFile = aepFiles[0];
+                    if (!(aepFile instanceof File)) continue;
+
+                    // Fast path: derive display name from folder name
+                    // Use safeDecodeURI to prevent URIError on names with literal %
+                    var displayName = safeDecodeURI(compFolderName.split('_').slice(0, -1).join(' '));
+                    var previewFrameCount = 0;
+                    var duration = 0;
+
+                    // Read metadata - use Folder object (not fsName) for macOS compatibility
+                    var metadataFile = new File(compFolder + "/metadata.json");
+                    if (metadataFile.exists) {
+                        try {
+                            metadataFile.open('r');
+                            metadataFile.encoding = 'UTF-8';
+                            var metaContent = metadataFile.read();
+                            metadataFile.close();
+
+                            if (metaContent) {
+                                var metadata = JSON.parse(metaContent);
+                                displayName = metadata.displayName || displayName;
+                                previewFrameCount = metadata.previewFrames || 0;
+                                duration = metadata.duration || 0;
+                            }
+                        } catch (metaErr) {
+                            try { metadataFile.close(); } catch (closeErr) {}
+                        }
                     }
-                } catch (e) {
-                    try { metadataFile.close(); } catch (closeErr) {}
+
+                    // Check thumbnail existence - use Folder object for path construction
+                    var thumbPath = compFolderPath + "/comp.png";
+                    var thumbFile = new File(compFolder + "/comp.png");
+                    var hasThumb = thumbFile.exists;
+
+                    // Build preview frame paths only if we know they exist
+                    var previewFramePaths = [];
+                    if (previewFrameCount > 0) {
+                        var previewFolderPath = compFolderPath + "/preview";
+                        // Pre-build all frame paths without checking each one
+                        // This is faster - we trust the metadata count
+                        for (var pf = 0; pf < previewFrameCount; pf++) {
+                            previewFramePaths.push(previewFolderPath + "/frame_" + pf + ".png");
+                        }
+                    }
+
+                    compsData.push({
+                        name: displayName,
+                        category: categoryName,
+                        uniqueId: compFolderName,
+                        aepPath: aepFile.fsName,
+                        thumbPath: hasThumb ? thumbPath : null,
+                        previewFrames: previewFramePaths,
+                        duration: duration
+                    });
+                } catch (compErr) {
+                    // Skip this comp but continue loading others
+                    $.writeln("Blitzkrieg: Warning - Could not load comp: " + compErr.toString());
                 }
             }
-
-            // Check thumbnail existence - use Folder object for path construction
-            var thumbPath = compFolderPath + "/comp.png";
-            var thumbFile = new File(compFolder + "/comp.png");
-            var hasThumb = thumbFile.exists;
-
-            // Build preview frame paths only if we know they exist
-            var previewFramePaths = [];
-            if (previewFrameCount > 0) {
-                var previewFolderPath = compFolderPath + "/preview";
-                // Pre-build all frame paths without checking each one
-                // This is faster - we trust the metadata count
-                for (var pf = 0; pf < previewFrameCount; pf++) {
-                    previewFramePaths.push(previewFolderPath + "/frame_" + pf + ".png");
-                }
-            }
-
-            compsData.push({
-                name: displayName,
-                category: categoryName,
-                uniqueId: compFolderName,
-                aepPath: aepFile.fsName,
-                thumbPath: hasThumb ? thumbPath : null,
-                previewFrames: previewFramePaths,
-                duration: duration
-            });
         }
+        return JSON.stringify(compsData);
+    } catch (e) {
+        $.writeln("Blitzkrieg: Error in getStashedComps: " + e.toString());
+        // Return empty array instead of throwing - prevents evalScript from returning error string
+        return "[]";
     }
-    return JSON.stringify(compsData);
 }
 
 
@@ -465,7 +544,7 @@ function stashSelectedComp(libraryPath, categoryName) {
         var safeCompName = compToSaveName.replace(/[^a-z0-9]/gi, '_').replace(/_{2,}/g, '_');
 
         // --- Create folder structure (use normalizeFsPath for macOS compatibility) ---
-        var categoryFolder = new Folder(normalizeFsPath(libraryPath + "/" + categoryName));
+        var categoryFolder = folderFromPath(libraryPath + "/" + categoryName);
         if (!categoryFolder.exists) {
             if (!categoryFolder.create()) {
                 return "Error: Could not create category folder.";
@@ -655,7 +734,7 @@ function importComp(aepPath) {
     try {
         if (!app.project) return "Error: Please open a project first.";
 
-        var fileToImport = new File(normalizeFsPath(aepPath));
+        var fileToImport = fileFromPath(aepPath);
         if (!fileToImport.exists) return "Error: Source AEP file not found.";
 
         // Quick metadata read for comp name - use parent Folder object for macOS compatibility
@@ -751,7 +830,7 @@ function renameStashedComp(libraryPath, category, uniqueId, newName) {
     }
 
     try {
-        var aepFolder = new Folder(normalizeFsPath(libraryPath + "/" + category + "/" + uniqueId));
+        var aepFolder = folderFromPath(libraryPath + "/" + category + "/" + uniqueId);
         var metadataFile = new File(aepFolder + "/metadata.json");
         var metadata = {};
         if (metadataFile.exists) {
@@ -790,7 +869,7 @@ function deleteStashedComp(libraryPath, category, uniqueId) {
 
     try {
         var compFolderPath = libraryPath + "/" + category + "/" + uniqueId;
-        var compFolder = new Folder(normalizeFsPath(compFolderPath));
+        var compFolder = folderFromPath(compFolderPath);
         if (compFolder.exists) {
             function removeFolderRecursive(folder) {
                 var items = folder.getFiles();
@@ -832,13 +911,13 @@ function renameCategory(libraryPath, oldName, newName) {
     }
 
     try {
-        var oldFolder = new Folder(normalizeFsPath(libraryPath + "/" + oldName));
+        var oldFolder = folderFromPath(libraryPath + "/" + oldName);
         if (!oldFolder.exists) {
             return "Error: Category folder not found.";
         }
 
         // Check if a category with the new name already exists
-        var newFolder = new Folder(normalizeFsPath(libraryPath + "/" + newName));
+        var newFolder = folderFromPath(libraryPath + "/" + newName);
         if (newFolder.exists) {
             return "Error: A category with that name already exists.";
         }
@@ -846,7 +925,7 @@ function renameCategory(libraryPath, oldName, newName) {
         // Rename the folder
         if (oldFolder.rename(newName)) {
             // Update metadata.json in each comp folder to reflect new category
-            var renamedFolder = new Folder(normalizeFsPath(libraryPath + "/" + newName));
+            var renamedFolder = folderFromPath(libraryPath + "/" + newName);
             var compFolders = renamedFolder.getFiles(function(f) { return f instanceof Folder; });
             for (var i = 0; i < compFolders.length; i++) {
                 var metadataFile = new File(compFolders[i] + "/metadata.json");
@@ -893,7 +972,7 @@ function deleteCategory(libraryPath, categoryName) {
     }
 
     try {
-        var categoryFolder = new Folder(normalizeFsPath(libraryPath + "/" + categoryName));
+        var categoryFolder = folderFromPath(libraryPath + "/" + categoryName);
         if (!categoryFolder.exists) {
             return "Error: Category folder not found.";
         }
@@ -938,20 +1017,20 @@ function moveCompToCategory(libraryPath, uniqueId, oldCategory, newCategory) {
     }
 
     try {
-        var sourceFolder = new Folder(normalizeFsPath(libraryPath + "/" + oldCategory + "/" + uniqueId));
+        var sourceFolder = folderFromPath(libraryPath + "/" + oldCategory + "/" + uniqueId);
         if (!sourceFolder.exists) {
             return "Error: Source comp folder not found.";
         }
 
         // Ensure target category exists
-        var targetCategoryFolder = new Folder(normalizeFsPath(libraryPath + "/" + newCategory));
+        var targetCategoryFolder = folderFromPath(libraryPath + "/" + newCategory);
         if (!targetCategoryFolder.exists) {
             if (!targetCategoryFolder.create()) {
                 return "Error: Could not create target category folder.";
             }
         }
 
-        var targetFolder = new Folder(normalizeFsPath(libraryPath + "/" + newCategory + "/" + uniqueId));
+        var targetFolder = folderFromPath(libraryPath + "/" + newCategory + "/" + uniqueId);
         if (targetFolder.exists) {
             return "Error: A comp with the same ID already exists in the target category.";
         }
@@ -1035,7 +1114,7 @@ function createCategory(libraryPath, categoryName) {
     }
 
     try {
-        var categoryFolder = new Folder(normalizeFsPath(libraryPath + "/" + categoryName));
+        var categoryFolder = folderFromPath(libraryPath + "/" + categoryName);
         if (categoryFolder.exists) {
             return "Error: A category with that name already exists.";
         }
@@ -1074,7 +1153,7 @@ function generatePreviewFrames(aepPath) {
         originalProjectFile = app.project.file;
         projectWasDirty = app.project.dirty;
 
-        var aepFile = new File(normalizeFsPath(aepPath));
+        var aepFile = fileFromPath(aepPath);
         if (!aepFile.exists) {
             return "Error: AEP file not found at: " + aepPath;
         }
