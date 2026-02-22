@@ -388,15 +388,20 @@
      * Handles cross-platform differences:
      * - macOS paths start with / (e.g., /Users/name/...) → file:///Users/name/...
      * - Windows paths start with drive letter (e.g., C:\...) → file:///C:/...
-     * Encodes spaces and special characters for URL compatibility.
+     * Encodes special characters that are invalid in URLs.
      * @param {string} path - File system path (fsName)
      * @returns {string} - Properly formatted file:// URL
      */
     function pathToFileUrl(path) {
         if (!path) return '';
         var normalized = path.replace(/\\/g, '/');
-        // Encode spaces and quotes for URL compatibility
-        normalized = normalized.replace(/ /g, '%20').replace(/"/g, '%22').replace(/#/g, '%23');
+        // Encode characters that have special meaning in URLs but can appear in file paths
+        normalized = normalized
+            .replace(/%/g, '%25')   // Must be first to avoid double-encoding
+            .replace(/ /g, '%20')   // Spaces (common in macOS paths like "Application Support")
+            .replace(/#/g, '%23')   // Fragment separator
+            .replace(/\?/g, '%3F') // Query string separator
+            .replace(/"/g, '%22'); // Double quotes
         // On macOS/Linux, paths start with / so file:// + /path = file:///path (correct)
         // On Windows, paths start with C:/ so file:/// + C:/path = file:///C:/path (correct)
         if (normalized.charAt(0) === '/') {
@@ -659,10 +664,17 @@
         var safePath = escapeForExtendScript(path);
         csInterface.evalScript('getStashedComps("' + safePath + '")', function (result) {
             try {
-                allComps = (result && result !== '[]') ? JSON.parse(result).sort(function (a, b) { return a.name.localeCompare(b.name); }) : [];
+                // Check for ExtendScript error responses
+                if (!result || result === 'undefined' || result === 'null' || result.indexOf('EvalScript error') !== -1) {
+                    console.warn("Blitzkrieg: getStashedComps returned unexpected result:", result);
+                    allComps = [];
+                    renderUI();
+                    return;
+                }
+                allComps = (result !== '[]') ? JSON.parse(result).sort(function (a, b) { return a.name.localeCompare(b.name); }) : [];
                 renderUI();
             } catch (e) {
-                console.error("Failed to parse comps data:", e);
+                console.error("Blitzkrieg: Failed to parse comps data:", e, "Raw result:", result);
                 allComps = [];
                 showPlaceholder("Error loading library. Check console for details.");
             } finally {
