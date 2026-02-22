@@ -560,21 +560,52 @@ function stashSelectedComp(libraryPath, categoryName) {
         // --- Create a duplicate project for the library ---
         app.beginUndoGroup("Blitzkrieg Stash");
 
-        // Find the comp ID before any modifications
+        // Capture comp ID before any project modifications.
         var compId = compToSave.id;
 
-        // Reduce project to only include selected comp and its dependencies
-        app.project.reduceProject([compToSave]);
+        // macOS FIX: Re-find the comp by ID after app.project.save().
+        // On macOS AE 2024+, project.save() can invalidate existing item references internally,
+        // causing reduceProject([compToSave]) to throw:
+        //   "Object of type Folder found where a Number, Array, or Property is needed"
+        // because AE's engine can no longer recognise the stale reference as a CompItem.
+        // Searching by ID gives us a fresh, valid reference every time.
+        var freshComp = null;
+        for (var ri = 1; ri <= app.project.numItems; ri++) {
+            try {
+                var riItem = app.project.item(ri);
+                if ((riItem instanceof CompItem) && riItem.id === compId) {
+                    freshComp = riItem;
+                    break;
+                }
+            } catch (riErr) { /* skip any inaccessible items */ }
+        }
+        if (!freshComp) freshComp = compToSave; // safe fallback
+
+        // Reduce project to only include selected comp and its dependencies.
+        // Wrapped in try-catch because on macOS, reduceProject can fail with a "Folder" type
+        // error when the project has folder-structured items or when running on Apple Silicon.
+        // If it fails we continue without reduction; the saved AEP will be larger but fully
+        // functional - the user's original project is restored afterwards either way.
+        try {
+            app.project.reduceProject([freshComp]);
+        } catch (reduceErr) {
+            $.writeln("Blitzkrieg: reduceProject failed (" + reduceErr.toString() + ") - saving without reduction.");
+        }
 
         // Create footage folder and collect files
         var footageFolder = new Folder(compFolder + "/(Footage)");
         footageFolder.create();
 
-        // Collect all footage items
+        // Collect all footage items.
+        // Cache numItems before the loop so it stays stable even if AE updates the count.
         var collectedFiles = {};
-        for (var i = 1; i <= app.project.numItems; i++) {
-            var item = app.project.item(i);
-            if (item instanceof FootageItem && item.mainSource && item.mainSource.file) {
+        var totalItems = app.project.numItems;
+        for (var i = 1; i <= totalItems; i++) {
+            try {
+                var item = app.project.item(i);
+                if (!(item instanceof FootageItem)) continue;
+                if (!item.mainSource || !item.mainSource.file) continue;
+
                 var sourceFile = item.mainSource.file;
                 // Skip system files and already collected files
                 if (sourceFile.exists && !collectedFiles[sourceFile.fsName]) {
@@ -605,6 +636,8 @@ function stashSelectedComp(libraryPath, categoryName) {
                         }
                     }
                 }
+            } catch (itemErr) {
+                $.writeln("Blitzkrieg: Warning - Could not process item " + i + ": " + itemErr.toString());
             }
         }
 
