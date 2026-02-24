@@ -78,6 +78,8 @@
     var currentCategoryDeleteInfo = null;
     var currentMoveCompInfo = null;
     var isLoading = false; // Prevents race conditions in async operations
+    var pendingLibraryReload = false; // Deferred reload when loadLibrary is called while isLoading
+    var stashInProgress = false; // Suppresses focus-triggered loads during stash/generate operations
 
     // Favorites and recent comps
     var favoriteComps = []; // Array of uniqueIds
@@ -452,7 +454,7 @@
         // Auto-refresh library when panel gains focus (ensures categories stay in sync)
         window.addEventListener('focus', function() {
             var libraryPath = getLibraryPath();
-            if (libraryPath && !isLoading) {
+            if (libraryPath && !isLoading && !stashInProgress) {
                 loadLibrary(libraryPath);
             }
         });
@@ -654,12 +656,14 @@
             showToast('Invalid library path.', true);
             return;
         }
-        // Prevent concurrent library loads (race condition fix)
+        // Prevent concurrent library loads - defer instead of dropping
         if (isLoading) {
-            console.log("Blitzkrieg: Library load already in progress, skipping...");
+            console.log("Blitzkrieg: Library load already in progress, deferring reload...");
+            pendingLibraryReload = true;
             return;
         }
         isLoading = true;
+        pendingLibraryReload = false;
         showSpinner();
         var safePath = escapeForExtendScript(path);
         csInterface.evalScript('getStashedComps("' + safePath + '")', function (result) {
@@ -680,6 +684,11 @@
             } finally {
                 isLoading = false;
                 hideSpinner();
+                // If another load was requested while we were loading, execute it now
+                if (pendingLibraryReload) {
+                    pendingLibraryReload = false;
+                    loadLibrary(path);
+                }
             }
         });
     }
@@ -1212,7 +1221,9 @@
         showToast('Generating preview for "' + compName + '"...');
 
         var safePath = escapeForExtendScript(aepPath);
+        stashInProgress = true;
         csInterface.evalScript('generatePreviewFrames("' + safePath + '")', function(result) {
+            stashInProgress = false;
             hideSpinner();
             if (!result) {
                 showToast('Unexpected error generating preview.', true);
@@ -1224,6 +1235,10 @@
                 var libraryPath = getLibraryPath();
                 if (libraryPath) {
                     loadLibrary(libraryPath);
+                    // Safety: delayed retry for macOS AE 25.1 file system timing
+                    setTimeout(function() {
+                        loadLibrary(libraryPath);
+                    }, 1000);
                 }
             } else {
                 showToast(result, true);
@@ -1273,7 +1288,9 @@
         var safePath = escapeForExtendScript(libraryPath);
         var safeCategory = escapeForExtendScript(categoryName);
 
+        stashInProgress = true;
         csInterface.evalScript('stashSelectedComp("' + safePath + '","' + safeCategory + '")', function (result) {
+            stashInProgress = false;
             addBtn.disabled = false;
             addBtn.querySelector('span').textContent = 'Add Selected Comp';
             if (!result) { showToast('Unexpected error.', true); return; }
@@ -1281,6 +1298,10 @@
                 showToast(result);
                 // reload library
                 loadLibrary(libraryPath);
+                // Safety: delayed retry for macOS AE 25.1 file system timing
+                setTimeout(function() {
+                    loadLibrary(libraryPath);
+                }, 1000);
             } else {
                 showToast(result, true);
             }
