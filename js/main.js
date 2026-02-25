@@ -454,8 +454,14 @@
         // Auto-refresh library when panel gains focus (ensures categories stay in sync)
         window.addEventListener('focus', function() {
             var libraryPath = getLibraryPath();
-            if (libraryPath && !isLoading && !stashInProgress) {
-                loadLibrary(libraryPath);
+            if (libraryPath && !stashInProgress) {
+                if (isLoading) {
+                    // Defer the reload instead of dropping it - fixes race condition
+                    // on macOS AE 25.1 where focus fires during an active load
+                    pendingLibraryReload = true;
+                } else {
+                    loadLibrary(libraryPath);
+                }
             }
         });
 
@@ -666,7 +672,22 @@
         pendingLibraryReload = false;
         showSpinner();
         var safePath = escapeForExtendScript(path);
+
+        // Safety: reset isLoading if evalScript never returns (AE 25.1 edge case
+        // where project switching can cause evalScript callbacks to be dropped)
+        var loadSafetyTimeout = setTimeout(function() {
+            if (isLoading) {
+                console.warn("Blitzkrieg: Library load timed out after 15s, resetting...");
+                isLoading = false;
+                hideSpinner();
+                // Retry once after the timeout reset
+                var retryPath = getLibraryPath() || path;
+                loadLibrary(retryPath);
+            }
+        }, 15000);
+
         csInterface.evalScript('getStashedComps("' + safePath + '")', function (result) {
+            clearTimeout(loadSafetyTimeout);
             try {
                 // Check for ExtendScript error responses
                 if (!result || result === 'undefined' || result === 'null' || result.indexOf('EvalScript error') !== -1) {
@@ -1234,11 +1255,11 @@
                 // Reload library to show the new preview
                 var libraryPath = getLibraryPath();
                 if (libraryPath) {
+                    // Immediate reload attempt
                     loadLibrary(libraryPath);
-                    // Safety: delayed retry for macOS AE 25.1 file system timing
-                    setTimeout(function() {
-                        loadLibrary(libraryPath);
-                    }, 1000);
+                    // Progressive retries for macOS AE 25.1 file system and engine settling
+                    setTimeout(function() { loadLibrary(libraryPath); }, 1000);
+                    setTimeout(function() { loadLibrary(libraryPath); }, 3000);
                 }
             } else {
                 showToast(result, true);
@@ -1296,12 +1317,16 @@
             if (!result) { showToast('Unexpected error.', true); return; }
             if (result.indexOf('Success') === 0) {
                 showToast(result);
-                // reload library
+                // Auto-navigate to the category where the comp was just added
+                // so the user immediately sees their new composition
+                activeCategory = categoryName;
+                // Immediate reload attempt
                 loadLibrary(libraryPath);
-                // Safety: delayed retry for macOS AE 25.1 file system timing
-                setTimeout(function() {
-                    loadLibrary(libraryPath);
-                }, 1000);
+                // Progressive retries for macOS AE 25.1:
+                // app.open() during stash can delay file system visibility and
+                // cause evalScript calls to return stale data while AE settles
+                setTimeout(function() { loadLibrary(libraryPath); }, 1000);
+                setTimeout(function() { loadLibrary(libraryPath); }, 3000);
             } else {
                 showToast(result, true);
             }
