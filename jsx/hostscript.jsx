@@ -4,16 +4,18 @@
  * ============================================================================
  * JSON POLYFILL FOR EXTENDSCRIPT COMPATIBILITY
  * ============================================================================
- * ExtendScript (used in After Effects) does not have native JSON support in
- * all versions. This polyfill ensures JSON.parse and JSON.stringify work
- * correctly in both AE 2024 and AE 2025.
+ * ExtendScript (used in After Effects) does not have reliable native JSON
+ * support across all versions. Some AE versions on macOS have a broken native
+ * JSON.stringify that drops all keys and values. This polyfill ALWAYS replaces
+ * the native JSON to ensure correct behavior in AE 2024, AE 2025, and beyond.
  *
  * Based on Douglas Crockford's JSON2 (Public Domain)
  * ============================================================================
  */
-if (typeof JSON === 'undefined' || JSON === null) {
-    JSON = {};
-}
+// Always create a fresh JSON object. Some AE versions on macOS have a native
+// JSON whose stringify/parse are broken (output like [{: ,: }] with no keys/values).
+// By replacing the whole object we guarantee the polyfill methods are used.
+JSON = {};
 
 (function() {
     'use strict';
@@ -151,73 +153,84 @@ if (typeof JSON === 'undefined' || JSON === null) {
         '\\': '\\\\'
     };
 
-    if (typeof JSON.stringify !== 'function') {
-        JSON.stringify = function(value, replacer, space) {
-            var i;
-            gap = '';
-            indent = '';
+    // Always install polyfill – never trust the native implementation.
+    // AE 2025 on macOS ships a native JSON.stringify that drops all keys
+    // and values, producing output like [{: ,: }] instead of valid JSON.
+    JSON.stringify = function(value, replacer, space) {
+        var i;
+        gap = '';
+        indent = '';
 
-            if (typeof space === 'number') {
-                for (i = 0; i < space; i += 1) {
-                    indent += ' ';
-                }
-            } else if (typeof space === 'string') {
-                indent = space;
+        if (typeof space === 'number') {
+            for (i = 0; i < space; i += 1) {
+                indent += ' ';
             }
+        } else if (typeof space === 'string') {
+            indent = space;
+        }
 
-            rep = replacer;
-            if (replacer && typeof replacer !== 'function' &&
-                (typeof replacer !== 'object' || typeof replacer.length !== 'number')) {
-                throw new Error('JSON.stringify');
-            }
+        rep = replacer;
+        if (replacer && typeof replacer !== 'function' &&
+            (typeof replacer !== 'object' || typeof replacer.length !== 'number')) {
+            throw new Error('JSON.stringify');
+        }
 
-            return str('', {'': value});
-        };
-    }
+        return str('', {'': value});
+    };
 
-    if (typeof JSON.parse !== 'function') {
-        JSON.parse = function(text, reviver) {
-            var j;
+    JSON.parse = function(text, reviver) {
+        var j;
 
-            function walk(holder, key) {
-                var k;
-                var v;
-                var value = holder[key];
-                if (value && typeof value === 'object') {
-                    for (k in value) {
-                        if (Object.prototype.hasOwnProperty.call(value, k)) {
-                            v = walk(value, k);
-                            if (v !== undefined) {
-                                value[k] = v;
-                            } else {
-                                delete value[k];
-                            }
+        function walk(holder, key) {
+            var k;
+            var v;
+            var value = holder[key];
+            if (value && typeof value === 'object') {
+                for (k in value) {
+                    if (Object.prototype.hasOwnProperty.call(value, k)) {
+                        v = walk(value, k);
+                        if (v !== undefined) {
+                            value[k] = v;
+                        } else {
+                            delete value[k];
                         }
                     }
                 }
-                return reviver.call(holder, key, value);
             }
+            return reviver.call(holder, key, value);
+        }
 
-            text = String(text);
-            rx_dangerous.lastIndex = 0;
-            if (rx_dangerous.test(text)) {
-                text = text.replace(rx_dangerous, function(a) {
-                    return '\\u' + ('0000' + a.charCodeAt(0).toString(16)).slice(-4);
-                });
-            }
+        text = String(text);
+        rx_dangerous.lastIndex = 0;
+        if (rx_dangerous.test(text)) {
+            text = text.replace(rx_dangerous, function(a) {
+                return '\\u' + ('0000' + a.charCodeAt(0).toString(16)).slice(-4);
+            });
+        }
 
-            if (rx_one.test(
-                text.replace(rx_two, '@')
-                    .replace(rx_three, ']')
-                    .replace(rx_four, ''))) {
-                j = eval('(' + text + ')');
-                return (typeof reviver === 'function')
-                    ? walk({'': j}, '')
-                    : j;
-            }
+        if (rx_one.test(
+            text.replace(rx_two, '@')
+                .replace(rx_three, ']')
+                .replace(rx_four, ''))) {
+            j = eval('(' + text + ')');
+            return (typeof reviver === 'function')
+                ? walk({'': j}, '')
+                : j;
+        }
 
-            throw new SyntaxError('JSON.parse');
-        };
+        throw new SyntaxError('JSON.parse');
+    };
+}());
+
+// Self-test: verify polyfill produces valid JSON (catches future regressions)
+(function() {
+    try {
+        var _t = JSON.stringify({"a": "b", "n": 1, "x": null});
+        if (_t.indexOf('"a"') === -1) {
+            $.writeln("Blitzkrieg: CRITICAL - JSON.stringify polyfill self-test FAILED: " + _t);
+        }
+    } catch (e) {
+        $.writeln("Blitzkrieg: CRITICAL - JSON.stringify self-test threw: " + e.toString());
     }
 }());
 
