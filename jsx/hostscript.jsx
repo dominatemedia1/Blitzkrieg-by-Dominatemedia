@@ -423,34 +423,335 @@ function safeDecodeURI(str) {
 }
 
 /**
- * OPTIMIZED: Gets all stashed compositions from the library
- * Performance improvements:
- * - Minimized file object creation
- * - Batch string operations
- * - Reduced redundant existence checks
- * - Optimized loop structure
+ * MACFIX: Robustly gets subfolders from a parent folder.
+ * On macOS, getFiles() with a function filter can fail to return results when the
+ * Folder's internal URI path has encoding issues. This function tries multiple
+ * strategies to ensure folders are found.
+ *
+ * Strategy 1: getFiles(function) - standard approach
+ * Strategy 2: getFiles() without filter + manual instanceof check
+ * Strategy 3: Recreate Folder from fsName + getFiles() + manual check
+ *
+ * @param {Folder} parentFolder - The folder to scan for subfolders
+ * @returns {Array} - Array of Folder objects
+ */
+function robustGetFolders(parentFolder) {
+    var folders = [];
+
+    // Strategy 1: getFiles with function filter (standard)
+    try {
+        folders = parentFolder.getFiles(function(f) { return f instanceof Folder; });
+        if (folders && folders.length > 0) return folders;
+    } catch (e1) {
+        $.writeln("Blitzkrieg: robustGetFolders strategy 1 failed: " + e1.toString());
+    }
+
+    // Strategy 2: getFiles() without filter, then manually filter
+    // On macOS, getFiles() without arguments is more reliable than with a function filter
+    try {
+        var allItems = parentFolder.getFiles();
+        folders = [];
+        if (allItems) {
+            for (var i = 0; i < allItems.length; i++) {
+                if (allItems[i] instanceof Folder) {
+                    folders.push(allItems[i]);
+                }
+            }
+        }
+        if (folders.length > 0) return folders;
+    } catch (e2) {
+        $.writeln("Blitzkrieg: robustGetFolders strategy 2 failed: " + e2.toString());
+    }
+
+    // Strategy 3: Recreate folder from fsName and try again
+    // On macOS, fsName gives the native POSIX path. Creating a new Folder from this
+    // may produce a different internal URI that getFiles() handles better.
+    try {
+        var fsPath = parentFolder.fsName;
+        if (fsPath) {
+            var freshFolder = new Folder(fsPath);
+            if (freshFolder.exists) {
+                var freshItems = freshFolder.getFiles();
+                folders = [];
+                if (freshItems) {
+                    for (var j = 0; j < freshItems.length; j++) {
+                        if (freshItems[j] instanceof Folder) {
+                            folders.push(freshItems[j]);
+                        }
+                    }
+                }
+                if (folders.length > 0) return folders;
+            }
+
+            // Strategy 4: Try with URI-encoded fsName (macOS spaces workaround)
+            var encodedPath = fsPath.replace(/ /g, '%20');
+            var encodedFolder = new Folder(encodedPath);
+            if (encodedFolder.exists) {
+                var encodedItems = encodedFolder.getFiles();
+                folders = [];
+                if (encodedItems) {
+                    for (var k = 0; k < encodedItems.length; k++) {
+                        if (encodedItems[k] instanceof Folder) {
+                            folders.push(encodedItems[k]);
+                        }
+                    }
+                }
+                if (folders.length > 0) return folders;
+            }
+        }
+    } catch (e3) {
+        $.writeln("Blitzkrieg: robustGetFolders strategy 3/4 failed: " + e3.toString());
+    }
+
+    return folders || [];
+}
+
+/**
+ * MACFIX: Robustly finds an .aep file inside a comp folder.
+ * On macOS, getFiles("*.aep") glob pattern can fail with URI-encoded folder paths.
+ * This function tries multiple strategies to locate the AEP file.
+ *
+ * @param {Folder} compFolder - The comp folder to search
+ * @returns {File|null} - The first .aep File found, or null
+ */
+function robustFindAep(compFolder) {
+    var aepFiles, allFiles, i;
+
+    // Strategy 1: glob pattern (standard)
+    try {
+        aepFiles = compFolder.getFiles("*.aep");
+        if (aepFiles && aepFiles.length > 0 && aepFiles[0] instanceof File) {
+            return aepFiles[0];
+        }
+    } catch (e1) {
+        $.writeln("Blitzkrieg: robustFindAep strategy 1 failed: " + e1.toString());
+    }
+
+    // Strategy 2: get all files, manually filter for .aep extension
+    try {
+        allFiles = compFolder.getFiles();
+        if (allFiles) {
+            for (i = 0; i < allFiles.length; i++) {
+                if (allFiles[i] instanceof File) {
+                    var name = allFiles[i].name.toLowerCase();
+                    // Match .aep extension, skip macOS resource forks (._prefix)
+                    if (name.length > 4 && name.substr(name.length - 4) === '.aep' && name.charAt(0) !== '.') {
+                        return allFiles[i];
+                    }
+                }
+            }
+            // If no non-hidden .aep found, try again including all .aep files
+            for (i = 0; i < allFiles.length; i++) {
+                if (allFiles[i] instanceof File) {
+                    var name2 = allFiles[i].name.toLowerCase();
+                    if (name2.length > 4 && name2.substr(name2.length - 4) === '.aep') {
+                        return allFiles[i];
+                    }
+                }
+            }
+        }
+    } catch (e2) {
+        $.writeln("Blitzkrieg: robustFindAep strategy 2 failed: " + e2.toString());
+    }
+
+    // Strategy 3: Recreate folder from fsName, then search
+    try {
+        var fsPath = compFolder.fsName;
+        if (fsPath) {
+            var freshFolder = new Folder(fsPath);
+            if (freshFolder.exists) {
+                allFiles = freshFolder.getFiles();
+                if (allFiles) {
+                    for (i = 0; i < allFiles.length; i++) {
+                        if (allFiles[i] instanceof File) {
+                            var name3 = allFiles[i].name.toLowerCase();
+                            if (name3.length > 4 && name3.substr(name3.length - 4) === '.aep' && name3.charAt(0) !== '.') {
+                                return allFiles[i];
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Strategy 4: Try with URI-encoded path
+            var encodedPath = fsPath.replace(/ /g, '%20');
+            var encodedFolder = new Folder(encodedPath);
+            if (encodedFolder.exists) {
+                allFiles = encodedFolder.getFiles();
+                if (allFiles) {
+                    for (i = 0; i < allFiles.length; i++) {
+                        if (allFiles[i] instanceof File) {
+                            var name4 = allFiles[i].name.toLowerCase();
+                            if (name4.length > 4 && name4.substr(name4.length - 4) === '.aep' && name4.charAt(0) !== '.') {
+                                return allFiles[i];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } catch (e3) {
+        $.writeln("Blitzkrieg: robustFindAep strategy 3/4 failed: " + e3.toString());
+    }
+
+    return null;
+}
+
+/**
+ * Diagnostic function: returns detailed info about the library folder structure.
+ * Call from JS via csInterface.evalScript('debugLibrary("path")') for troubleshooting.
+ * @param {string} libraryPath - Library path to inspect
+ * @returns {string} - JSON string with diagnostic info
+ */
+function debugLibrary(libraryPath) {
+    var info = {
+        path: libraryPath,
+        exists: false,
+        resolvedPath: '',
+        platform: $.os,
+        aeVersion: AE_VERSION_INFO.versionString,
+        categories: [],
+        errors: []
+    };
+
+    try {
+        if (!isValidPath(libraryPath)) {
+            info.errors.push("Invalid path");
+            return JSON.stringify(info);
+        }
+
+        var mainFolder = folderFromPath(libraryPath);
+        info.exists = mainFolder.exists;
+        info.resolvedPath = mainFolder.fsName;
+
+        if (!mainFolder.exists) {
+            info.errors.push("Main folder does not exist");
+
+            // Try alternative folder creation methods and report
+            var rawFolder = new Folder(libraryPath);
+            info.rawPathExists = rawFolder.exists;
+            var encodedFolder = new Folder(libraryPath.replace(/ /g, '%20'));
+            info.encodedPathExists = encodedFolder.exists;
+
+            return JSON.stringify(info);
+        }
+
+        // Scan categories
+        var allItems = mainFolder.getFiles();
+        info.totalItems = allItems ? allItems.length : 0;
+
+        var categoryFolders = robustGetFolders(mainFolder);
+
+        for (var i = 0; i < categoryFolders.length; i++) {
+            var catFolder = categoryFolders[i];
+            var catName = safeDecodeURI(catFolder.name);
+            if (catName.charAt(0) === '.') continue;
+
+            var catInfo = {
+                name: catName,
+                path: catFolder.fsName,
+                compFolders: []
+            };
+
+            var compFolders = robustGetFolders(catFolder);
+            for (var j = 0; j < compFolders.length; j++) {
+                var cmpFolder = compFolders[j];
+                var cmpName = safeDecodeURI(cmpFolder.name);
+                if (cmpName.charAt(0) === '.') continue;
+
+                var cmpInfo = {
+                    name: cmpName,
+                    path: cmpFolder.fsName,
+                    hasAep: false,
+                    hasMetadata: false,
+                    hasThumbnail: false,
+                    files: []
+                };
+
+                var cmpFiles = cmpFolder.getFiles();
+                if (cmpFiles) {
+                    for (var k = 0; k < cmpFiles.length; k++) {
+                        var f = cmpFiles[k];
+                        var fname = safeDecodeURI(f.name);
+                        cmpInfo.files.push(fname);
+                        if (fname.toLowerCase().indexOf('.aep') !== -1) cmpInfo.hasAep = true;
+                        if (fname === 'metadata.json') cmpInfo.hasMetadata = true;
+                        if (fname === 'comp.png') cmpInfo.hasThumbnail = true;
+                    }
+                }
+
+                catInfo.compFolders.push(cmpInfo);
+            }
+
+            info.categories.push(catInfo);
+        }
+    } catch (e) {
+        info.errors.push(e.toString());
+    }
+
+    return JSON.stringify(info);
+}
+
+/**
+ * Gets all stashed compositions from the library.
+ * Includes robust macOS compatibility with multiple fallback strategies for
+ * getFiles() operations that can fail with URI-encoded folder paths.
  *
  * IMPORTANT: This function is wrapped in try-catch because it's called via
  * csInterface.evalScript. An uncaught exception would return "EvalScript error."
  * instead of JSON, causing the JavaScript side to fail silently.
  */
 function getStashedComps(libraryPath) {
-    if (!isValidPath(libraryPath)) return "[]";
+    if (!isValidPath(libraryPath)) {
+        $.writeln("Blitzkrieg: getStashedComps - invalid path: " + libraryPath);
+        return "[]";
+    }
 
     try {
+        // --- Resolve the main library folder with multiple fallback strategies ---
+        // On macOS, ExtendScript treats /-prefixed paths as URIs. The Folder constructor
+        // may fail to enumerate contents if the internal URI representation is corrupted
+        // by double-encoding or if getFiles() doesn't work with the URI form.
         var mainFolder = folderFromPath(libraryPath);
-        if (!mainFolder.exists) return "[]";
+
+        // MACFIX: If folderFromPath's result doesn't exist, try additional strategies
+        if (!mainFolder.exists) {
+            // Strategy 2: raw string directly (works when path has no URI-special chars)
+            mainFolder = new Folder(libraryPath);
+        }
+        if (!mainFolder.exists) {
+            // Strategy 3: manually URI-encode only spaces (most common macOS issue)
+            mainFolder = new Folder(libraryPath.replace(/ /g, '%20'));
+        }
+        if (!mainFolder.exists) {
+            $.writeln("Blitzkrieg: getStashedComps - library folder not found: " + libraryPath);
+            return "[]";
+        }
+
+        $.writeln("Blitzkrieg: getStashedComps - scanning library: " + mainFolder.fsName);
 
         var compsData = [];
-        var categoryFolders = mainFolder.getFiles(function(f) { return f instanceof Folder; });
+
+        // --- Get category folders with robust fallback ---
+        // On macOS, getFiles(function) can fail to return results when the Folder's
+        // internal URI path has encoding issues. We use multiple strategies.
+        var categoryFolders = robustGetFolders(mainFolder);
+        $.writeln("Blitzkrieg: getStashedComps - found " + categoryFolders.length + " category folders");
+
         var numCategories = categoryFolders.length;
 
         for (var i = 0; i < numCategories; i++) {
             var categoryFolder = categoryFolders[i];
             // Use safeDecodeURI to prevent URIError on folder names with literal %
             var categoryName = safeDecodeURI(categoryFolder.name);
-            var compFolders = categoryFolder.getFiles(function(f) { return f instanceof Folder; });
+
+            // Skip hidden/system folders (macOS creates .DS_Store, .Spotlight, etc.)
+            if (categoryName.charAt(0) === '.') continue;
+
+            var compFolders = robustGetFolders(categoryFolder);
+
             var numComps = compFolders.length;
+            $.writeln("Blitzkrieg: getStashedComps - category '" + categoryName + "' has " + numComps + " comp folders");
 
             for (var j = 0; j < numComps; j++) {
                 try {
@@ -458,20 +759,31 @@ function getStashedComps(libraryPath) {
                     var compFolderPath = compFolder.fsName;
                     var compFolderName = compFolder.name;
 
-                    // Quick check for .aep files - use glob pattern
-                    var aepFiles = compFolder.getFiles("*.aep");
-                    if (aepFiles.length === 0) continue;
-                    var aepFile = aepFiles[0];
-                    if (!(aepFile instanceof File)) continue;
+                    // Skip hidden folders
+                    if (safeDecodeURI(compFolderName).charAt(0) === '.') continue;
+
+                    // --- Find .aep files with robust fallback ---
+                    // On macOS, getFiles("*.aep") glob can fail when the Folder's internal
+                    // URI path has encoding issues. We try multiple approaches.
+                    var aepFile = robustFindAep(compFolder);
+                    if (!aepFile) {
+                        $.writeln("Blitzkrieg: getStashedComps - no .aep in: " + compFolderPath);
+                        continue;
+                    }
 
                     // Fast path: derive display name from folder name
                     // Use safeDecodeURI to prevent URIError on names with literal %
-                    var displayName = safeDecodeURI(compFolderName.split('_').slice(0, -1).join(' '));
+                    var decodedFolderName = safeDecodeURI(compFolderName);
+                    var displayName = decodedFolderName.split('_').slice(0, -1).join(' ');
+                    if (!displayName) displayName = decodedFolderName; // Fallback if no underscore
                     var previewFrameCount = 0;
                     var duration = 0;
 
-                    // Read metadata - use buildPath for macOS compatibility
-                    var metadataFile = new File(buildPath(compFolder, "metadata.json"));
+                    // Read metadata - try multiple path strategies for macOS compatibility
+                    var metadataFile = fileFromPath(compFolderPath + "/metadata.json");
+                    if (!metadataFile.exists) {
+                        metadataFile = new File(buildPath(compFolder, "metadata.json"));
+                    }
                     if (metadataFile.exists) {
                         try {
                             metadataFile.open('r');
@@ -490,9 +802,12 @@ function getStashedComps(libraryPath) {
                         }
                     }
 
-                    // Check thumbnail existence
+                    // Check thumbnail existence - try multiple path strategies
                     var thumbPath = compFolderPath + "/comp.png";
-                    var thumbFile = new File(buildPath(compFolder, "comp.png"));
+                    var thumbFile = fileFromPath(thumbPath);
+                    if (!thumbFile.exists) {
+                        thumbFile = new File(buildPath(compFolder, "comp.png"));
+                    }
                     var hasThumb = thumbFile.exists;
 
                     // Build preview frame paths only if we know they exist
@@ -521,6 +836,7 @@ function getStashedComps(libraryPath) {
                 }
             }
         }
+        $.writeln("Blitzkrieg: getStashedComps - returning " + compsData.length + " comps");
         return JSON.stringify(compsData);
     } catch (e) {
         $.writeln("Blitzkrieg: Error in getStashedComps: " + e.toString());
@@ -742,8 +1058,40 @@ function stashSelectedComp(libraryPath, categoryName) {
         }
 
         // Save the reduced project to library
+        // Try the primary path first, then fallback strategies for macOS
         var finalAEPFile = new File(buildPath(compFolder, safeCompName + ".aep"));
+        $.writeln("Blitzkrieg: Saving AEP to: " + finalAEPFile.fsName);
         app.project.save(finalAEPFile);
+
+        // MACFIX: Verify the AEP was actually saved - app.project.save() can fail silently on macOS
+        if (!finalAEPFile.exists) {
+            $.writeln("Blitzkrieg: WARNING - AEP save failed at primary path, trying fallback...");
+            // Fallback: try saving with raw fsName path (no URI encoding)
+            var rawAEPPath = compFolder.fsName + "/" + safeCompName + ".aep";
+            var rawAEPFile = new File(rawAEPPath);
+            app.project.save(rawAEPFile);
+
+            if (!rawAEPFile.exists) {
+                $.writeln("Blitzkrieg: WARNING - AEP save failed at raw path too, trying comp.aep...");
+                // Last resort: save as comp.aep using a simple filename
+                var simpleAEPFile = new File(buildPath(compFolder, "comp.aep"));
+                app.project.save(simpleAEPFile);
+
+                if (!simpleAEPFile.exists) {
+                    // Try one more time with raw path
+                    var simpleRawFile = new File(compFolder.fsName + "/comp.aep");
+                    app.project.save(simpleRawFile);
+                }
+            }
+        }
+
+        // Log final verification
+        var savedAEP = robustFindAep(compFolder);
+        if (savedAEP) {
+            $.writeln("Blitzkrieg: AEP verified at: " + savedAEP.fsName);
+        } else {
+            $.writeln("Blitzkrieg: CRITICAL - No AEP file found after save attempts in: " + compFolder.fsName);
+        }
 
         app.endUndoGroup();
 

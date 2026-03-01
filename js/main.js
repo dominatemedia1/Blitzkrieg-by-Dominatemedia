@@ -673,6 +673,8 @@
         showSpinner();
         var safePath = escapeForExtendScript(path);
 
+        console.log("Blitzkrieg: loadLibrary called with path:", path);
+
         // Safety: reset isLoading if evalScript never returns (AE 25.1 edge case
         // where project switching can cause evalScript callbacks to be dropped)
         var loadSafetyTimeout = setTimeout(function() {
@@ -689,6 +691,9 @@
         csInterface.evalScript('getStashedComps("' + safePath + '")', function (result) {
             clearTimeout(loadSafetyTimeout);
             try {
+                console.log("Blitzkrieg: getStashedComps result length:", result ? result.length : 'null',
+                            "| first 200 chars:", result ? result.substring(0, 200) : 'null');
+
                 // Check for ExtendScript error responses
                 if (!result || result === 'undefined' || result === 'null' || result.indexOf('EvalScript error') !== -1) {
                     console.warn("Blitzkrieg: getStashedComps returned unexpected result:", result);
@@ -697,6 +702,7 @@
                     return;
                 }
                 allComps = (result !== '[]') ? JSON.parse(result).sort(function (a, b) { return a.name.localeCompare(b.name); }) : [];
+                console.log("Blitzkrieg: Loaded " + allComps.length + " comps");
                 renderUI();
             } catch (e) {
                 console.error("Blitzkrieg: Failed to parse comps data:", e, "Raw result:", result);
@@ -713,6 +719,30 @@
             }
         });
     }
+
+    /**
+     * Runs library diagnostics and logs detailed folder structure info to console.
+     * Call from dev tools: window.__blitzkriegDebug()
+     */
+    function runLibraryDiagnostics() {
+        var libraryPath = getLibraryPath();
+        if (!libraryPath) {
+            console.warn("Blitzkrieg Debug: No library path set");
+            return;
+        }
+        console.log("Blitzkrieg Debug: Running diagnostics for:", libraryPath);
+        var safePath = escapeForExtendScript(libraryPath);
+        csInterface.evalScript('debugLibrary("' + safePath + '")', function(result) {
+            try {
+                var info = JSON.parse(result);
+                console.log("Blitzkrieg Debug: Library diagnostics:", JSON.stringify(info, null, 2));
+            } catch (e) {
+                console.error("Blitzkrieg Debug: Failed to parse diagnostics:", e, "Raw:", result);
+            }
+        });
+    }
+    // Expose diagnostics to dev tools console
+    window.__blitzkriegDebug = runLibraryDiagnostics;
 
     function renderUI() { renderCategories(); renderCompsGrid(); }
 
@@ -1317,18 +1347,21 @@
             if (!result) { showToast('Unexpected error.', true); return; }
             if (result.indexOf('Success') === 0) {
                 showToast(result);
+                console.log("Blitzkrieg: Stash successful, refreshing library...");
                 // Auto-navigate to the category where the comp was just added
                 // so the user immediately sees their new composition
                 activeCategory = categoryName;
-                // Immediate reload attempt
+                // Progressive reload with increasing delays for macOS compatibility.
+                // On macOS, app.open() during stash can delay file system visibility
+                // and cause evalScript calls to return stale data while AE settles.
+                // We use escalating delays to ensure the UI eventually shows the new comp.
                 loadLibrary(libraryPath);
-                // Progressive retries for macOS AE 25.1:
-                // app.open() during stash can delay file system visibility and
-                // cause evalScript calls to return stale data while AE settles
-                setTimeout(function() { loadLibrary(libraryPath); }, 1000);
-                setTimeout(function() { loadLibrary(libraryPath); }, 3000);
+                setTimeout(function() { loadLibrary(libraryPath); }, 1500);
+                setTimeout(function() { loadLibrary(libraryPath); }, 4000);
+                setTimeout(function() { loadLibrary(libraryPath); }, 8000);
             } else {
                 showToast(result, true);
+                console.error("Blitzkrieg: Stash failed:", result);
             }
         });
     }
