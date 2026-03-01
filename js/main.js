@@ -99,6 +99,78 @@
     var sortSelect = null;
     var gridSizeButtons = null;
 
+    /* --------- Debug Log System --------- */
+    var debugLogPanel = document.getElementById('debug-log-panel');
+    var debugLogContent = document.getElementById('debug-log-content');
+    var debugLogEntries = [];
+    var MAX_LOG_ENTRIES = 200;
+
+    /**
+     * Logs a message to the in-panel debug log.
+     * @param {string} message - Message to log
+     * @param {string} level - 'info', 'warn', 'error', 'success'
+     */
+    function debugLog(message, level) {
+        level = level || 'info';
+        var time = new Date();
+        var timeStr = ('0' + time.getHours()).slice(-2) + ':' + ('0' + time.getMinutes()).slice(-2) + ':' + ('0' + time.getSeconds()).slice(-2) + '.' + ('00' + time.getMilliseconds()).slice(-3);
+        var entry = { time: timeStr, message: String(message), level: level };
+        debugLogEntries.push(entry);
+        if (debugLogEntries.length > MAX_LOG_ENTRIES) debugLogEntries.shift();
+
+        // Append to panel if visible
+        if (debugLogContent) {
+            var div = document.createElement('div');
+            div.className = 'log-entry';
+            div.innerHTML = '<span class="log-time">' + timeStr + '</span><span class="log-' + level + '">' + escapeHTML(String(message)) + '</span>';
+            debugLogContent.appendChild(div);
+            debugLogContent.scrollTop = debugLogContent.scrollHeight;
+        }
+
+        // Also log to console
+        if (level === 'error') console.error('Blitzkrieg:', message);
+        else if (level === 'warn') console.warn('Blitzkrieg:', message);
+        else console.log('Blitzkrieg:', message);
+    }
+
+    function toggleDebugLog() {
+        if (debugLogPanel.style.display === 'none') {
+            debugLogPanel.style.display = 'flex';
+            document.body.classList.add('debug-panel-open');
+        } else {
+            debugLogPanel.style.display = 'none';
+            document.body.classList.remove('debug-panel-open');
+        }
+    }
+
+    function initDebugLog() {
+        var closeBtn = document.getElementById('debug-log-close');
+        var clearBtn = document.getElementById('debug-log-clear');
+        var copyBtn = document.getElementById('debug-log-copy');
+
+        if (closeBtn) closeBtn.addEventListener('click', toggleDebugLog);
+        if (clearBtn) clearBtn.addEventListener('click', function() {
+            debugLogEntries = [];
+            if (debugLogContent) debugLogContent.innerHTML = '';
+        });
+        if (copyBtn) copyBtn.addEventListener('click', function() {
+            var text = debugLogEntries.map(function(e) { return e.time + ' [' + e.level.toUpperCase() + '] ' + e.message; }).join('\n');
+            copyToClipboard(text);
+            showToast('Bug log copied to clipboard.');
+        });
+
+        // Keyboard shortcut: Ctrl+Shift+D or Cmd+Shift+D to toggle debug log
+        document.addEventListener('keydown', function(e) {
+            if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'D') {
+                e.preventDefault();
+                toggleDebugLog();
+            }
+        });
+
+        // Expose to window for dropdown access
+        window.__blitzkriegToggleDebug = toggleDebugLog;
+    }
+
     /* --------- Performance Utilities --------- */
 
     /**
@@ -432,6 +504,11 @@
 
     /* --------- App initialization --------- */
     function masterInit() {
+        // Initialize debug log system first
+        initDebugLog();
+        debugLog('Blitzkrieg panel initializing...', 'info');
+        debugLog('Platform: ' + navigator.platform, 'info');
+
         creditBtn.addEventListener('click', function (e) {
             e.preventDefault();
             csInterface.openURLInDefaultBrowser('https://dominatemedia.io');
@@ -531,6 +608,18 @@
             });
         }
 
+        // Bug Log action
+        var dropdownBuglog = document.getElementById('dropdown-buglog');
+        if (dropdownBuglog) {
+            dropdownBuglog.addEventListener('click', function(e) {
+                e.preventDefault();
+                dropdownContainer.classList.remove('open');
+                toggleDebugLog();
+                // Auto-run diagnostics when opening bug log
+                runLibraryDiagnostics();
+            });
+        }
+
         // Become an Editor action - opens external URL
         if (dropdownBecomeEditor) {
             dropdownBecomeEditor.addEventListener('click', function(e) {
@@ -599,11 +688,28 @@
 
     /* --------- App initialization & core UI logic (kept original behavior) --------- */
     function initializeAppLogic() {
+        debugLog('initializeAppLogic starting...', 'info');
+
+        // Check if ExtendScript functions are available
+        csInterface.evalScript('typeof getStashedComps', function(typeResult) {
+            debugLog('ExtendScript check: typeof getStashedComps = "' + typeResult + '"', typeResult === 'function' ? 'success' : 'error');
+            if (typeResult !== 'function') {
+                debugLog('CRITICAL: hostscript.jsx not loaded! Check for syntax errors in the ExtendScript file.', 'error');
+                showPlaceholder("Plugin script error. Press Cmd+Shift+D for bug log.");
+                // Auto-open bug log on critical error
+                if (debugLogPanel) {
+                    debugLogPanel.style.display = 'flex';
+                    document.body.classList.add('debug-panel-open');
+                }
+            }
+        });
+
         // Load favorites and recent comps from localStorage
         loadFavoritesAndRecent();
 
         // Load settings from persistent file storage (fixes categories not showing after restart)
         loadPersistentSettings(function(settings) {
+            debugLog('Settings loaded: ' + JSON.stringify(settings), 'info');
             var savedPath = settings.libraryPath;
             if (savedPath) {
                 cachedLibraryPath = savedPath;
@@ -659,12 +765,13 @@
 
     function loadLibrary(path) {
         if (!isValidPath(path)) {
+            debugLog('loadLibrary: Invalid path - "' + path + '"', 'error');
             showToast('Invalid library path.', true);
             return;
         }
         // Prevent concurrent library loads - defer instead of dropping
         if (isLoading) {
-            console.log("Blitzkrieg: Library load already in progress, deferring reload...");
+            debugLog('loadLibrary: Already loading, deferring...', 'warn');
             pendingLibraryReload = true;
             return;
         }
@@ -673,13 +780,13 @@
         showSpinner();
         var safePath = escapeForExtendScript(path);
 
-        console.log("Blitzkrieg: loadLibrary called with path:", path);
+        debugLog('loadLibrary: Requesting comps from "' + path + '"', 'info');
 
         // Safety: reset isLoading if evalScript never returns (AE 25.1 edge case
         // where project switching can cause evalScript callbacks to be dropped)
         var loadSafetyTimeout = setTimeout(function() {
             if (isLoading) {
-                console.warn("Blitzkrieg: Library load timed out after 15s, resetting...");
+                debugLog('loadLibrary: TIMEOUT after 15s - evalScript never returned', 'error');
                 isLoading = false;
                 hideSpinner();
                 // Retry once after the timeout reset
@@ -691,23 +798,66 @@
         csInterface.evalScript('getStashedComps("' + safePath + '")', function (result) {
             clearTimeout(loadSafetyTimeout);
             try {
-                console.log("Blitzkrieg: getStashedComps result length:", result ? result.length : 'null',
-                            "| first 200 chars:", result ? result.substring(0, 200) : 'null');
+                // Log what we received
+                var resultLen = result ? result.length : 0;
+                var resultPreview = result ? result.substring(0, 300) : '(null)';
+                debugLog('getStashedComps returned: length=' + resultLen + ' | ' + resultPreview, 'info');
 
-                // Check for ExtendScript error responses
-                if (!result || result === 'undefined' || result === 'null' || result.indexOf('EvalScript error') !== -1) {
-                    console.warn("Blitzkrieg: getStashedComps returned unexpected result:", result);
+                // --- Check for error responses from ExtendScript ---
+                if (!result || result === 'undefined' || result === 'null') {
+                    debugLog('getStashedComps returned empty/null result', 'error');
                     allComps = [];
                     renderUI();
                     return;
                 }
-                allComps = (result !== '[]') ? JSON.parse(result).sort(function (a, b) { return a.name.localeCompare(b.name); }) : [];
-                console.log("Blitzkrieg: Loaded " + allComps.length + " comps");
+
+                // Check for ExtendScript error patterns (multiple formats)
+                var lowerResult = result.toLowerCase();
+                if (lowerResult.indexOf('evalscript error') !== -1 ||
+                    lowerResult.indexOf('referenceerror') !== -1 ||
+                    lowerResult.indexOf('typeerror') !== -1 ||
+                    lowerResult.indexOf('syntaxerror') !== -1) {
+                    debugLog('ExtendScript ERROR detected: ' + result.substring(0, 500), 'error');
+                    allComps = [];
+                    showPlaceholder("ExtendScript error. Press Cmd+Shift+D for bug log.");
+                    return;
+                }
+
+                // --- Clean the result before parsing ---
+                // Strip BOM (byte-order mark) that macOS ExtendScript can prepend
+                var cleaned = result.replace(/^\ufeff/, '').replace(/^\xef\xbb\xbf/, '');
+                // Strip null characters
+                cleaned = cleaned.replace(/\0/g, '');
+                // Trim whitespace
+                cleaned = cleaned.trim();
+
+                // Verify it looks like JSON before parsing
+                if (cleaned.charAt(0) !== '[' && cleaned.charAt(0) !== '{') {
+                    debugLog('Result is NOT JSON (starts with "' + cleaned.charAt(0) + '"): ' + cleaned.substring(0, 300), 'error');
+                    allComps = [];
+                    showPlaceholder("Unexpected response. Press Cmd+Shift+D for bug log.");
+                    return;
+                }
+
+                // --- Parse JSON with detailed error reporting ---
+                var parsed = JSON.parse(cleaned);
+
+                if (!Array.isArray(parsed)) {
+                    debugLog('Parsed result is not an array: ' + typeof parsed, 'error');
+                    allComps = [];
+                    renderUI();
+                    return;
+                }
+
+                allComps = parsed.sort(function (a, b) { return a.name.localeCompare(b.name); });
+                debugLog('Loaded ' + allComps.length + ' comps successfully', 'success');
                 renderUI();
             } catch (e) {
-                console.error("Blitzkrieg: Failed to parse comps data:", e, "Raw result:", result);
+                debugLog('JSON PARSE FAILED: ' + e.toString(), 'error');
+                debugLog('Raw result (first 500 chars): ' + (result ? result.substring(0, 500) : '(null)'), 'error');
+                debugLog('Raw result char codes (first 20): ' + (result ? Array.prototype.map.call(result.substring(0, 20), function(c) { return c.charCodeAt(0); }).join(',') : 'null'), 'error');
                 allComps = [];
-                showPlaceholder("Error loading library. Check console for details.");
+                showPlaceholder("Error loading library. Press Cmd+Shift+D for bug log.");
             } finally {
                 isLoading = false;
                 hideSpinner();
@@ -721,28 +871,69 @@
     }
 
     /**
-     * Runs library diagnostics and logs detailed folder structure info to console.
-     * Call from dev tools: window.__blitzkriegDebug()
+     * Runs library diagnostics and logs detailed folder structure info to the debug log.
      */
     function runLibraryDiagnostics() {
         var libraryPath = getLibraryPath();
         if (!libraryPath) {
-            console.warn("Blitzkrieg Debug: No library path set");
+            debugLog('Diagnostics: No library path set', 'warn');
             return;
         }
-        console.log("Blitzkrieg Debug: Running diagnostics for:", libraryPath);
+        debugLog('Running diagnostics for: ' + libraryPath, 'info');
+        debugLog('Platform: ' + navigator.platform + ' | UserAgent: ' + navigator.userAgent.substring(0, 80), 'info');
         var safePath = escapeForExtendScript(libraryPath);
-        csInterface.evalScript('debugLibrary("' + safePath + '")', function(result) {
-            try {
-                var info = JSON.parse(result);
-                console.log("Blitzkrieg Debug: Library diagnostics:", JSON.stringify(info, null, 2));
-            } catch (e) {
-                console.error("Blitzkrieg Debug: Failed to parse diagnostics:", e, "Raw:", result);
+
+        // First test: can we even call ExtendScript?
+        csInterface.evalScript('typeof getStashedComps', function(typeResult) {
+            debugLog('ExtendScript function check: typeof getStashedComps = "' + typeResult + '"', typeResult === 'function' ? 'success' : 'error');
+
+            if (typeResult !== 'function') {
+                debugLog('CRITICAL: hostscript.jsx functions not loaded! ExtendScript may have a syntax error.', 'error');
+                // Try to get the actual error
+                csInterface.evalScript('try { eval("getStashedComps"); "ok"; } catch(e) { e.toString(); }', function(errResult) {
+                    debugLog('ExtendScript error detail: ' + errResult, 'error');
+                });
+                return;
             }
+
+            // Run the full diagnostic
+            csInterface.evalScript('debugLibrary("' + safePath + '")', function(result) {
+                try {
+                    var cleaned = result.replace(/^\ufeff/, '').replace(/\0/g, '').trim();
+                    var info = JSON.parse(cleaned);
+                    debugLog('Diagnostics result:', 'info');
+                    debugLog('  Platform: ' + (info.platform || 'unknown'), 'info');
+                    debugLog('  AE Version: ' + (info.aeVersion || 'unknown'), 'info');
+                    debugLog('  Library exists: ' + info.exists, info.exists ? 'success' : 'error');
+                    debugLog('  Resolved path: ' + (info.resolvedPath || 'N/A'), 'info');
+                    debugLog('  Total items in folder: ' + (info.totalItems || 0), 'info');
+                    if (info.categories) {
+                        debugLog('  Categories found: ' + info.categories.length, info.categories.length > 0 ? 'success' : 'warn');
+                        for (var ci = 0; ci < info.categories.length; ci++) {
+                            var cat = info.categories[ci];
+                            debugLog('    [' + cat.name + '] - ' + cat.compFolders.length + ' comp folders', 'info');
+                            for (var cj = 0; cj < cat.compFolders.length; cj++) {
+                                var cmp = cat.compFolders[cj];
+                                var status = cmp.hasAep ? 'OK' : 'MISSING .aep!';
+                                debugLog('      ' + cmp.name + ' - AEP:' + cmp.hasAep + ' Meta:' + cmp.hasMetadata + ' Thumb:' + cmp.hasThumbnail + ' Files:[' + cmp.files.join(', ') + '] ' + status, cmp.hasAep ? 'success' : 'error');
+                            }
+                        }
+                    }
+                    if (info.errors && info.errors.length > 0) {
+                        for (var ei = 0; ei < info.errors.length; ei++) {
+                            debugLog('  ERROR: ' + info.errors[ei], 'error');
+                        }
+                    }
+                } catch (e) {
+                    debugLog('Failed to parse diagnostics: ' + e.toString(), 'error');
+                    debugLog('Raw diagnostic result: ' + (result ? result.substring(0, 500) : '(null)'), 'error');
+                }
+            });
         });
     }
-    // Expose diagnostics to dev tools console
+    // Expose to window
     window.__blitzkriegDebug = runLibraryDiagnostics;
+    window.__blitzkriegToggleDebug = toggleDebugLog;
 
     function renderUI() { renderCategories(); renderCompsGrid(); }
 

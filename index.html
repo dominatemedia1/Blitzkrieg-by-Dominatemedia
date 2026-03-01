@@ -271,6 +271,16 @@
                                     <div class="item-subtitle">Configure library folder</div>
                                 </div>
                             </a>
+                            <a href="#" class="dropdown-item" id="dropdown-buglog">
+                                <svg class="item-icon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+                                    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+                                </svg>
+                                <div class="item-text">
+                                    <div>Bug Log</div>
+                                    <div class="item-subtitle">View debug log (Cmd+Shift+D)</div>
+                                </div>
+                            </a>
                             <div class="dropdown-divider"></div>
                             <a href="#" class="dropdown-item cta-item" id="dropdown-become-editor">
                                 <svg class="item-icon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -308,6 +318,19 @@
 
     <!-- === TOAST NOTIFICATION ELEMENT === -->
     <div id="toast-notification"></div>
+
+    <!-- === DEBUG LOG PANEL === -->
+    <div id="debug-log-panel" style="display:none;">
+        <div class="debug-log-header">
+            <span>Bug Log</span>
+            <div>
+                <button id="debug-log-copy" title="Copy log">Copy</button>
+                <button id="debug-log-clear" title="Clear log">Clear</button>
+                <button id="debug-log-close" title="Close">&times;</button>
+            </div>
+        </div>
+        <div id="debug-log-content"></div>
+    </div>
 
     <script src="./js/CSInterface.js"></script>
     <script src="./js/main.js"></script>
