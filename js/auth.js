@@ -1,0 +1,182 @@
+// js/auth.js
+// Authentication and access control for Blitzkrieg plugin
+(function () {
+    'use strict';
+
+    var sb = window.blitzkriegSupabase;
+
+    // Auth state
+    var currentUser = null;
+    var currentTeamMember = null;
+    var isBlitzkriegAdmin = false;
+
+    // Screen elements
+    var loginScreen = document.getElementById('auth-login-screen');
+    var deniedScreen = document.getElementById('auth-denied-screen');
+    var offlineScreen = document.getElementById('auth-offline-screen');
+    var appContainer = document.getElementById('app');
+    var loginForm = document.getElementById('login-form');
+    var loginEmail = document.getElementById('login-email');
+    var loginPassword = document.getElementById('login-password');
+    var loginError = document.getElementById('login-error');
+    var loginBtnText = document.getElementById('login-btn-text');
+    var loginBtnLoading = document.getElementById('login-btn-loading');
+    var loginSubmitBtn = document.getElementById('login-submit-btn');
+    var deniedSignoutBtn = document.getElementById('denied-signout-btn');
+    var offlineRetryBtn = document.getElementById('offline-retry-btn');
+
+    function hideAllScreens() {
+        loginScreen.style.display = 'none';
+        deniedScreen.style.display = 'none';
+        offlineScreen.style.display = 'none';
+        appContainer.style.display = 'none';
+    }
+
+    function showScreen(screen) {
+        hideAllScreens();
+        screen.style.display = screen === appContainer ? '' : 'flex';
+    }
+
+    function showLoginError(message) {
+        loginError.textContent = message;
+        loginError.style.display = 'block';
+    }
+
+    function hideLoginError() {
+        loginError.style.display = 'none';
+    }
+
+    function setLoginLoading(loading) {
+        loginSubmitBtn.disabled = loading;
+        loginBtnText.style.display = loading ? 'none' : '';
+        loginBtnLoading.style.display = loading ? '' : 'none';
+    }
+
+    // Check if user has blitzkrieg_access via team_members table
+    async function checkBlitzkriegAccess(userId) {
+        var result = await sb.from('team_members')
+            .select('id, full_name, blitzkrieg_access, blitzkrieg_admin')
+            .eq('user_id', userId)
+            .single();
+
+        if (result.error || !result.data) {
+            return null;
+        }
+        return result.data;
+    }
+
+    // Main auth check — called on plugin load and after login
+    async function validateSession() {
+        try {
+            var sessionResult = await sb.auth.getSession();
+            var session = sessionResult.data.session;
+
+            if (!session) {
+                // No session — show login
+                showScreen(loginScreen);
+                return;
+            }
+
+            currentUser = session.user;
+
+            // Check blitzkrieg access
+            var teamMember = await checkBlitzkriegAccess(currentUser.id);
+
+            if (!teamMember || !teamMember.blitzkrieg_access) {
+                // User exists but no blitzkrieg access
+                currentTeamMember = null;
+                isBlitzkriegAdmin = false;
+                showScreen(deniedScreen);
+                return;
+            }
+
+            // Access granted
+            currentTeamMember = teamMember;
+            isBlitzkriegAdmin = teamMember.blitzkrieg_admin === true;
+
+            // Show the main app
+            showScreen(appContainer);
+
+            // Notify main.js that auth is ready
+            if (typeof window.onBlitzkriegAuthReady === 'function') {
+                window.onBlitzkriegAuthReady();
+            }
+
+        } catch (err) {
+            console.error('Blitzkrieg auth error:', err);
+            // Network error — show offline screen
+            showScreen(offlineScreen);
+        }
+    }
+
+    // Handle login form submission
+    async function handleLogin(e) {
+        e.preventDefault();
+        hideLoginError();
+
+        var email = loginEmail.value.trim();
+        var password = loginPassword.value;
+
+        if (!email || !password) {
+            showLoginError('Please enter your email and password.');
+            return;
+        }
+
+        setLoginLoading(true);
+
+        try {
+            var result = await sb.auth.signInWithPassword({
+                email: email,
+                password: password,
+            });
+
+            if (result.error) {
+                showLoginError(result.error.message || 'Invalid email or password.');
+                setLoginLoading(false);
+                return;
+            }
+
+            // Login succeeded — validate access
+            setLoginLoading(false);
+            loginPassword.value = '';
+            await validateSession();
+
+        } catch (err) {
+            console.error('Login error:', err);
+            showLoginError('Cannot connect to the server. Check your internet.');
+            setLoginLoading(false);
+        }
+    }
+
+    // Handle sign out
+    async function handleSignOut() {
+        try {
+            await sb.auth.signOut();
+        } catch (err) {
+            // Ignore sign-out errors
+        }
+        currentUser = null;
+        currentTeamMember = null;
+        isBlitzkriegAdmin = false;
+        showScreen(loginScreen);
+        loginEmail.value = '';
+        loginPassword.value = '';
+        hideLoginError();
+    }
+
+    // Attach event listeners
+    loginForm.addEventListener('submit', handleLogin);
+    deniedSignoutBtn.addEventListener('click', handleSignOut);
+    offlineRetryBtn.addEventListener('click', function () {
+        validateSession();
+    });
+
+    // Expose auth API globally
+    window.blitzkriegAuth = {
+        validateSession: validateSession,
+        signOut: handleSignOut,
+        isAdmin: function () { return isBlitzkriegAdmin; },
+        getUser: function () { return currentUser; },
+        getTeamMember: function () { return currentTeamMember; },
+    };
+})();
