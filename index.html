@@ -7,6 +7,71 @@
 </head>
 <body class="cep-panel">
 
+    <!-- === AUTH SCREENS === -->
+    <div id="auth-login-screen" class="auth-screen" style="display:none;">
+        <div class="auth-container">
+            <div class="auth-logo">
+                <img src="img/logo.png" alt="Blitzkrieg - Dominate Media">
+            </div>
+            <h2 class="auth-title">Sign In</h2>
+            <p class="auth-subtitle">Enter your Dominate Media portal credentials</p>
+            <form id="login-form" class="auth-form">
+                <div class="form-group">
+                    <label for="login-email">Email</label>
+                    <input type="email" id="login-email" placeholder="your@email.com" required autocomplete="email">
+                </div>
+                <div class="form-group">
+                    <label for="login-password">Password</label>
+                    <input type="password" id="login-password" placeholder="Enter your password" required autocomplete="current-password">
+                </div>
+                <p id="login-error" class="auth-error" style="display:none;"></p>
+                <button type="submit" id="login-submit-btn" class="button-primary auth-submit">
+                    <span id="login-btn-text">Sign In</span>
+                    <span id="login-btn-loading" style="display:none;">Signing in...</span>
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <div id="auth-denied-screen" class="auth-screen" style="display:none;">
+        <div class="auth-container">
+            <div class="auth-logo">
+                <img src="img/logo.png" alt="Blitzkrieg - Dominate Media">
+            </div>
+            <div class="auth-denied-icon">
+                <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line>
+                </svg>
+            </div>
+            <h2 class="auth-title">Access Denied</h2>
+            <p class="auth-subtitle">Your Blitzkrieg access is disabled. Contact your admin to enable it.</p>
+            <button id="denied-signout-btn" class="button-secondary auth-submit">Sign Out</button>
+        </div>
+    </div>
+
+    <div id="auth-offline-screen" class="auth-screen" style="display:none;">
+        <div class="auth-container">
+            <div class="auth-logo">
+                <img src="img/logo.png" alt="Blitzkrieg - Dominate Media">
+            </div>
+            <div class="auth-denied-icon">
+                <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="1" y1="1" x2="23" y2="23"></line>
+                    <path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.55"></path>
+                    <path d="M5 12.55a10.94 10.94 0 0 1 5.17-2.39"></path>
+                    <path d="M10.71 5.05A16 16 0 0 1 22.56 9"></path>
+                    <path d="M1.42 9a15.91 15.91 0 0 1 4.7-2.88"></path>
+                    <path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path>
+                    <line x1="12" y1="20" x2="12.01" y2="20"></line>
+                </svg>
+            </div>
+            <h2 class="auth-title">No Connection</h2>
+            <p class="auth-subtitle">Cannot connect to the server. Check your internet and try again.</p>
+            <button id="offline-retry-btn" class="button-primary auth-submit">Retry</button>
+        </div>
+    </div>
+
     <!-- === SETTINGS POPUP (inside panel) === -->
     <div id="settings-modal" class="modal-overlay" style="display:none;">
         <div class="modal-box" role="dialog" aria-modal="true">
