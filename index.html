@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Blitzkrieg by Dominate Media</title>
+    <link rel="stylesheet" href="./css/style.css">
+</head>
+<body class="cep-panel">
+
+    <!-- === SETTINGS POPUP (inside panel) === -->
+    <div id="settings-modal" class="modal-overlay" style="display:none;">
+        <div class="modal-box" role="dialog" aria-modal="true">
+            <h3>Settings</h3>
+
+            <div class="form-group">
+                <label for="settings-library-path">Library Folder</label>
+                <div style="display:flex; gap:8px;">
+                    <input type="text" id="settings-library-path" readonly placeholder="No folder selected">
+                    <button id="settings-browse-btn" class="button-secondary">Browse</button>
+                </div>
+                <p style="font-size:12px; color:var(--text-medium); margin-top:8px;">This is the folder used by Blitzkrieg to store and read templates.</p>
+            </div>
+
+            <div class="modal-buttons" style="justify-content:flex-end; margin-top: 18px;">
+                <button id="settings-close-btn" class="button-secondary">Close</button>
+                <button id="settings-save-btn" class="button-primary" style="width:auto; margin-bottom:0;">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- === MODALS (existing ones) === -->
+    <div id="delete-confirm-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-box">
+            <h3>Confirm Deletion</h3>
+            <p>Are you sure you want to permanently delete "<strong id="comp-to-delete-name"></strong>"? This action cannot be undone.</p>
+            <div class="modal-buttons">
+                <button id="cancel-delete-btn" class="button-secondary">Cancel</button>
+                <button id="confirm-delete-btn" class="button-danger">Delete</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="add-comp-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-box">
+            <h3>Add to Library</h3>
+            <p>Select an existing category or create a new one for the selected comp.</p>
+            <div class="form-group">
+                <label for="existing-category-select">Existing Category</label>
+                <select id="existing-category-select"></select>
+            </div>
+            <div class="form-group">
+                 <label for="new-category-input">Or Create New Category</label>
+                <input type="text" id="new-category-input" placeholder="e.g., Titles, VFX, Lower Thirds">
+            </div>
+            <div class="modal-buttons">
+                <button id="cancel-add-btn" class="button-secondary">Cancel</button>
+                <button id="confirm-add-btn" class="button-primary" style="width:auto; margin-bottom:0;">Add Comp</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="rename-comp-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-box">
+            <h3>Rename Composition</h3>
+            <p>Enter a new name for "<strong id="comp-to-rename-current-name"></strong>". This will be used when you import it.</p>
+            <div class="form-group">
+                <label for="new-name-input">New Display Name</label>
+                <input type="text" id="new-name-input" placeholder="Enter new comp name...">
+            </div>
+            <div class="modal-buttons">
+                <button id="cancel-rename-btn" class="button-secondary">Cancel</button>
+                <button id="confirm-rename-btn" class="button-primary" style="width:auto; margin-bottom:0;">Save Changes</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- === RENAME CATEGORY MODAL === -->
+    <div id="rename-category-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-box">
+            <h3>Rename Category</h3>
+            <p>Enter a new name for the category "<strong id="category-to-rename-current-name"></strong>".</p>
+            <div class="form-group">
+                <label for="new-category-name-input">New Category Name</label>
+                <input type="text" id="new-category-name-input" placeholder="Enter new category name...">
+            </div>
+            <div class="modal-buttons">
+                <button id="cancel-rename-category-btn" class="button-secondary">Cancel</button>
+                <button id="confirm-rename-category-btn" class="button-primary" style="width:auto; margin-bottom:0;">Save Changes</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- === DELETE CATEGORY MODAL === -->
+    <div id="delete-category-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-box">
+            <h3>Delete Category</h3>
+            <p>Are you sure you want to permanently delete the category "<strong id="category-to-delete-name"></strong>" and ALL its compositions? This action cannot be undone.</p>
+            <div class="modal-buttons">
+                <button id="cancel-delete-category-btn" class="button-secondary">Cancel</button>
+                <button id="confirm-delete-category-btn" class="button-danger">Delete Category</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- === MOVE COMP MODAL === -->
+    <div id="move-comp-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-box">
+            <h3>Move Composition</h3>
+            <p>Move "<strong id="comp-to-move-name"></strong>" to a different category.</p>
+            <div class="form-group">
+                <label for="move-to-category-select">Select Category</label>
+                <select id="move-to-category-select"></select>
+            </div>
+            <div class="form-group">
+                <label for="move-to-new-category-input">Or Create New Category</label>
+                <input type="text" id="move-to-new-category-input" placeholder="e.g., Titles, VFX, Lower Thirds">
+            </div>
+            <div class="modal-buttons">
+                <button id="cancel-move-comp-btn" class="button-secondary">Cancel</button>
+                <button id="confirm-move-comp-btn" class="button-primary" style="width:auto; margin-bottom:0;">Move Comp</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- === LOADING SPINNER === -->
+    <div id="loading-spinner" style="display: none;"></div>
+
+    <!-- === MAIN APP WITH SIDEBAR LAYOUT === -->
+    <div id="app">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="sidebar-logo">
+                    <img src="img/logo.png" alt="Blitzkrieg - Dominate Media" title="Blitzkrieg - Dominate Media" id="logo-img">
+                </div>
+            </div>
+
+            <nav class="sidebar-nav">
+                <!-- Quick Access Section -->
+                <div class="nav-section">
+                    <div class="nav-section-title">Quick Access</div>
+                    <div class="nav-item active" data-category="All">
+                        <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="3" width="7" height="7"></rect>
+                            <rect x="14" y="3" width="7" height="7"></rect>
+                            <rect x="14" y="14" width="7" height="7"></rect>
+                            <rect x="3" y="14" width="7" height="7"></rect>
+                        </svg>
+                        <span class="nav-label">All Templates</span>
+                    </div>
+                    <div class="nav-item" data-category="Favorites">
+                        <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
+                        </svg>
+                        <span class="nav-label">Favorites</span>
+                        <span class="nav-count" id="favorites-count">0</span>
+                    </div>
+                    <div class="nav-item" data-category="Recent">
+                        <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="12" cy="12" r="10"></circle>
+                            <polyline points="12 6 12 12 16 14"></polyline>
+                        </svg>
+                        <span class="nav-label">Recent</span>
+                        <span class="nav-count" id="recent-count">0</span>
+                    </div>
+                </div>
+
+                <!-- Categories Section - Populated by JavaScript -->
+                <div class="nav-section">
+                    <div class="nav-section-title">Categories</div>
+                    <div id="category-filters">
+                        <!-- Categories will be rendered here by JS -->
+                    </div>
+                </div>
+            </nav>
+
+            <!-- User Profile Section -->
+            <div class="sidebar-footer">
+                <a href="#" class="sidebar-footer-link" id="credit-button">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <line x1="12" y1="16" x2="12" y2="12"></line>
+                        <line x1="12" y1="8" x2="12.01" y2="8"></line>
+                    </svg>
+                    <span>Created by Dominate Media</span>
+                </a>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <div class="main-content">
+            <!-- Top Bar -->
+            <header class="top-bar">
+                <div class="top-bar-left">
+                    <div class="search-box">
+                        <svg class="search-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="11" cy="11" r="8"></circle>
+                            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                        </svg>
+                        <input type="search" id="search-input" placeholder="Search templates...">
+                    </div>
+                    <span id="library-path-display" title="">No library folder selected</span>
+                </div>
+
+                <div class="top-bar-right">
+                    <!-- Sort Controls -->
+                    <div class="sort-controls">
+                        <select id="sort-select" title="Sort by">
+                            <option value="name-asc">Name (A-Z)</option>
+                            <option value="name-desc">Name (Z-A)</option>
+                            <option value="date-desc">Newest First</option>
+                            <option value="date-asc">Oldest First</option>
+                            <option value="duration-desc">Longest First</option>
+                            <option value="duration-asc">Shortest First</option>
+                        </select>
+                    </div>
+
+                    <!-- Grid Size Toggle -->
+                    <div class="grid-size-controls">
+                        <button class="grid-size-btn" data-size="compact" title="Compact view">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                                <rect x="3" y="3" width="7" height="7"></rect>
+                                <rect x="14" y="3" width="7" height="7"></rect>
+                                <rect x="3" y="14" width="7" height="7"></rect>
+                                <rect x="14" y="14" width="7" height="7"></rect>
+                            </svg>
+                        </button>
+                        <button class="grid-size-btn active" data-size="normal" title="Normal view">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                                <rect x="3" y="3" width="8" height="8"></rect>
+                                <rect x="13" y="3" width="8" height="8"></rect>
+                                <rect x="3" y="13" width="8" height="8"></rect>
+                                <rect x="13" y="13" width="8" height="8"></rect>
+                            </svg>
+                        </button>
+                        <button class="grid-size-btn" data-size="large" title="Large view">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                                <rect x="3" y="3" width="18" height="8"></rect>
+                                <rect x="3" y="13" width="18" height="8"></rect>
+                            </svg>
+                        </button>
+                    </div>
+
+                    <!-- Dropdown Menu -->
+                    <div class="dropdown-container" id="main-dropdown">
+                        <button class="dropdown-toggle" id="dropdown-toggle-btn">
+                            <span>Menu</span>
+                            <svg class="chevron" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <polyline points="6 9 12 15 18 9"></polyline>
+                            </svg>
+                        </button>
+                        <div class="dropdown-menu" id="dropdown-menu">
+                            <a href="#" class="dropdown-item" id="dropdown-refresh">
+                                <svg class="item-icon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <polyline points="23 4 23 10 17 10"></polyline>
+                                    <polyline points="1 20 1 14 7 14"></polyline>
+                                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                                </svg>
+                                <div class="item-text">
+                                    <div>Refresh Library</div>
+                                    <div class="item-subtitle">Reload all templates</div>
+                                </div>
+                            </a>
+                            <a href="#" class="dropdown-item" id="dropdown-settings">
+                                <svg class="item-icon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M12 15.5A3.5 3.5 0 1 0 12 8.5a3.5 3.5 0 0 0 0 7z"></path>
+                                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                                </svg>
+                                <div class="item-text">
+                                    <div>Settings</div>
+                                    <div class="item-subtitle">Configure library folder</div>
+                                </div>
+                            </a>
+                            <a href="#" class="dropdown-item" id="dropdown-buglog">
+                                <svg class="item-icon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+                                    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+                                </svg>
+                                <div class="item-text">
+                                    <div>Bug Log</div>
+                                    <div class="item-subtitle">View debug log (Cmd+Shift+D)</div>
+                                </div>
+                            </a>
+                            <div class="dropdown-divider"></div>
+                            <a href="#" class="dropdown-item cta-item" id="dropdown-become-editor">
+                                <svg class="item-icon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                                    <circle cx="8.5" cy="7" r="4"></circle>
+                                    <line x1="20" y1="8" x2="20" y2="14"></line>
+                                    <line x1="23" y1="11" x2="17" y2="11"></line>
+                                </svg>
+                                <div class="item-text">
+                                    <div>Become an Editor</div>
+                                    <div class="item-subtitle">Join the Dominate Media team</div>
+                                </div>
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </header>
+
+            <!-- Grid Container -->
+            <div class="grid-container">
+                <div id="stash-grid">
+                    <!-- Comps will be rendered here by JS -->
+                </div>
+            </div>
+
+            <!-- Footer with Add Button -->
+            <footer class="main-footer">
+                <button id="add-comp-btn" class="button-primary">
+                    <svg class="icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                    <span>Add Selected Comp</span>
+                </button>
+            </footer>
+        </div>
+    </div>
+
+    <!-- === TOAST NOTIFICATION ELEMENT === -->
+    <div id="toast-notification"></div>
+
+    <!-- === DEBUG LOG PANEL === -->
+    <div id="debug-log-panel" style="display:none;">
+        <div class="debug-log-header">
+            <span>Bug Log</span>
+            <div>
+                <button id="debug-log-copy" title="Copy log">Copy</button>
+                <button id="debug-log-clear" title="Clear log">Clear</button>
+                <button id="debug-log-close" title="Close">&times;</button>
+            </div>
+        </div>
+        <div id="debug-log-content"></div>
+    </div>
+
+    <script src="./js/CSInterface.js"></script>
+    <script src="./js/main.js"></script>
+</body>
+</html>
