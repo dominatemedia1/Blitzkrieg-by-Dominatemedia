@@ -530,14 +530,11 @@
 
         // Auto-refresh library when panel gains focus (ensures categories stay in sync)
         window.addEventListener('focus', function() {
-            var libraryPath = getLibraryPath();
-            if (libraryPath && !stashInProgress) {
+            if (!stashInProgress) {
                 if (isLoading) {
-                    // Defer the reload instead of dropping it - fixes race condition
-                    // on macOS AE 25.1 where focus fires during an active load
                     pendingLibraryReload = true;
                 } else {
-                    loadLibrary(libraryPath);
+                    loadLibrary();
                 }
             }
         });
@@ -601,13 +598,8 @@
             dropdownRefresh.addEventListener('click', function(e) {
                 e.preventDefault();
                 dropdownContainer.classList.remove('open');
-                var libraryPath = getLibraryPath();
-                if (libraryPath) {
-                    loadLibrary(libraryPath);
-                    showToast('Library refreshed.');
-                } else {
-                    showToast('Please select a library folder first.', true);
-                }
+                loadLibrary();
+                showToast('Library refreshed.');
             });
         }
 
@@ -731,17 +723,8 @@
         // Load favorites and recent comps from localStorage
         loadFavoritesAndRecent();
 
-        // Load settings from persistent file storage (fixes categories not showing after restart)
-        loadPersistentSettings(function(settings) {
-            debugLog('Settings loaded: ' + JSON.stringify(settings), 'info');
-            var savedPath = settings.libraryPath;
-            if (savedPath) {
-                cachedLibraryPath = savedPath;
-                pathDisplay.textContent = savedPath;
-                pathDisplay.title = savedPath;
-                loadLibrary(savedPath);
-            }
-        });
+        // Load templates from cloud storage
+        loadLibrary();
 
         // removed main Browse button usage (it was removed from UI). Folder selection available in Settings.
         var addBtn = document.getElementById('add-comp-btn');
@@ -787,110 +770,33 @@
         hideSpinner();
     }
 
-    function loadLibrary(path) {
-        if (!isValidPath(path)) {
-            debugLog('loadLibrary: Invalid path - "' + path + '"', 'error');
-            showToast('Invalid library path.', true);
-            return;
-        }
-        // Prevent concurrent library loads - defer instead of dropping
+    function loadLibrary() {
         if (isLoading) {
-            debugLog('loadLibrary: Already loading, deferring...', 'warn');
             pendingLibraryReload = true;
             return;
         }
         isLoading = true;
         pendingLibraryReload = false;
         showSpinner();
-        var safePath = escapeForExtendScript(path);
 
-        debugLog('loadLibrary: Requesting comps from "' + path + '"', 'info');
+        debugLog('loadLibrary: Loading templates from cloud...', 'info');
 
-        // Safety: reset isLoading if evalScript never returns (AE 25.1 edge case
-        // where project switching can cause evalScript callbacks to be dropped)
-        var loadSafetyTimeout = setTimeout(function() {
-            if (isLoading) {
-                debugLog('loadLibrary: TIMEOUT after 15s - evalScript never returned', 'error');
-                isLoading = false;
-                hideSpinner();
-                // Retry once after the timeout reset
-                var retryPath = getLibraryPath() || path;
-                loadLibrary(retryPath);
+        window.cloudLibrary.listTemplates().then(function (comps) {
+            debugLog('loadLibrary: Loaded ' + comps.length + ' templates from cloud', 'success');
+            allComps = comps;
+            renderUI();
+            hideSpinner();
+            isLoading = false;
+
+            if (pendingLibraryReload) {
+                pendingLibraryReload = false;
+                loadLibrary();
             }
-        }, 15000);
-
-        csInterface.evalScript('getStashedComps("' + safePath + '")', function (result) {
-            clearTimeout(loadSafetyTimeout);
-            try {
-                // Log what we received
-                var resultLen = result ? result.length : 0;
-                var resultPreview = result ? result.substring(0, 300) : '(null)';
-                debugLog('getStashedComps returned: length=' + resultLen + ' | ' + resultPreview, 'info');
-
-                // --- Check for error responses from ExtendScript ---
-                if (!result || result === 'undefined' || result === 'null') {
-                    debugLog('getStashedComps returned empty/null result', 'error');
-                    allComps = [];
-                    renderUI();
-                    return;
-                }
-
-                // Check for ExtendScript error patterns (multiple formats)
-                var lowerResult = result.toLowerCase();
-                if (lowerResult.indexOf('evalscript error') !== -1 ||
-                    lowerResult.indexOf('referenceerror') !== -1 ||
-                    lowerResult.indexOf('typeerror') !== -1 ||
-                    lowerResult.indexOf('syntaxerror') !== -1) {
-                    debugLog('ExtendScript ERROR detected: ' + result.substring(0, 500), 'error');
-                    allComps = [];
-                    showPlaceholder("ExtendScript error. Press Cmd+Shift+D for bug log.");
-                    return;
-                }
-
-                // --- Clean the result before parsing ---
-                // Strip BOM (byte-order mark) that macOS ExtendScript can prepend
-                var cleaned = result.replace(/^\ufeff/, '').replace(/^\xef\xbb\xbf/, '');
-                // Strip null characters
-                cleaned = cleaned.replace(/\0/g, '');
-                // Trim whitespace
-                cleaned = cleaned.trim();
-
-                // Verify it looks like JSON before parsing
-                if (cleaned.charAt(0) !== '[' && cleaned.charAt(0) !== '{') {
-                    debugLog('Result is NOT JSON (starts with "' + cleaned.charAt(0) + '"): ' + cleaned.substring(0, 300), 'error');
-                    allComps = [];
-                    showPlaceholder("Unexpected response. Press Cmd+Shift+D for bug log.");
-                    return;
-                }
-
-                // --- Parse JSON with detailed error reporting ---
-                var parsed = JSON.parse(cleaned);
-
-                if (!Array.isArray(parsed)) {
-                    debugLog('Parsed result is not an array: ' + typeof parsed, 'error');
-                    allComps = [];
-                    renderUI();
-                    return;
-                }
-
-                allComps = parsed.sort(function (a, b) { return a.name.localeCompare(b.name); });
-                debugLog('Loaded ' + allComps.length + ' comps successfully', 'success');
-                renderUI();
-            } catch (e) {
-                debugLog('JSON PARSE FAILED: ' + e.toString(), 'error');
-                debugLog('Raw result (first 500 chars): ' + (result ? result.substring(0, 500) : '(null)'), 'error');
-                debugLog('Raw result char codes (first 20): ' + (result ? Array.prototype.map.call(result.substring(0, 20), function(c) { return c.charCodeAt(0); }).join(',') : 'null'), 'error');
-                allComps = [];
-                showPlaceholder("Error loading library. Press Cmd+Shift+D for bug log.");
-            } finally {
-                isLoading = false;
-                hideSpinner();
-                // If another load was requested while we were loading, execute it now
-                if (pendingLibraryReload) {
-                    pendingLibraryReload = false;
-                    loadLibrary(path);
-                }
-            }
+        }).catch(function (err) {
+            debugLog('loadLibrary: ERROR - ' + err.message, 'error');
+            showToast('Failed to load templates: ' + err.message, true);
+            hideSpinner();
+            isLoading = false;
         });
     }
 
@@ -1299,8 +1205,8 @@
             var safeCategory = escapeHTML(comp.category);
             var safeAepPath = escapeHTML(comp.aepPath);
             var safeName = escapeHTML(comp.name);
-            // Convert thumbnail path to proper file:// URL
-            var thumbSrc = comp.thumbPath ? pathToFileUrl(comp.thumbPath) : '';
+            // Use cloud thumbnail URL or fall back to local path
+            var thumbSrc = comp.thumbUrl || (comp.thumbPath ? pathToFileUrl(comp.thumbPath) : '');
             var safeThumbSrc = escapeHTML(thumbSrc);
 
             // Prepare preview frames data attribute (JSON encoded)
