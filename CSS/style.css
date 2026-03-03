@@ -172,6 +172,19 @@
     opacity: 0.4;
 }
 
+/* Sidebar User Info */
+.sidebar-user-info {
+    padding: 8px 16px;
+    border-top: 1px solid var(--border-color);
+    margin-bottom: 4px;
+}
+
+.sidebar-user-name {
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
 /* Reset & Base */
 * {
     box-sizing: border-box;

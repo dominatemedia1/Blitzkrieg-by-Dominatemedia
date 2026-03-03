@@ -544,6 +544,18 @@
 
         // Initialize app directly
         initializeAppLogic();
+
+        // Show logged-in user info in sidebar
+        var userInfo = document.getElementById('sidebar-user-info');
+        var userName = document.getElementById('sidebar-user-name');
+        if (userInfo && userName && window.blitzkriegAuth) {
+            var tm = window.blitzkriegAuth.getTeamMember();
+            var user = window.blitzkriegAuth.getUser();
+            if (tm) {
+                userName.textContent = tm.full_name || (user ? user.email : '');
+                userInfo.style.display = 'block';
+            }
+        }
     }
 
     /* --------- Utility Functions --------- */
@@ -641,6 +653,18 @@
             });
         } else {
             console.warn('Blitzkrieg: dropdown-become-editor element not found');
+        }
+
+        // Sign Out action
+        var dropdownSignOut = document.getElementById('dropdown-signout');
+        if (dropdownSignOut) {
+            dropdownSignOut.addEventListener('click', function(e) {
+                e.preventDefault();
+                dropdownContainer.classList.remove('open');
+                if (window.blitzkriegAuth) {
+                    window.blitzkriegAuth.signOut();
+                }
+            });
         }
     }
 
@@ -2111,9 +2135,18 @@
         if (settingsModal) settingsModal.style.display = 'none';
     }
 
-    /* --------- Start the app --------- */
-    document.addEventListener('DOMContentLoaded', function () {
+    /* --------- Auth-gated initialization --------- */
+    // The auth module (auth.js) handles login/access and calls onBlitzkriegAuthReady when access is granted
+    window.onBlitzkriegAuthReady = function () {
         masterInit();
+    };
+
+    // Start auth check on load
+    document.addEventListener('DOMContentLoaded', function () {
+        // auth.js validateSession() runs and shows login or grants access
+        if (window.blitzkriegAuth) {
+            window.blitzkriegAuth.validateSession();
+        }
     });
 
     // expose some internals for inline calls (keeps compatibility)
