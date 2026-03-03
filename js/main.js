@@ -1368,8 +1368,8 @@
         if (!item) return;
         var uniqueId = item.dataset.uniqueId, category = item.dataset.category, aepPath = item.dataset.aepPath, storagePath = item.dataset.storagePath, name = item.dataset.name;
         if (e.target.closest('.import-btn')) { importComp(aepPath, uniqueId, storagePath); }
-        else if (e.target.closest('.rename-btn')) { renameComp(uniqueId, category, name); }
-        else if (e.target.closest('.delete-btn')) { promptDelete(uniqueId, category, name); }
+        else if (e.target.closest('.rename-btn')) { renameComp(uniqueId, category, name, storagePath); }
+        else if (e.target.closest('.delete-btn')) { promptDelete(uniqueId, category, name, storagePath); }
         else if (e.target.closest('.move-btn')) { promptMoveComp(uniqueId, category, name); }
         else if (e.target.closest('.favorite-btn')) { toggleFavorite(uniqueId); }
         else if (e.target.closest('.generate-preview-btn')) { generatePreview(aepPath, name); }
@@ -1549,8 +1549,8 @@
         return new Blob([array], { type: contentType });
     }
 
-    function promptDelete(uniqueId, category, name) {
-        currentDeleteInfo = { uniqueId: uniqueId, category: category };
+    function promptDelete(uniqueId, category, name, storagePath) {
+        currentDeleteInfo = { uniqueId: uniqueId, category: category, storagePath: storagePath };
         compToDeleteName.textContent = name;
         deleteModal.style.display = 'flex';
     }
@@ -1561,13 +1561,30 @@
             deleteModal.style.display = 'none';
             return;
         }
-        var info = currentDeleteInfo;
-        if (!info) return;
+        if (!currentDeleteInfo) return;
 
+        var info = currentDeleteInfo;
+        deleteModal.style.display = 'none';
+
+        // Cloud delete path
+        if (info.storagePath && window.cloudLibrary) {
+            showSpinner();
+            window.cloudLibrary.deleteTemplate(info.storagePath).then(function() {
+                showToast('Template deleted.');
+                currentDeleteInfo = null;
+                loadLibrary();
+            }).catch(function(err) {
+                showToast('Failed to delete: ' + err.message, true);
+                currentDeleteInfo = null;
+                hideSpinner();
+            });
+            return;
+        }
+
+        // Legacy local delete path
         var libraryPath = getLibraryPath();
         if (!isValidPath(libraryPath)) {
             showToast('Invalid library path.', true);
-            deleteModal.style.display = 'none';
             currentDeleteInfo = null;
             return;
         }
@@ -1577,19 +1594,18 @@
         var safeUniqueId = escapeForExtendScript(info.uniqueId);
 
         csInterface.evalScript('deleteStashedComp("' + safePath + '","' + safeCategory + '","' + safeUniqueId + '")', function (result) {
-            deleteModal.style.display = 'none';
             currentDeleteInfo = null;
             if (result && result.indexOf('Success') === 0) {
                 showToast('Deleted successfully.');
-                loadLibrary(libraryPath);
+                loadLibrary();
             } else {
                 showToast(result || 'Failed to delete.', true);
             }
         });
     }
 
-    function renameComp(uniqueId, category, currentName) {
-        currentRenameInfo = { uniqueId: uniqueId, category: category };
+    function renameComp(uniqueId, category, currentName, storagePath) {
+        currentRenameInfo = { uniqueId: uniqueId, category: category, storagePath: storagePath };
         compToRenameCurrentName.textContent = currentName;
         newNameInput.value = currentName;
         renameModal.style.display = 'flex';
@@ -1615,15 +1631,31 @@
             return;
         }
 
+        renameModal.style.display = 'none';
+
+        // Cloud rename path
+        if (info.storagePath && window.cloudLibrary) {
+            showSpinner();
+            window.cloudLibrary.renameTemplate(info.storagePath, newName).then(function() {
+                showToast('Template renamed.');
+                currentRenameInfo = null;
+                loadLibrary();
+            }).catch(function(err) {
+                showToast('Failed to rename: ' + err.message, true);
+                currentRenameInfo = null;
+                hideSpinner();
+            });
+            return;
+        }
+
+        // Legacy local rename path
         var libraryPath = getLibraryPath();
         if (!isValidPath(libraryPath)) {
             showToast('Invalid library path.', true);
-            renameModal.style.display = 'none';
             currentRenameInfo = null;
             return;
         }
 
-        renameModal.style.display = 'none';
         currentRenameInfo = null;
 
         var safePath = escapeForExtendScript(libraryPath);
@@ -1634,7 +1666,7 @@
         csInterface.evalScript('renameStashedComp("' + safePath + '","' + safeCategory + '","' + safeUniqueId + '","' + safeNewName + '")', function (result) {
             if (result && result.indexOf('Success') === 0) {
                 showToast('Renamed successfully.');
-                loadLibrary(libraryPath);
+                loadLibrary();
             } else {
                 showToast(result || 'Rename failed', true);
             }
