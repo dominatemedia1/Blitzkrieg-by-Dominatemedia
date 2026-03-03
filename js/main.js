@@ -520,14 +520,6 @@
         // Initialize sorting and grid size controls
         initSortAndGridControls();
 
-        // Settings modal handlers
-        if (settingsCloseBtn) settingsCloseBtn.addEventListener('click', closeSettings);
-        if (settingsSaveBtn) settingsSaveBtn.addEventListener('click', saveSettings);
-        if (settingsBrowseBtn) settingsBrowseBtn.addEventListener('click', function () {
-            // open folder selector via hostscript.jsx
-            selectLibraryFolderFromUI();
-        });
-
         // Auto-refresh library when panel gains focus (ensures categories stay in sync)
         window.addEventListener('focus', function() {
             if (!stashInProgress) {
@@ -610,14 +602,6 @@
         }
 
         // Settings action
-        if (dropdownSettings) {
-            dropdownSettings.addEventListener('click', function(e) {
-                e.preventDefault();
-                dropdownContainer.classList.remove('open');
-                openSettings();
-            });
-        }
-
         // Bug Log action
         var dropdownBuglog = document.getElementById('dropdown-buglog');
         if (dropdownBuglog) {
@@ -664,48 +648,6 @@
                 }
             });
         }
-    }
-
-    /* --------- Settings modal functions --------- */
-    function openSettings() {
-        // populate current library path into settings
-        var savedPath = getLibraryPath() || '';
-        settingsLibraryPath.value = savedPath;
-        settingsModal.style.display = 'flex';
-    }
-
-    function closeSettings() {
-        settingsModal.style.display = 'none';
-    }
-
-    function saveSettings() {
-        // Save any changed path (settingsLibraryPath is readonly and only changed via browse)
-        var saved = settingsLibraryPath.value;
-        if (saved) {
-            // Save to persistent file storage (fixes restart bug)
-            savePersistentSettings({ libraryPath: saved }, function(success) {
-                if (!success) {
-                    console.warn('Blitzkrieg: Could not save settings to file');
-                }
-            });
-            pathDisplay.textContent = saved;
-            pathDisplay.title = saved;
-            loadLibrary(saved);
-            showToast('Library path saved.');
-        }
-        settingsModal.style.display = 'none';
-    }
-
-    function selectLibraryFolderFromUI() {
-        // Use hostscript.jsx selectLibraryFolder() to pick folder
-        showSpinner();
-        csInterface.evalScript('selectLibraryFolder()', function (path) {
-            hideSpinner();
-            if (path && path !== 'null') {
-                settingsLibraryPath.value = path;
-                // do not auto-close settings - allow Save to commit
-            }
-        });
     }
 
     /* --------- App initialization & core UI logic (kept original behavior) --------- */
@@ -1191,8 +1133,8 @@
             return matchesCategory && matchesSearch;
         }));
         if (filteredComps.length === 0) {
-            if (allComps.length === 0 && !getLibraryPath()) {
-                showPlaceholder("Select a library folder to begin.");
+            if (allComps.length === 0) {
+                showPlaceholder("No templates in the cloud library yet.");
             } else {
                 showPlaceholder("No comps found. Try a different search or category.");
             }
@@ -1431,9 +1373,7 @@
         });
     }
 
-    /* --------- folder selection + add/rename/delete/import flows (kept original) --------- */
-    function selectLibraryFolder() { showSpinner(); csInterface.evalScript('selectLibraryFolder()', function (path) { hideSpinner(); if (path && path !== 'null') { savePersistentSettings({ libraryPath: path }); pathDisplay.textContent = path; pathDisplay.title = path; activeCategory = 'All'; searchInput.value = ''; loadLibrary(path); } }); }
-
+    /* --------- add/rename/delete/import flows --------- */
     function addSelectedComp() {
         var libraryPath = getLibraryPath();
         if (!libraryPath) { showToast('Please select a library folder first.', true); return; }
@@ -2214,7 +2154,6 @@
     });
 
     // expose some internals for inline calls (keeps compatibility)
-    window.selectLibraryFolder = selectLibraryFolder;
     window.loadLibrary = loadLibrary;
 
 })();

@@ -72,28 +72,7 @@
         </div>
     </div>
 
-    <!-- === SETTINGS POPUP (inside panel) === -->
-    <div id="settings-modal" class="modal-overlay" style="display:none;">
-        <div class="modal-box" role="dialog" aria-modal="true">
-            <h3>Settings</h3>
-
-            <div class="form-group">
-                <label for="settings-library-path">Library Folder</label>
-                <div style="display:flex; gap:8px;">
-                    <input type="text" id="settings-library-path" readonly placeholder="No folder selected">
-                    <button id="settings-browse-btn" class="button-secondary">Browse</button>
-                </div>
-                <p style="font-size:12px; color:var(--text-medium); margin-top:8px;">This is the folder used by Blitzkrieg to store and read templates.</p>
-            </div>
-
-            <div class="modal-buttons" style="justify-content:flex-end; margin-top: 18px;">
-                <button id="settings-close-btn" class="button-secondary">Close</button>
-                <button id="settings-save-btn" class="button-primary" style="width:auto; margin-bottom:0;">Save</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- === MODALS (existing ones) === -->
+    <!-- === MODALS === -->
     <div id="delete-confirm-modal" class="modal-overlay" style="display: none;">
         <div class="modal-box">
             <h3>Confirm Deletion</h3>
@@ -327,16 +306,6 @@
                                 <div class="item-text">
                                     <div>Refresh Library</div>
                                     <div class="item-subtitle">Reload all templates</div>
-                                </div>
-                            </a>
-                            <a href="#" class="dropdown-item" id="dropdown-settings">
-                                <svg class="item-icon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <path d="M12 15.5A3.5 3.5 0 1 0 12 8.5a3.5 3.5 0 0 0 0 7z"></path>
-                                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-                                </svg>
-                                <div class="item-text">
-                                    <div>Settings</div>
-                                    <div class="item-subtitle">Configure library folder</div>
                                 </div>
                             </a>
                             <a href="#" class="dropdown-item" id="dropdown-buglog">
