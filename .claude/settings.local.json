@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(supabase db:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npx:*)",
+      "Bash(curl:*)",
+      "Bash(git:*)"
+    ]
+  }
+}
