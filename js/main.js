@@ -553,6 +553,12 @@
                 userInfo.style.display = 'block';
             }
         }
+
+        // Hide admin-only UI elements for non-admins
+        if (!window.blitzkriegAuth || !window.blitzkriegAuth.isAdmin()) {
+            var mainFooter = document.querySelector('.main-footer');
+            if (mainFooter) mainFooter.style.display = 'none';
+        }
     }
 
     /* --------- Utility Functions --------- */
@@ -1229,12 +1235,17 @@
             var favTitle = isFav ? 'Remove from favorites' : 'Add to favorites';
             var favFill = isFav ? 'currentColor' : 'none';
 
+            var isAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
+            var adminBtns = isAdmin ? (
+                    '<button class="action-btn move-btn" title="Move to category"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path><line x1="12" y1="11" x2="12" y2="17"></line><polyline points="9 14 12 11 15 14"></polyline></svg></button>' +
+                    '<button class="action-btn rename-btn" title="Rename"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg></button>' +
+                    '<button class="action-btn delete-btn" title="Delete"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg></button>'
+            ) : '';
+
             htmlParts.push('<div class="stash-item' + previewClass + favClass + '" data-unique-id="' + safeUniqueId + '" data-category="' + safeCategory + '" data-aep-path="' + safeAepPath + '" data-name="' + safeName + '"' + previewDataAttr + durationAttr + ' draggable="true">' +
                 '<div class="item-actions">' +
                     '<button class="action-btn favorite-btn" title="' + favTitle + '"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="' + favFill + '" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg></button>' +
-                    '<button class="action-btn move-btn" title="Move to category"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path><line x1="12" y1="11" x2="12" y2="17"></line><polyline points="9 14 12 11 15 14"></polyline></svg></button>' +
-                    '<button class="action-btn rename-btn" title="Rename"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg></button>' +
-                    '<button class="action-btn delete-btn" title="Delete"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg></button>' +
+                    adminBtns +
                 '</div>' +
                 '<div class="thumbnail">' +
                     thumbHtml +
@@ -1433,6 +1444,10 @@
     }
 
     function executeAddComp() {
+        if (!window.blitzkriegAuth || !window.blitzkriegAuth.isAdmin()) {
+            showToast('You do not have permission to add templates.', true);
+            return;
+        }
         var libraryPath = getLibraryPath();
         var newCatName = newCategoryInput.value.trim();
         var existingCatName = existingCategorySelect.value;
@@ -1494,6 +1509,11 @@
     }
 
     function executeDelete() {
+        if (!window.blitzkriegAuth || !window.blitzkriegAuth.isAdmin()) {
+            showToast('You do not have permission to delete templates.', true);
+            deleteModal.style.display = 'none';
+            return;
+        }
         var info = currentDeleteInfo;
         if (!info) return;
 
@@ -1529,6 +1549,11 @@
     }
 
     function executeRename() {
+        if (!window.blitzkriegAuth || !window.blitzkriegAuth.isAdmin()) {
+            showToast('You do not have permission to rename templates.', true);
+            renameModal.style.display = 'none';
+            return;
+        }
         var info = currentRenameInfo;
         if (!info) return;
 
@@ -1729,6 +1754,11 @@
      * Executes the category rename
      */
     function executeCategoryRename() {
+        if (!window.blitzkriegAuth || !window.blitzkriegAuth.isAdmin()) {
+            showToast('You do not have permission to rename categories.', true);
+            renameCategoryModal.style.display = 'none';
+            return;
+        }
         var info = currentCategoryRenameInfo;
         if (!info) return;
 
@@ -1788,6 +1818,11 @@
      * Executes the category deletion
      */
     function executeCategoryDelete() {
+        if (!window.blitzkriegAuth || !window.blitzkriegAuth.isAdmin()) {
+            showToast('You do not have permission to delete categories.', true);
+            deleteCategoryModal.style.display = 'none';
+            return;
+        }
         var info = currentCategoryDeleteInfo;
         if (!info) return;
 
@@ -1855,6 +1890,11 @@
      * Executes the move comp operation from modal
      */
     function executeMoveComp() {
+        if (!window.blitzkriegAuth || !window.blitzkriegAuth.isAdmin()) {
+            showToast('You do not have permission to move templates.', true);
+            moveCompModal.style.display = 'none';
+            return;
+        }
         var info = currentMoveCompInfo;
         if (!info) return;
 
