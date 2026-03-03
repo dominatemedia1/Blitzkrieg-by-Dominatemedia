@@ -1773,3 +1773,173 @@ function saveBlitzkriegSettings(settingsJson) {
         return "Error: " + e.toString();
     }
 }
+
+// ============================================
+// CLOUD UPLOAD/DOWNLOAD HELPERS
+// ============================================
+
+/**
+ * Stash selected comp to a system temp directory (for cloud upload).
+ * Reuses the existing stashSelectedComp logic but targets temp folder.
+ */
+function stashSelectedCompToTemp(categoryName) {
+    var tempFolder = Folder.temp;
+    var tempLibPath = tempFolder.fsName + '/blitzkrieg_temp';
+
+    // Create temp directory
+    var tempLib = new Folder(tempLibPath);
+    if (!tempLib.exists) tempLib.create();
+
+    // Call existing stash logic with temp path
+    var result = stashSelectedComp(tempLibPath, categoryName);
+
+    // Return the temp path so the JS layer can read the files
+    return JSON.stringify({
+        tempPath: tempLibPath,
+        result: result
+    });
+}
+
+/**
+ * Read stashed files from a comp folder as base64 for upload.
+ */
+function readStashedFilesAsBase64(compFolderPath) {
+    try {
+        var folder = new Folder(compFolderPath);
+        if (!folder.exists) return JSON.stringify({error: 'Temp folder not found'});
+
+        // Find the comp subfolder (first subfolder)
+        var subFolders = folder.getFiles(function(f) { return f instanceof Folder; });
+        if (subFolders.length === 0) return JSON.stringify({error: 'No comp folder found'});
+
+        var compFolder = subFolders[0];
+        var folderName = compFolder.name;
+
+        // Read .aep file
+        var aepFiles = compFolder.getFiles('*.aep');
+        if (aepFiles.length === 0) return JSON.stringify({error: 'No .aep file found'});
+
+        var aepBase64 = readFileAsBase64(aepFiles[0]);
+
+        // Read thumbnail
+        var thumbFiles = compFolder.getFiles('thumbnail.jpg');
+        var thumbnailBase64 = thumbFiles.length > 0 ? readFileAsBase64(thumbFiles[0]) : null;
+
+        // Read metadata
+        var metaFiles = compFolder.getFiles('metadata.json');
+        var metadata = {};
+        if (metaFiles.length > 0) {
+            metaFiles[0].open('r');
+            var metaContent = metaFiles[0].read();
+            metaFiles[0].close();
+            metadata = JSON.parse(metaContent);
+        }
+
+        return JSON.stringify({
+            folderName: folderName,
+            aepBase64: aepBase64,
+            thumbnailBase64: thumbnailBase64,
+            metadata: metadata
+        });
+    } catch (e) {
+        return JSON.stringify({error: e.toString()});
+    }
+}
+
+/**
+ * Read a file and return its contents as base64.
+ */
+function readFileAsBase64(file) {
+    file.encoding = 'BINARY';
+    file.open('r');
+    var content = file.read();
+    file.close();
+
+    // ExtendScript base64 encoding
+    var base64chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    var result = '';
+    var i = 0;
+    while (i < content.length) {
+        var b1 = content.charCodeAt(i++) & 0xFF;
+        var b2 = i < content.length ? content.charCodeAt(i++) & 0xFF : 0;
+        var b3 = i < content.length ? content.charCodeAt(i++) & 0xFF : 0;
+        var padding = (i > content.length + 1) ? 2 : (i > content.length) ? 1 : 0;
+
+        result += base64chars.charAt(b1 >> 2);
+        result += base64chars.charAt(((b1 & 3) << 4) | (b2 >> 4));
+        result += padding >= 1 ? '=' : base64chars.charAt(((b2 & 15) << 2) | (b3 >> 6));
+        result += padding >= 2 ? '=' : base64chars.charAt(b3 & 63);
+    }
+    return result;
+}
+
+/**
+ * Write a base64-encoded file to a temp location.
+ * Returns the temp file path on success, or "ERROR: ..." on failure.
+ */
+function writeTempFileFromBase64(base64Data, fileName) {
+    try {
+        var tempFolder = Folder.temp;
+        var tempFile = new File(tempFolder.fsName + '/blitzkrieg_import_' + fileName);
+
+        // Decode base64
+        var base64chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+        var binary = '';
+        var i = 0;
+        var cleanBase64 = base64Data.replace(/[^A-Za-z0-9+\/]/g, '');
+        while (i < cleanBase64.length) {
+            var b1 = base64chars.indexOf(cleanBase64.charAt(i++));
+            var b2 = base64chars.indexOf(cleanBase64.charAt(i++));
+            var b3 = base64chars.indexOf(cleanBase64.charAt(i++));
+            var b4 = base64chars.indexOf(cleanBase64.charAt(i++));
+
+            binary += String.fromCharCode((b1 << 2) | (b2 >> 4));
+            if (b3 !== -1) binary += String.fromCharCode(((b2 & 15) << 4) | (b3 >> 2));
+            if (b4 !== -1) binary += String.fromCharCode(((b3 & 3) << 6) | b4);
+        }
+
+        tempFile.encoding = 'BINARY';
+        tempFile.open('w');
+        tempFile.write(binary);
+        tempFile.close();
+
+        return tempFile.fsName;
+    } catch (e) {
+        return 'ERROR: ' + e.toString();
+    }
+}
+
+/**
+ * Clean up temp stash directory after cloud upload.
+ */
+function cleanupTempStash(tempPath) {
+    try {
+        var folder = new Folder(tempPath);
+        if (folder.exists) {
+            var files = folder.getFiles();
+            for (var i = 0; i < files.length; i++) {
+                if (files[i] instanceof Folder) {
+                    removeFolderRecursive(files[i]);
+                } else {
+                    files[i].remove();
+                }
+            }
+            folder.remove();
+        }
+        return 'OK';
+    } catch (e) {
+        return 'ERROR: ' + e.toString();
+    }
+}
+
+function removeFolderRecursive(folder) {
+    var files = folder.getFiles();
+    for (var i = 0; i < files.length; i++) {
+        if (files[i] instanceof Folder) {
+            removeFolderRecursive(files[i]);
+        } else {
+            files[i].remove();
+        }
+    }
+    folder.remove();
+}

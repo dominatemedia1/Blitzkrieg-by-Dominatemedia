@@ -1209,7 +1209,8 @@
             // Escape all user-controlled data to prevent XSS
             var safeUniqueId = escapeHTML(comp.uniqueId);
             var safeCategory = escapeHTML(comp.category);
-            var safeAepPath = escapeHTML(comp.aepPath);
+            var safeAepPath = escapeHTML(comp.aepPath || '');
+            var safeStoragePath = escapeHTML(comp.storagePath || '');
             var safeName = escapeHTML(comp.name);
             // Use cloud thumbnail URL or fall back to local path
             var thumbSrc = comp.thumbUrl || (comp.thumbPath ? pathToFileUrl(comp.thumbPath) : '');
@@ -1242,7 +1243,7 @@
                     '<button class="action-btn delete-btn" title="Delete"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg></button>'
             ) : '';
 
-            htmlParts.push('<div class="stash-item' + previewClass + favClass + '" data-unique-id="' + safeUniqueId + '" data-category="' + safeCategory + '" data-aep-path="' + safeAepPath + '" data-name="' + safeName + '"' + previewDataAttr + durationAttr + ' draggable="true">' +
+            htmlParts.push('<div class="stash-item' + previewClass + favClass + '" data-unique-id="' + safeUniqueId + '" data-category="' + safeCategory + '" data-aep-path="' + safeAepPath + '" data-storage-path="' + safeStoragePath + '" data-name="' + safeName + '"' + previewDataAttr + durationAttr + ' draggable="true">' +
                 '<div class="item-actions">' +
                     '<button class="action-btn favorite-btn" title="' + favTitle + '"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="' + favFill + '" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg></button>' +
                     adminBtns +
@@ -1365,8 +1366,8 @@
     function handleStashGridClick(e) {
         var item = e.target.closest('.stash-item');
         if (!item) return;
-        var uniqueId = item.dataset.uniqueId, category = item.dataset.category, aepPath = item.dataset.aepPath, name = item.dataset.name;
-        if (e.target.closest('.import-btn')) { importComp(aepPath, uniqueId); }
+        var uniqueId = item.dataset.uniqueId, category = item.dataset.category, aepPath = item.dataset.aepPath, storagePath = item.dataset.storagePath, name = item.dataset.name;
+        if (e.target.closest('.import-btn')) { importComp(aepPath, uniqueId, storagePath); }
         else if (e.target.closest('.rename-btn')) { renameComp(uniqueId, category, name); }
         else if (e.target.closest('.delete-btn')) { promptDelete(uniqueId, category, name); }
         else if (e.target.closest('.move-btn')) { promptMoveComp(uniqueId, category, name); }
@@ -1384,8 +1385,9 @@
         if (e.target.closest('.action-btn') || e.target.closest('.import-btn') || e.target.closest('.generate-preview-btn')) return;
         var aepPath = item.dataset.aepPath;
         var uniqueId = item.dataset.uniqueId;
-        if (aepPath) {
-            importComp(aepPath, uniqueId);
+        var storagePath = item.dataset.storagePath;
+        if (aepPath || storagePath) {
+            importComp(aepPath, uniqueId, storagePath);
         }
     }
 
@@ -1448,17 +1450,12 @@
             showToast('You do not have permission to add templates.', true);
             return;
         }
-        var libraryPath = getLibraryPath();
         var newCatName = newCategoryInput.value.trim();
         var existingCatName = existingCategorySelect.value;
         var categoryName = newCatName || existingCatName;
 
         if (!categoryName) {
             showToast('Please select or create a category.', true);
-            return;
-        }
-        if (!isValidPath(libraryPath)) {
-            showToast('Invalid library path. Please select a folder first.', true);
             return;
         }
         // Validate category name (prevent path traversal)
@@ -1468,38 +1465,88 @@
         }
 
         addCompModal.style.display = 'none';
-        var addBtn = document.getElementById('add-comp-btn');
-        addBtn.disabled = true;
-        addBtn.querySelector('span').textContent = 'Adding...';
+        stashInProgress = true;
+        showSpinner();
+        showToast('Saving composition...');
 
-        var safePath = escapeForExtendScript(libraryPath);
         var safeCategory = escapeForExtendScript(categoryName);
 
-        stashInProgress = true;
-        csInterface.evalScript('stashSelectedComp("' + safePath + '","' + safeCategory + '")', function (result) {
-            stashInProgress = false;
-            addBtn.disabled = false;
-            addBtn.querySelector('span').textContent = 'Add Selected Comp';
-            if (!result) { showToast('Unexpected error.', true); return; }
-            if (result.indexOf('Success') === 0) {
-                showToast(result);
-                console.log("Blitzkrieg: Stash successful, refreshing library...");
-                // Auto-navigate to the category where the comp was just added
-                // so the user immediately sees their new composition
-                activeCategory = categoryName;
-                // Progressive reload with increasing delays for macOS compatibility.
-                // On macOS, app.open() during stash can delay file system visibility
-                // and cause evalScript calls to return stale data while AE settles.
-                // We use escalating delays to ensure the UI eventually shows the new comp.
-                loadLibrary(libraryPath);
-                setTimeout(function() { loadLibrary(libraryPath); }, 1500);
-                setTimeout(function() { loadLibrary(libraryPath); }, 4000);
-                setTimeout(function() { loadLibrary(libraryPath); }, 8000);
-            } else {
-                showToast(result, true);
-                console.error("Blitzkrieg: Stash failed:", result);
-            }
+        csInterface.evalScript('stashSelectedCompToTemp("' + safeCategory + '")', function(result) {
+            (async function() {
+                try {
+                    var parsed = JSON.parse(result);
+                    if (parsed.result && parsed.result.indexOf('Error') === 0) {
+                        showToast(parsed.result, true);
+                        stashInProgress = false;
+                        hideSpinner();
+                        return;
+                    }
+
+                    var tempPath = parsed.tempPath;
+
+                    // Read files from temp using ExtendScript (returns base64)
+                    var files = await readTempFiles(tempPath, categoryName);
+
+                    // Upload to cloud
+                    await window.cloudLibrary.uploadTemplate(categoryName, files.folderName, {
+                        aep: files.aepBlob,
+                        thumbnail: files.thumbnailBlob,
+                        metadata: files.metadata,
+                    });
+
+                    // Clean up temp files via ExtendScript
+                    csInterface.evalScript('cleanupTempStash("' + escapeForExtendScript(tempPath) + '")');
+
+                    showToast('Template added to cloud library!');
+                    stashInProgress = false;
+                    hideSpinner();
+                    activeCategory = categoryName;
+                    loadLibrary();
+                } catch (err) {
+                    debugLog('Upload error: ' + err.message, 'error');
+                    showToast('Failed to upload template: ' + err.message, true);
+                    stashInProgress = false;
+                    hideSpinner();
+                }
+            })();
         });
+    }
+
+    function readTempFiles(tempPath, categoryName) {
+        return new Promise(function(resolve, reject) {
+            var safePath = escapeForExtendScript(tempPath + '/' + categoryName);
+            csInterface.evalScript('readStashedFilesAsBase64("' + safePath + '")', function(result) {
+                try {
+                    var data = JSON.parse(result);
+                    if (data.error) {
+                        reject(new Error(data.error));
+                        return;
+                    }
+
+                    // Convert base64 to blobs
+                    var aepBlob = base64ToBlob(data.aepBase64, 'application/octet-stream');
+                    var thumbnailBlob = data.thumbnailBase64 ? base64ToBlob(data.thumbnailBase64, 'image/jpeg') : null;
+
+                    resolve({
+                        folderName: data.folderName,
+                        aepBlob: aepBlob,
+                        thumbnailBlob: thumbnailBlob,
+                        metadata: data.metadata,
+                    });
+                } catch (err) {
+                    reject(err);
+                }
+            });
+        });
+    }
+
+    function base64ToBlob(base64, contentType) {
+        var binary = atob(base64);
+        var array = new Uint8Array(binary.length);
+        for (var i = 0; i < binary.length; i++) {
+            array[i] = binary.charCodeAt(i);
+        }
+        return new Blob([array], { type: contentType });
     }
 
     function promptDelete(uniqueId, category, name) {
@@ -1703,7 +1750,47 @@
      * @param {string} aepPath - Path to the AEP file
      * @param {string} uniqueId - Optional unique ID for tracking
      */
-    function importComp(aepPath, uniqueId) {
+    function importComp(aepPath, uniqueId, storagePath) {
+        // Cloud import path
+        if (storagePath && window.cloudLibrary) {
+            showSpinner();
+            showToast('Downloading template...');
+
+            window.cloudLibrary.downloadTemplate(storagePath).then(function (downloaded) {
+                // Convert blob to base64, send to ExtendScript to write to temp
+                var reader = new FileReader();
+                reader.onload = function () {
+                    var base64 = reader.result.split(',')[1];
+                    var safeName = escapeForExtendScript(downloaded.fileName);
+
+                    csInterface.evalScript('writeTempFileFromBase64("' + base64 + '", "' + safeName + '")', function(tempPath) {
+                        if (tempPath.indexOf('ERROR') === 0) {
+                            showToast('Failed to save template: ' + tempPath, true);
+                            hideSpinner();
+                            return;
+                        }
+
+                        // Import the comp from the temp file
+                        csInterface.evalScript('importComp("' + escapeForExtendScript(tempPath) + '")', function(result) {
+                            hideSpinner();
+                            if (result && result.indexOf('Success') === 0) {
+                                showToast('Imported and opened in timeline!');
+                                if (uniqueId) addToRecent(uniqueId);
+                            } else {
+                                showToast(result || 'Unexpected error importing.', true);
+                            }
+                        });
+                    });
+                };
+                reader.readAsDataURL(downloaded.blob);
+            }).catch(function (err) {
+                hideSpinner();
+                showToast('Failed to download template: ' + err.message, true);
+            });
+            return;
+        }
+
+        // Legacy local import path
         if (!isValidPath(aepPath)) {
             showToast('Invalid file path.', true);
             return;
@@ -1720,7 +1807,6 @@
             }
             if (result.indexOf('Success') === 0) {
                 showToast('Imported and opened in timeline!');
-                // Track recent import
                 if (uniqueId) {
                     addToRecent(uniqueId);
                 }
