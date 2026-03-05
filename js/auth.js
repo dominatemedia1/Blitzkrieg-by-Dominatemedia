@@ -53,20 +53,43 @@
     }
 
     // Check if user has blitzkrieg_access via team_members table
-    async function checkBlitzkriegAccess(userId) {
+    async function checkBlitzkriegAccess(userId, userEmail) {
+        // Try lookup by user_id first
         var result = await sb.from('team_members')
             .select('id, full_name, blitzkrieg_access, blitzkrieg_admin')
             .eq('user_id', userId)
-            .single();
+            .maybeSingle();
 
-        if (result.error || !result.data) {
-            return null;
+        if (result.data) {
+            return result.data;
         }
-        return result.data;
+
+        // Fallback: match by email (slack_email) if user_id not linked yet
+        if (userEmail) {
+            var emailResult = await sb.from('team_members')
+                .select('id, full_name, blitzkrieg_access, blitzkrieg_admin')
+                .eq('slack_email', userEmail)
+                .maybeSingle();
+
+            if (emailResult.data) {
+                // Auto-link user_id for future lookups (SECURITY DEFINER function bypasses RLS)
+                sb.rpc('link_blitzkrieg_user_id').then(function () {
+                    console.log('Auto-linked user_id to team member');
+                }).catch(function () {
+                    // Non-critical — next login will retry
+                });
+
+                return emailResult.data;
+            }
+        }
+
+        return null;
     }
 
     // Main auth check — called on plugin load and after login
     async function validateSession() {
+        var teamMember;
+
         try {
             var sessionResult = await sb.auth.getSession();
             var session = sessionResult.data.session;
@@ -80,32 +103,37 @@
             currentUser = session.user;
 
             // Check blitzkrieg access
-            var teamMember = await checkBlitzkriegAccess(currentUser.id);
-
-            if (!teamMember || !teamMember.blitzkrieg_access) {
-                // User exists but no blitzkrieg access
-                currentTeamMember = null;
-                isBlitzkriegAdmin = false;
-                showScreen(deniedScreen);
-                return;
-            }
-
-            // Access granted
-            currentTeamMember = teamMember;
-            isBlitzkriegAdmin = teamMember.blitzkrieg_admin === true;
-
-            // Show the main app
-            showScreen(appContainer);
-
-            // Notify main.js that auth is ready
-            if (typeof window.onBlitzkriegAuthReady === 'function') {
-                window.onBlitzkriegAuthReady();
-            }
+            teamMember = await checkBlitzkriegAccess(currentUser.id, currentUser.email);
 
         } catch (err) {
             console.error('Blitzkrieg auth error:', err);
             // Network error — show offline screen
             showScreen(offlineScreen);
+            return;
+        }
+
+        if (!teamMember || !teamMember.blitzkrieg_access) {
+            // User exists but no blitzkrieg access
+            currentTeamMember = null;
+            isBlitzkriegAdmin = false;
+            showScreen(deniedScreen);
+            return;
+        }
+
+        // Access granted
+        currentTeamMember = teamMember;
+        isBlitzkriegAdmin = teamMember.blitzkrieg_admin === true;
+
+        // Show the main app
+        showScreen(appContainer);
+
+        // Notify main.js that auth is ready (outside try/catch so app errors don't mask as connection errors)
+        if (typeof window.onBlitzkriegAuthReady === 'function') {
+            try {
+                window.onBlitzkriegAuthReady();
+            } catch (appErr) {
+                console.error('Blitzkrieg app init error:', appErr);
+            }
         }
     }
 

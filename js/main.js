@@ -4,6 +4,31 @@
 
     var csInterface = new CSInterface();
 
+    // CEP bridge detection — window.__adobe_cep__ is the native bridge to ExtendScript.
+    // csInterface.evalScript is always a function (prototype), but it THROWS if __adobe_cep__ is missing.
+    var _hasCepBridge = !!(window.__adobe_cep__ && typeof window.__adobe_cep__.evalScript === 'function');
+
+    /**
+     * Safe evalScript wrapper. Checks the CEP bridge before calling.
+     * If bridge is missing, calls callback with error string or rejects.
+     */
+    function safeEvalScript(script, callback) {
+        if (!_hasCepBridge) {
+            // Re-check in case bridge appeared after initial load
+            _hasCepBridge = !!(window.__adobe_cep__ && typeof window.__adobe_cep__.evalScript === 'function');
+        }
+        if (!_hasCepBridge) {
+            if (callback) callback('EvalScript error.');
+            return;
+        }
+        try {
+            csInterface.evalScript(script, callback);
+        } catch (e) {
+            console.error('evalScript threw:', e.message);
+            if (callback) callback('EvalScript error.');
+        }
+    }
+
     // App / main elements
     var appContainer = document.getElementById('app');
     var pathDisplay = document.getElementById('library-path-display');
@@ -108,8 +133,10 @@
      * @param {string} message - Message to log
      * @param {string} level - 'info', 'warn', 'error', 'success'
      */
+    var VALID_LOG_LEVELS = { info: 1, warn: 1, error: 1, success: 1 };
+
     function debugLog(message, level) {
-        level = level || 'info';
+        level = (level && VALID_LOG_LEVELS[level]) ? level : 'info';
         var time = new Date();
         var timeStr = ('0' + time.getHours()).slice(-2) + ':' + ('0' + time.getMinutes()).slice(-2) + ':' + ('0' + time.getSeconds()).slice(-2) + '.' + ('00' + time.getMilliseconds()).slice(-3);
         var entry = { time: timeStr, message: String(message), level: level };
@@ -168,6 +195,9 @@
         // Expose to window for dropdown access
         window.__blitzkriegToggleDebug = toggleDebugLog;
     }
+
+    // Expose debugLog to cloud-library.js
+    window._blitzLog = debugLog;
 
     /* --------- Performance Utilities --------- */
 
@@ -351,7 +381,7 @@
      * @param {function} callback - Called with settings object
      */
     function loadPersistentSettings(callback) {
-        csInterface.evalScript('loadBlitzkriegSettings()', function(result) {
+        safeEvalScript('loadBlitzkriegSettings()', function(result) {
             try {
                 var settings = JSON.parse(result || '{}');
                 // Also sync to localStorage as cache
@@ -383,7 +413,7 @@
 
         // Save to file for persistence
         var safeSettings = escapeForExtendScript(JSON.stringify(settings));
-        csInterface.evalScript('saveBlitzkriegSettings("' + safeSettings + '")', function(result) {
+        safeEvalScript('saveBlitzkriegSettings("' + safeSettings + '")', function(result) {
             if (callback) {
                 callback(result && result.indexOf('Success') === 0);
             }
@@ -416,7 +446,9 @@
             .replace(/'/g, "\\'")    // Escape single quotes
             .replace(/\n/g, '\\n')   // Escape newlines
             .replace(/\r/g, '\\r')   // Escape carriage returns
-            .replace(/\t/g, '\\t');  // Escape tabs
+            .replace(/\t/g, '\\t')   // Escape tabs
+            .replace(/\u2028/g, '\\u2028')  // Escape Unicode line separator
+            .replace(/\u2029/g, '\\u2029'); // Escape Unicode paragraph separator
     }
 
     /**
@@ -453,6 +485,26 @@
         // Reasonable length check
         if (path.length > 1000) return false;
         return true;
+    }
+
+    /**
+     * Validates a user-provided name (category name, comp name).
+     * Mirrors ExtendScript isValidName() for consistency.
+     * @param {string} name - Name to validate
+     * @returns {string|null} - Error message if invalid, null if valid
+     */
+    function validateName(name) {
+        if (!name || typeof name !== 'string') return 'Name is required.';
+        if (name.length > 255) return 'Name is too long (max 255 characters).';
+        if (name.indexOf('\0') !== -1) return 'Name contains invalid characters.';
+        if (name.indexOf('/') !== -1 || name.indexOf('\\') !== -1) return 'Name cannot contain path separators.';
+        if (name.indexOf('..') !== -1) return 'Name cannot contain "..".';
+        // Block URL-encoded path separators
+        if (/%2[fF]/.test(name) || /%5[cC]/.test(name)) return 'Name contains invalid encoded characters.';
+        // Block leading/trailing dots and whitespace
+        if (name !== name.trim()) return 'Name cannot have leading or trailing spaces.';
+        if (name.charAt(0) === '.' || name.charAt(name.length - 1) === '.') return 'Name cannot start or end with a dot.';
+        return null;
     }
 
     /**
@@ -507,6 +559,27 @@
         debugLog('Blitzkrieg panel initializing...', 'info');
         debugLog('Platform: ' + navigator.platform, 'info');
 
+        // CEP bridge diagnostic — critical for generation/import
+        _hasCepBridge = !!(window.__adobe_cep__ && typeof window.__adobe_cep__.evalScript === 'function');
+        debugLog('CEP bridge (window.__adobe_cep__): ' + (_hasCepBridge ? 'AVAILABLE' : 'NOT AVAILABLE'), _hasCepBridge ? 'success' : 'error');
+        if (!_hasCepBridge) {
+            debugLog('window.__adobe_cep__ = ' + typeof window.__adobe_cep__, 'error');
+            debugLog('Import and generation require the CEP bridge. Generation/import will not work.', 'error');
+        }
+
+        // Log Supabase auth state for debugging template loading issues
+        if (window.blitzkriegSupabase) {
+            window.blitzkriegSupabase.auth.getSession().then(function(res) {
+                if (res.data && res.data.session) {
+                    debugLog('Supabase auth: logged in as ' + res.data.session.user.email, 'success');
+                } else {
+                    debugLog('Supabase auth: no active session — storage calls may fail', 'warn');
+                }
+            }).catch(function(err) {
+                debugLog('Supabase auth check failed: ' + err.message, 'error');
+            });
+        }
+
         // Show logged-in user info in sidebar
         var userInfo = document.getElementById('sidebar-user-info');
         var userName = document.getElementById('sidebar-user-name');
@@ -536,6 +609,54 @@
         if (isAdmin) {
             var adminDropdownItems = document.querySelectorAll('.admin-only-item');
             adminDropdownItems.forEach(function(item) { item.style.display = ''; });
+
+            // Inject admin generate toolbar above grid
+            var gridContainer = document.querySelector('.grid-container');
+            if (gridContainer) {
+                var adminBar = document.createElement('div');
+                adminBar.id = 'admin-generate-bar';
+                adminBar.className = 'admin-generate-bar';
+                adminBar.innerHTML =
+                    '<div class="admin-bar-content">' +
+                        '<span class="admin-bar-label" id="admin-bar-label">Admin: Generate thumbnails + previews for templates</span>' +
+                        '<button class="admin-bar-btn" id="admin-generate-missing-btn" title="Generate for templates missing thumbnails">' +
+                            '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>' +
+                            ' Generate Missing' +
+                        '</button>' +
+                        '<button class="admin-bar-btn admin-bar-btn-secondary" id="admin-generate-all-btn" title="Force regenerate ALL templates">' +
+                            '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>' +
+                            ' Regenerate All' +
+                        '</button>' +
+                        '<button class="admin-bar-btn admin-bar-btn-secondary" id="admin-clear-cache-btn" title="Clear thumbnail cache and reload">' +
+                            '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/></svg>' +
+                            ' Clear Cache' +
+                        '</button>' +
+                    '</div>' +
+                    '<div class="admin-bar-progress" id="admin-bar-progress" style="display:none;">' +
+                        '<div class="progress-track"><div class="progress-fill" id="generate-progress-bar"></div></div>' +
+                        '<span class="progress-text" id="generate-progress-text">0/0</span>' +
+                    '</div>';
+                gridContainer.parentNode.insertBefore(adminBar, gridContainer);
+
+                // Button handlers
+                document.getElementById('admin-generate-missing-btn').addEventListener('click', function() {
+                    document.getElementById('admin-bar-progress').style.display = 'flex';
+                    generateAllMissingThumbnails(false);
+                });
+                document.getElementById('admin-generate-all-btn').addEventListener('click', function() {
+                    document.getElementById('admin-bar-progress').style.display = 'flex';
+                    generateAllMissingThumbnails(true);
+                });
+                document.getElementById('admin-clear-cache-btn').addEventListener('click', function() {
+                    // Clear thumbnail blacklist
+                    thumbBlacklist = {};
+                    try { localStorage.removeItem('blitzkrieg_thumb_blacklist'); } catch(e) {}
+                    // Clear metadata cache
+                    window.cloudLibrary.invalidateCache();
+                    showToast('Cache cleared. Reloading...');
+                    loadLibrary();
+                });
+            }
         }
 
         // Show/hide submission sections (visible to all users)
@@ -555,13 +676,18 @@
         initSortAndGridControls();
 
         // Auto-refresh library when panel gains focus (ensures categories stay in sync)
+        // Debounced: 5-minute cooldown to avoid hammering Supabase on every AE focus switch
+        var _lastFocusLoad = Date.now(); // Prevent immediate re-load after initial load
+        var FOCUS_COOLDOWN = 5 * 60 * 1000; // 5 minutes
         window.addEventListener('focus', function() {
-            if (!stashInProgress) {
-                if (isLoading) {
-                    pendingLibraryReload = true;
-                } else {
-                    loadLibrary();
-                }
+            if (stashInProgress) return;
+            var now = Date.now();
+            if (now - _lastFocusLoad < FOCUS_COOLDOWN) return;
+            _lastFocusLoad = now;
+            if (isLoading) {
+                pendingLibraryReload = true;
+            } else {
+                loadLibrary();
             }
         });
 
@@ -660,8 +786,8 @@
         // Check if ExtendScript functions are available (only in CEP environment)
         // Wrapped in try/catch: CSInterface.evalScript may throw outside of Adobe CEP
         try {
-            if (csInterface && typeof csInterface.evalScript === 'function') {
-                csInterface.evalScript('typeof getStashedComps', function(typeResult) {
+            if (_hasCepBridge) {
+                safeEvalScript('typeof getStashedComps', function(typeResult) {
                     debugLog('ExtendScript check: typeof getStashedComps = "' + typeResult + '"', typeResult === 'function' ? 'success' : 'error');
                     if (typeResult !== 'function') {
                         debugLog('CRITICAL: hostscript.jsx not loaded! Check for syntax errors in the ExtendScript file.', 'error');
@@ -748,10 +874,12 @@
         pendingLibraryReload = false;
         showSpinner();
 
+        var loadStart = Date.now();
         debugLog('loadLibrary: Loading templates from cloud...', 'info');
 
         window.cloudLibrary.listTemplates().then(function (comps) {
-            debugLog('loadLibrary: Loaded ' + comps.length + ' templates from cloud', 'success');
+            var elapsed = Date.now() - loadStart;
+            debugLog('loadLibrary: Loaded ' + comps.length + ' templates from cloud in ' + elapsed + 'ms', comps.length > 0 ? 'success' : 'warn');
             allComps = comps;
             // Only render template grid if we're on a template view.
             // Do NOT overwrite analytics, submissions, or review views.
@@ -770,12 +898,17 @@
             hideSpinner();
             isLoading = false;
 
+            // Update admin bar with missing thumbnail count
+            updateAdminBarLabel();
+
             if (pendingLibraryReload) {
                 pendingLibraryReload = false;
                 loadLibrary();
             }
         }).catch(function (err) {
-            debugLog('loadLibrary: ERROR - ' + err.message, 'error');
+            var elapsed = Date.now() - loadStart;
+            debugLog('loadLibrary: ERROR after ' + elapsed + 'ms - ' + err.message, 'error');
+            if (err.stack) debugLog('loadLibrary: stack: ' + err.stack.split('\n').slice(0, 3).join(' | '), 'error');
             showToast('Failed to load templates: ' + err.message, true);
             hideSpinner();
             isLoading = false;
@@ -786,9 +919,14 @@
      * Runs library diagnostics and logs detailed folder structure info to the debug log.
      */
     function runLibraryDiagnostics() {
+        debugLog('Diagnostics: Cloud library mode', 'info');
+        debugLog('CEP bridge: ' + (_hasCepBridge ? 'Available' : 'NOT available — import/generate disabled'), _hasCepBridge ? 'success' : 'error');
+        debugLog('Templates loaded: ' + allComps.length, 'info');
+        var categories = {};
+        allComps.forEach(function(c) { categories[c.category] = (categories[c.category] || 0) + 1; });
+        Object.keys(categories).sort().forEach(function(cat) { debugLog('  ' + cat + ': ' + categories[cat], 'info'); });
         var libraryPath = getLibraryPath();
         if (!libraryPath) {
-            debugLog('Diagnostics: No library path set', 'warn');
             return;
         }
         debugLog('Running diagnostics for: ' + libraryPath, 'info');
@@ -796,20 +934,20 @@
         var safePath = escapeForExtendScript(libraryPath);
 
         // First test: can we even call ExtendScript?
-        csInterface.evalScript('typeof getStashedComps', function(typeResult) {
+        safeEvalScript('typeof getStashedComps', function(typeResult) {
             debugLog('ExtendScript function check: typeof getStashedComps = "' + typeResult + '"', typeResult === 'function' ? 'success' : 'error');
 
             if (typeResult !== 'function') {
                 debugLog('CRITICAL: hostscript.jsx functions not loaded! ExtendScript may have a syntax error.', 'error');
                 // Try to get the actual error
-                csInterface.evalScript('try { eval("getStashedComps"); "ok"; } catch(e) { e.toString(); }', function(errResult) {
+                safeEvalScript('try { eval("getStashedComps"); "ok"; } catch(e) { e.toString(); }', function(errResult) {
                     debugLog('ExtendScript error detail: ' + errResult, 'error');
                 });
                 return;
             }
 
             // Run the full diagnostic
-            csInterface.evalScript('debugLibrary("' + safePath + '")', function(result) {
+            safeEvalScript('debugLibrary("' + safePath + '")', function(result) {
                 try {
                     var cleaned = result.replace(/^\ufeff/, '').replace(/\0/g, '').trim();
                     var info = JSON.parse(cleaned);
@@ -1083,8 +1221,11 @@
         // Store original src for restoration
         img.dataset.originalSrc = originalSrc;
 
-        // Pre-convert frame paths to proper file:// URLs
+        // Pre-convert frame paths to proper URLs (handle both file paths and HTTP URLs)
         var frameSrcs = previewFrames.map(function(path) {
+            if (typeof path === 'string' && (path.indexOf('http://') === 0 || path.indexOf('https://') === 0)) {
+                return path; // Already a URL (cloud preview frames)
+            }
             return pathToFileUrl(path);
         });
 
@@ -1151,20 +1292,140 @@
         }
     }
 
+    // Track thumbnail 404s to avoid retrying on re-render (persists in localStorage)
+    var thumbBlacklist = {};
+    try {
+        var bl = localStorage.getItem('blitzkrieg_thumb_blacklist');
+        if (bl) thumbBlacklist = JSON.parse(bl);
+    } catch(e) {}
+
+    function blacklistThumb(storagePath) {
+        thumbBlacklist[storagePath] = 1;
+        try { localStorage.setItem('blitzkrieg_thumb_blacklist', JSON.stringify(thumbBlacklist)); } catch(e) {}
+    }
+
+    function updateAdminBarLabel() {
+        var label = document.getElementById('admin-bar-label');
+        if (!label) return;
+        var cloudComps = allComps.filter(function(c) { return !!c.storagePath; });
+        var missing = cloudComps.filter(function(c) {
+            if (!c.thumbUrl || c.thumbUrl === '') return true;
+            if (thumbBlacklist[c.storagePath]) return true;
+            return false;
+        }).length;
+        var noPreview = cloudComps.filter(function(c) {
+            return !c.previewFrameCount;
+        }).length;
+        if (missing === 0 && noPreview === 0) {
+            label.textContent = 'All ' + cloudComps.length + ' templates have thumbnails + previews';
+        } else {
+            var parts = [];
+            if (missing > 0) parts.push(missing + ' missing thumbnails');
+            if (noPreview > 0) parts.push(noPreview + ' missing previews');
+            label.textContent = parts.join(', ') + ' — click Generate to fix';
+        }
+    }
+
+    /**
+     * Build HTML string for a single comp card (extracted for reuse in pagination)
+     */
+    function buildCompCardHtml(comp) {
+        var safeUniqueId = escapeHTML(comp.uniqueId);
+        var safeCategory = escapeHTML(comp.category);
+        var safeAepPath = escapeHTML(comp.aepPath || '');
+        var safeStoragePath = escapeHTML(comp.storagePath || '');
+        var safeName = escapeHTML(comp.name);
+        var thumbSrc = comp.thumbUrl || (comp.thumbPath ? pathToFileUrl(comp.thumbPath) : '');
+        var thumbSrcAlt = comp.thumbUrlAlt || '';
+        // Skip thumbnail if BOTH URLs previously 404'd
+        if (thumbSrc && comp.storagePath && thumbBlacklist[comp.storagePath]) {
+            thumbSrc = '';
+            thumbSrcAlt = '';
+        }
+        var safeThumbSrc = escapeHTML(thumbSrc);
+        var safeThumbSrcAlt = escapeHTML(thumbSrcAlt);
+
+        // previewFrames can be: array of signed URLs (local), or null (cloud, lazy-signed)
+        var hasPreviewUrls = comp.previewFrames && comp.previewFrames.length > 0;
+        var hasPreview = hasPreviewUrls || (comp.previewFrameCount > 0);
+        var previewDataAttr = hasPreviewUrls ? ' data-preview-frames="' + escapeHTML(JSON.stringify(comp.previewFrames)) + '"' : '';
+        var durationAttr = comp.duration ? ' data-duration="' + comp.duration + '"' : '';
+        var previewClass = hasPreview ? ' has-preview' : '';
+
+        var isAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
+        var isBlacklisted = comp.storagePath && thumbBlacklist[comp.storagePath];
+        var generatePreviewBtn = '';
+        if (comp.storagePath && isAdmin && (!thumbSrc || isBlacklisted)) {
+            // Cloud template: admin can generate thumbnail (show when missing or blacklisted)
+            generatePreviewBtn = '<button class="generate-preview-btn" title="Generate Thumbnail + Preview"><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg> Generate</button>';
+        } else if (!hasPreview && !thumbSrc && comp.storagePath) {
+            generatePreviewBtn = '<button class="generate-preview-btn" title="Generate Thumbnail"><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg> Thumb</button>';
+        } else if (!hasPreview && !comp.storagePath) {
+            generatePreviewBtn = '<button class="generate-preview-btn" title="Generate Preview Animation"><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> Preview</button>';
+        }
+
+        var nameInitial = (comp.name || '?').charAt(0).toUpperCase();
+        var placeholderColors = ['#1e3a5f','#2d4a3e','#3d2c5e','#4a2c2c','#2c3e50','#1a472a','#3b1f2b','#2c3e6b'];
+        var colorIdx = 0;
+        for (var ci2 = 0; ci2 < comp.name.length; ci2++) { colorIdx += comp.name.charCodeAt(ci2); }
+        var placeholderColor = placeholderColors[colorIdx % placeholderColors.length];
+        var placeholderHtml = '<div class="thumb-placeholder" style="background-color:' + placeholderColor + '"><span class="thumb-placeholder-initial">' + escapeHTML(nameInitial) + '</span></div>';
+
+        var altAttr = safeThumbSrcAlt ? ' data-src-alt="' + safeThumbSrcAlt + '"' : '';
+        var thumbHtml = thumbSrc
+            ? '<img data-src="' + safeThumbSrc + '"' + altAttr + ' alt="Thumbnail" class="comp-thumbnail lazy-thumb" loading="lazy">' + placeholderHtml
+            : placeholderHtml;
+
+        var isFav = isFavorite(comp.uniqueId);
+        var favClass = isFav ? ' is-favorite' : '';
+        var favTitle = isFav ? 'Remove from favorites' : 'Add to favorites';
+        var favFill = isFav ? 'currentColor' : 'none';
+
+        var adminBtns = isAdmin ? (
+                '<button class="action-btn move-btn" title="Move to category"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path><line x1="12" y1="11" x2="12" y2="17"></line><polyline points="9 14 12 11 15 14"></polyline></svg></button>' +
+                '<button class="action-btn rename-btn" title="Rename"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg></button>' +
+                '<button class="action-btn delete-btn" title="Delete"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg></button>'
+        ) : '';
+
+        var previewCountAttr = comp.previewFrameCount ? ' data-preview-count="' + comp.previewFrameCount + '"' : '';
+
+        return '<div class="stash-item' + previewClass + favClass + '" data-unique-id="' + safeUniqueId + '" data-category="' + safeCategory + '" data-aep-path="' + safeAepPath + '" data-storage-path="' + safeStoragePath + '" data-name="' + safeName + '"' + previewDataAttr + durationAttr + previewCountAttr + ' draggable="true">' +
+            '<div class="item-actions">' +
+                '<button class="action-btn favorite-btn" title="' + favTitle + '"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="' + favFill + '" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg></button>' +
+                adminBtns +
+            '</div>' +
+            '<div class="thumbnail">' +
+                thumbHtml +
+                (hasPreview ? '<div class="preview-indicator"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg></div>' : '') +
+                generatePreviewBtn +
+            '</div>' +
+            '<div class="item-info">' +
+                '<p class="item-name" title="' + safeName + '">' + safeName + '</p>' +
+                '<button class="import-btn"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg><span>Import</span></button>' +
+            '</div>' +
+        '</div>';
+    }
+
     function renderCompsGrid() {
         // Guard: if a special view is active, delegate and don't render template cards
+        var adminBar = document.getElementById('admin-generate-bar');
         if (activeCategory === '__analytics') {
+            if (adminBar) adminBar.style.display = 'none';
             renderAnalyticsDashboard();
             return;
         }
         if (activeCategory.indexOf('__submissions_') === 0) {
+            if (adminBar) adminBar.style.display = 'none';
             renderSubmissionsGrid(activeCategory.replace('__submissions_', ''));
             return;
         }
         if (activeCategory === '__review_pending') {
+            if (adminBar) adminBar.style.display = 'none';
             renderSubmissionsGrid('pending_review');
             return;
         }
+        // Show admin bar for template views
+        if (adminBar) adminBar.style.display = '';
 
         // Clear any existing preview animations
         Object.keys(previewAnimations).forEach(function(id) {
@@ -1226,116 +1487,78 @@
             }
             return;
         }
-        // Use DocumentFragment for faster DOM updates
-        var fragment = document.createDocumentFragment();
-        var tempDiv = document.createElement('div');
 
-        // Build HTML string for all items at once
+        // PAGINATED RENDERING: Render first batch, load more on scroll
+        var PAGE_SIZE = 40;
+        var renderUpTo = Math.min(PAGE_SIZE, filteredComps.length);
+
+        // Store filtered comps and page state for loadMore
+        renderCompsGrid._filteredComps = filteredComps;
+        renderCompsGrid._rendered = renderUpTo;
+
+        // Build HTML string for first batch only
         var htmlParts = [];
-        for (var ci = 0; ci < filteredComps.length; ci++) {
-            var comp = filteredComps[ci];
-            // Escape all user-controlled data to prevent XSS
-            var safeUniqueId = escapeHTML(comp.uniqueId);
-            var safeCategory = escapeHTML(comp.category);
-            var safeAepPath = escapeHTML(comp.aepPath || '');
-            var safeStoragePath = escapeHTML(comp.storagePath || '');
-            var safeGifUrl = escapeHTML(comp.gifUrl || '');
-            var safeName = escapeHTML(comp.name);
-            // Use cloud thumbnail URL or fall back to local path
-            var thumbSrc = comp.thumbUrl || (comp.thumbPath ? pathToFileUrl(comp.thumbPath) : '');
-            var safeThumbSrc = escapeHTML(thumbSrc);
-
-            // Prepare preview frames data attribute (JSON encoded)
-            var hasPreview = comp.previewFrames && comp.previewFrames.length > 0;
-            var previewDataAttr = hasPreview ? ' data-preview-frames="' + escapeHTML(JSON.stringify(comp.previewFrames)) + '"' : '';
-            var durationAttr = comp.duration ? ' data-duration="' + comp.duration + '"' : '';
-            var previewClass = hasPreview ? ' has-preview' : '';
-
-            // Generate preview/thumbnail button for items without preview
-            var generatePreviewBtn = '';
-            if (!hasPreview && !thumbSrc && comp.storagePath) {
-                // Cloud template without thumbnail: show "Thumbnail" button
-                generatePreviewBtn = '<button class="generate-preview-btn" title="Generate Thumbnail"><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg> Thumb</button>';
-            } else if (!hasPreview && !comp.storagePath) {
-                // Local template: show preview animation button
-                generatePreviewBtn = '<button class="generate-preview-btn" title="Generate Preview Animation"><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> Preview</button>';
-            }
-
-            // Generate a colored placeholder with the template initial
-            var nameInitial = (comp.name || '?').charAt(0).toUpperCase();
-            // Deterministic color from name hash
-            var placeholderColors = ['#1e3a5f','#2d4a3e','#3d2c5e','#4a2c2c','#2c3e50','#1a472a','#3b1f2b','#2c3e6b'];
-            var colorIdx = 0;
-            for (var ci2 = 0; ci2 < comp.name.length; ci2++) { colorIdx += comp.name.charCodeAt(ci2); }
-            var placeholderColor = placeholderColors[colorIdx % placeholderColors.length];
-            var placeholderHtml = '<div class="thumb-placeholder" style="background-color:' + placeholderColor + '"><span class="thumb-placeholder-initial">' + escapeHTML(nameInitial) + '</span></div>';
-
-            // Use lazy loading for thumbnails - data-src instead of src, with loading="lazy"
-            var thumbHtml = thumbSrc
-                ? '<img data-src="' + safeThumbSrc + '" alt="Thumbnail" class="comp-thumbnail lazy-thumb" loading="lazy">' + placeholderHtml
-                : placeholderHtml;
-
-            // Check if comp is favorited
-            var isFav = isFavorite(comp.uniqueId);
-            var favClass = isFav ? ' is-favorite' : '';
-            var favTitle = isFav ? 'Remove from favorites' : 'Add to favorites';
-            var favFill = isFav ? 'currentColor' : 'none';
-
-            var isAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
-            var adminBtns = isAdmin ? (
-                    '<button class="action-btn move-btn" title="Move to category"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path><line x1="12" y1="11" x2="12" y2="17"></line><polyline points="9 14 12 11 15 14"></polyline></svg></button>' +
-                    '<button class="action-btn rename-btn" title="Rename"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg></button>' +
-                    '<button class="action-btn delete-btn" title="Delete"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg></button>'
-            ) : '';
-
-            var gifDataAttr = safeGifUrl ? ' data-gif-url="' + safeGifUrl + '"' : '';
-
-            htmlParts.push('<div class="stash-item' + previewClass + favClass + '" data-unique-id="' + safeUniqueId + '" data-category="' + safeCategory + '" data-aep-path="' + safeAepPath + '" data-storage-path="' + safeStoragePath + '" data-name="' + safeName + '"' + previewDataAttr + durationAttr + gifDataAttr + ' draggable="true">' +
-                '<div class="item-actions">' +
-                    '<button class="action-btn favorite-btn" title="' + favTitle + '"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="' + favFill + '" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg></button>' +
-                    adminBtns +
-                '</div>' +
-                '<div class="thumbnail">' +
-                    thumbHtml +
-                    (hasPreview ? '<div class="preview-indicator"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg></div>' : '') +
-                    generatePreviewBtn +
-                '</div>' +
-                '<div class="item-info">' +
-                    '<p class="item-name" title="' + safeName + '">' + safeName + '</p>' +
-                    '<button class="import-btn"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg><span>Import</span></button>' +
-                '</div>' +
-            '</div>');
+        for (var ci = 0; ci < renderUpTo; ci++) {
+            htmlParts.push(buildCompCardHtml(filteredComps[ci]));
         }
 
         stashGrid.innerHTML = htmlParts.join('');
 
-        // MEMORY OPTIMIZED: Lazy load thumbnails using singleton Intersection Observer
-        var lazyThumbnails = stashGrid.querySelectorAll('.lazy-thumb');
-        var observer = getLazyLoadObserver();
-
-        // Error handler: hide broken img and show the placeholder behind it
-        function handleThumbError() {
-            this.style.display = 'none';
-            // The placeholder is already in the DOM behind the img — just let it show through
-            var placeholder = this.parentElement.querySelector('.thumb-placeholder');
-            if (placeholder) {
-                placeholder.style.display = 'flex';
-            }
+        // Add scroll sentinel for infinite scroll if more items remain
+        if (renderUpTo < filteredComps.length) {
+            var sentinel = document.createElement('div');
+            sentinel.className = 'scroll-sentinel';
+            sentinel.id = 'grid-scroll-sentinel';
+            sentinel.style.cssText = 'height:1px;width:100%;grid-column:1/-1;';
+            stashGrid.appendChild(sentinel);
+            setupScrollSentinel(sentinel);
         }
 
+        // Setup lazy loading + event listeners on rendered cards
+        setupCardBehaviors(stashGrid);
+    }
+
+    // Error handler: try alt URL first, then hide broken img, show placeholder, blacklist
+    function handleThumbError() {
+        var img = this;
+        // Try alt thumbnail URL before giving up (comp.png vs thumbnail.png)
+        if (img.dataset.srcAlt && !img.dataset.altTried) {
+            img.dataset.altTried = '1';
+            img.src = img.dataset.srcAlt;
+            return; // Give the alt URL a chance to load
+        }
+        img.style.display = 'none';
+        var placeholder = img.parentElement.querySelector('.thumb-placeholder');
+        if (placeholder) {
+            placeholder.style.display = 'flex';
+        }
+        // Blacklist only after both URLs failed
+        var card = img.closest('.stash-item');
+        if (card && card.dataset.storagePath) {
+            blacklistThumb(card.dataset.storagePath);
+        }
+    }
+
+    /**
+     * Set up lazy loading, preview hover, GIF hover, view tracking, and drag/drop
+     * on cards within a container. Works for both initial render and appended batches.
+     * @param {Element} container
+     */
+    function setupCardBehaviors(container) {
+        // Lazy load thumbnails
+        var lazyThumbnails = container.querySelectorAll('.lazy-thumb:not([src])');
+        var observer = getLazyLoadObserver();
+
         if (observer) {
-            // Use singleton observer - no need to create new one each render
             lazyThumbnails.forEach(function(img) {
                 observer.observe(img);
                 img.addEventListener('load', function() {
-                    // Image loaded successfully — hide the placeholder
                     var placeholder = this.parentElement.querySelector('.thumb-placeholder');
                     if (placeholder) placeholder.style.display = 'none';
                 });
                 img.onerror = handleThumbError;
             });
         } else {
-            // Fallback for browsers without IntersectionObserver - load all immediately
             lazyThumbnails.forEach(function(img) {
                 if (img.dataset.src) {
                     img.src = img.dataset.src;
@@ -1349,92 +1572,113 @@
             });
         }
 
-        // Add hover event listeners for preview animation
-        var stashItems = stashGrid.querySelectorAll('.stash-item.has-preview');
+        // Preview animation hover (supports both pre-signed URLs and lazy signing)
+        var stashItems = container.querySelectorAll('.stash-item.has-preview:not([data-events-bound])');
         stashItems.forEach(function(item) {
+            item.setAttribute('data-events-bound', '1');
             var thumbnailContainer = item.querySelector('.thumbnail');
             var uniqueId = item.dataset.uniqueId;
+            var storagePath = item.dataset.storagePath;
             var previewFramesJson = item.dataset.previewFrames;
+            var previewCount = parseInt(item.dataset.previewCount) || 0;
             var duration = parseFloat(item.dataset.duration) || 0;
+            var signingInProgress = false;
+            var cachedFrameUrls = null;
 
-            if (thumbnailContainer && previewFramesJson) {
+            // Pre-parse local preview frame URLs if available
+            if (previewFramesJson) {
                 try {
-                    var previewFrames = JSON.parse(previewFramesJson);
-                    if (previewFrames && previewFrames.length > 0) {
-                        // Mouse enter - start preview with DYNAMIC playback speed
-                        item.addEventListener('mouseenter', function() {
-                            startPreviewAnimation(thumbnailContainer, previewFrames, uniqueId, duration);
-                        });
+                    var parsed = JSON.parse(previewFramesJson);
+                    if (parsed && parsed.length > 0) cachedFrameUrls = parsed;
+                } catch (e) {}
+            }
 
-                        // Mouse leave - stop preview
-                        item.addEventListener('mouseleave', function() {
-                            stopPreviewAnimation(thumbnailContainer, uniqueId);
-                        });
+            if (thumbnailContainer && (cachedFrameUrls || (previewCount > 0 && storagePath))) {
+                item.addEventListener('mouseenter', function() {
+                    if (cachedFrameUrls) {
+                        // Already have URLs — start immediately
+                        startPreviewAnimation(thumbnailContainer, cachedFrameUrls, uniqueId, duration);
+                    } else if (previewCount > 0 && storagePath && !signingInProgress) {
+                        // Lazy sign preview frames on first hover
+                        signingInProgress = true;
+                        window.cloudLibrary.signPreviewFrames(storagePath, previewCount).then(function(urls) {
+                            if (urls && urls.length > 0) {
+                                cachedFrameUrls = urls;
+                                // Also cache on the comp object for reuse
+                                for (var ci = 0; ci < allComps.length; ci++) {
+                                    if (allComps[ci].uniqueId === uniqueId) {
+                                        allComps[ci].previewFrames = urls;
+                                        break;
+                                    }
+                                }
+                                startPreviewAnimation(thumbnailContainer, urls, uniqueId, duration);
+                            }
+                            signingInProgress = false;
+                        }).catch(function() { signingInProgress = false; });
                     }
-                } catch (e) {
-                    console.warn('Blitzkrieg: Could not parse preview frames for ' + uniqueId);
-                }
+                });
+                item.addEventListener('mouseleave', function() {
+                    stopPreviewAnimation(thumbnailContainer, uniqueId);
+                });
             }
         });
 
-        // Add GIF hover preview for cloud templates with gif URLs
-        var gifItems = stashGrid.querySelectorAll('.stash-item[data-gif-url]');
-        gifItems.forEach(function(item) {
-            var gifUrl = item.dataset.gifUrl;
-            if (!gifUrl) return;
+        // On-hover auto-generate preview for cloud templates without preview frames
+        var noPreviewItems = container.querySelectorAll('.stash-item[data-storage-path]:not(.has-preview):not([data-hover-bound])');
+        noPreviewItems.forEach(function(item) {
+            item.setAttribute('data-hover-bound', '1');
+            var storagePath = item.dataset.storagePath;
+            var uniqueId = item.dataset.uniqueId;
+            var compName = item.dataset.name;
+            if (!storagePath) return;
 
-            // Skip items that already have local preview frames (those use the frame animation system)
-            if (item.classList.contains('has-preview')) return;
-
-            var thumbnailContainer = item.querySelector('.thumbnail');
-            if (!thumbnailContainer) return;
-
-            // Track whether GIF was verified to exist (avoid repeated 404s)
-            var gifVerified = false;
-            var gifFailed = false;
+            var generating = false;
+            var generated = false;
 
             item.addEventListener('mouseenter', function() {
-                if (gifFailed) return;
-                var img = thumbnailContainer.querySelector('.comp-thumbnail');
-                if (!img) return;
+                if (generated || generating) return;
+                if (!_hasCepBridge) return;
+                if (!window.blitzkriegSupabase) return;
 
-                if (!gifVerified) {
-                    // First hover: preload GIF to check if it exists
-                    var testImg = new Image();
-                    testImg.onload = function() {
-                        gifVerified = true;
-                        // Store original src and swap to GIF
-                        if (!img.dataset.originalSrc) {
-                            img.dataset.originalSrc = img.src || img.dataset.src || '';
-                        }
-                        img.src = gifUrl;
-                        img.classList.remove('lazy-thumb');
-                    };
-                    testImg.onerror = function() {
-                        gifFailed = true; // Don't try again
-                    };
-                    testImg.src = gifUrl;
-                } else {
-                    // GIF already verified — swap immediately
-                    if (!img.dataset.originalSrc) {
-                        img.dataset.originalSrc = img.src || img.dataset.src || '';
-                    }
-                    img.src = gifUrl;
+                generating = true;
+                // Show subtle generating indicator
+                var thumb = item.querySelector('.thumbnail');
+                if (thumb) {
+                    var genIndicator = document.createElement('div');
+                    genIndicator.className = 'generating-indicator';
+                    genIndicator.innerHTML = '<div class="gen-spinner"></div>';
+                    thumb.appendChild(genIndicator);
                 }
-            });
 
-            item.addEventListener('mouseleave', function() {
-                var img = thumbnailContainer.querySelector('.comp-thumbnail');
-                if (img && img.dataset.originalSrc) {
-                    img.src = img.dataset.originalSrc;
+                // Find comp object
+                var comp = null;
+                for (var ci = 0; ci < allComps.length; ci++) {
+                    if (allComps[ci].uniqueId === uniqueId) { comp = allComps[ci]; break; }
                 }
+                if (!comp) { comp = { storagePath: storagePath, name: compName }; }
+
+                generateCloudThumbnail(comp).then(function() {
+                    generated = true;
+                    generating = false;
+                    // Remove generating indicator
+                    var gi = item.querySelector('.generating-indicator');
+                    if (gi) gi.remove();
+                    // Invalidate cache so next load picks up new frames
+                    window.cloudLibrary.invalidateCache();
+                    debugLog('Auto-generated preview for ' + compName, 'success');
+                }).catch(function(err) {
+                    generating = false;
+                    var gi = item.querySelector('.generating-indicator');
+                    if (gi) gi.remove();
+                    debugLog('Auto-generate failed for ' + compName + ': ' + err.message, 'warn');
+                });
             });
         });
 
-        // Add view tracking (mouseenter) and drag/drop handlers for all stash items
-        var allStashItems = stashGrid.querySelectorAll('.stash-item');
-        allStashItems.forEach(function(item) {
-            // Track view on hover (deduplicated per session in analytics.js)
+        // View tracking + drag/drop for all unbound stash items
+        var allItems = container.querySelectorAll('.stash-item:not([data-events-bound])');
+        allItems.forEach(function(item) {
+            item.setAttribute('data-events-bound', '1');
             item.addEventListener('mouseenter', function() {
                 if (window.blitzkriegAnalytics) {
                     window.blitzkriegAnalytics.trackView(
@@ -1446,7 +1690,6 @@
                 }
             });
 
-            // Drag start
             item.addEventListener('dragstart', function(e) {
                 draggedComp = {
                     uniqueId: item.dataset.uniqueId,
@@ -1458,11 +1701,9 @@
                 e.dataTransfer.setData('text/plain', item.dataset.uniqueId);
             });
 
-            // Drag end
             item.addEventListener('dragend', function(e) {
                 item.classList.remove('dragging');
                 draggedComp = null;
-                // Remove drag-over class from all categories
                 var allCategories = document.querySelectorAll('.nav-item');
                 allCategories.forEach(function(cat) {
                     cat.classList.remove('drag-over');
@@ -1471,7 +1712,58 @@
         });
     }
 
-    function showPlaceholder(message) { stashGrid.innerHTML = '<p class="placeholder-text">' + message + '</p>'; }
+    // Scroll sentinel observer for infinite scroll
+    var scrollSentinelObserver = null;
+
+    function setupScrollSentinel(sentinel) {
+        if (scrollSentinelObserver) scrollSentinelObserver.disconnect();
+
+        scrollSentinelObserver = new IntersectionObserver(function(entries) {
+            if (entries[0].isIntersecting) {
+                loadMoreComps();
+            }
+        }, { rootMargin: '200px', threshold: 0.01 });
+
+        scrollSentinelObserver.observe(sentinel);
+    }
+
+    function loadMoreComps() {
+        var filteredComps = renderCompsGrid._filteredComps;
+        var rendered = renderCompsGrid._rendered;
+        if (!filteredComps || rendered >= filteredComps.length) return;
+
+        var PAGE_SIZE = 40;
+        var end = Math.min(rendered + PAGE_SIZE, filteredComps.length);
+        var htmlParts = [];
+
+        for (var ci = rendered; ci < end; ci++) {
+            htmlParts.push(buildCompCardHtml(filteredComps[ci]));
+        }
+
+        renderCompsGrid._rendered = end;
+
+        // Remove old sentinel
+        var oldSentinel = document.getElementById('grid-scroll-sentinel');
+        if (oldSentinel) oldSentinel.remove();
+
+        // Append new cards
+        stashGrid.insertAdjacentHTML('beforeend', htmlParts.join(''));
+
+        // Add new sentinel if more items remain
+        if (end < filteredComps.length) {
+            var sentinel = document.createElement('div');
+            sentinel.className = 'scroll-sentinel';
+            sentinel.id = 'grid-scroll-sentinel';
+            sentinel.style.cssText = 'height:1px;width:100%;grid-column:1/-1;';
+            stashGrid.appendChild(sentinel);
+            setupScrollSentinel(sentinel);
+        }
+
+        // Setup behaviors on newly added cards
+        setupCardBehaviors(stashGrid);
+    }
+
+    function showPlaceholder(message) { stashGrid.innerHTML = '<p class="placeholder-text">' + escapeHTML(message) + '</p>'; }
 
     /**
      * Updates the active class on ALL sidebar nav items to reflect the current activeCategory
@@ -1539,6 +1831,16 @@
             handleAnalyticsClick(e);
             return;
         }
+
+        // Submission review button delegation
+        var actionBtn = e.target.closest('[data-action]');
+        if (actionBtn) {
+            var action = actionBtn.dataset.action;
+            var subId = actionBtn.dataset.submissionId;
+            if (action === 'approve-submission' && subId) { approveSubmission(subId); return; }
+            if (action === 'reject-submission' && subId) { promptRejectSubmission(subId); return; }
+        }
+
         var item = e.target.closest('.stash-item');
         if (!item) return;
         var uniqueId = item.dataset.uniqueId, category = item.dataset.category, aepPath = item.dataset.aepPath, storagePath = item.dataset.storagePath, name = item.dataset.name;
@@ -1591,7 +1893,7 @@
 
         var safePath = escapeForExtendScript(aepPath);
         stashInProgress = true;
-        csInterface.evalScript('generatePreviewFrames("' + safePath + '")', function(result) {
+        safeEvalScript('generatePreviewFrames("' + safePath + '")', function(result) {
             stashInProgress = false;
             hideSpinner();
             if (!result) {
@@ -1619,7 +1921,7 @@
      * Generate a thumbnail for a single cloud template card and reload.
      */
     function generateCloudThumbnailForCard(uniqueId, storagePath, compName) {
-        if (!csInterface || typeof csInterface.evalScript !== 'function') {
+        if (!_hasCepBridge) {
             showToast('Requires After Effects.', true);
             return;
         }
@@ -1633,29 +1935,31 @@
 
         showSpinner();
         stashInProgress = true;
-        showToast('Generating thumbnail for "' + compName + '"...');
+        showToast('Generating thumbnail + preview for "' + compName + '"...');
 
         generateCloudThumbnail(comp).then(function() {
             stashInProgress = false;
             hideSpinner();
-            showToast('Thumbnail generated for "' + compName + '"!');
+            showToast('Thumbnail + preview generated for "' + compName + '"!');
+            // Invalidate cache and reload to pick up new thumb + preview frames
+            window.cloudLibrary.invalidateCache();
             loadLibrary();
         }).catch(function(err) {
             stashInProgress = false;
             hideSpinner();
-            showToast('Failed to generate thumbnail: ' + err.message, true);
+            showToast('Failed to generate: ' + err.message, true);
         });
     }
 
     /* --------- add/rename/delete/import flows --------- */
     function addSelectedComp() {
         // Check if CSInterface is available
-        if (!csInterface || typeof csInterface.evalScript !== 'function') {
+        if (!_hasCepBridge) {
             showToast('Adding comps requires After Effects.', true);
             return;
         }
         var categories = Array.from(new Set(allComps.map(function(c) { return c.category; }))).sort();
-        existingCategorySelect.innerHTML = categories.map(function (cat) { return '<option value="' + cat + '">' + cat + '</option>'; }).join('');
+        existingCategorySelect.innerHTML = categories.map(function (cat) { return '<option value="' + escapeHTML(cat) + '">' + escapeHTML(cat) + '</option>'; }).join('');
         existingCategorySelect.disabled = categories.length === 0;
         if (categories.length === 0) { existingCategorySelect.innerHTML = '<option value="">No categories yet</option>'; }
         newCategoryInput.value = '';
@@ -1672,9 +1976,9 @@
             showToast('Please select or create a category.', true);
             return;
         }
-        // Validate category name (prevent path traversal)
-        if (categoryName.indexOf('/') !== -1 || categoryName.indexOf('\\') !== -1 || categoryName.indexOf('..') !== -1) {
-            showToast('Category name cannot contain path separators.', true);
+        var nameErr = validateName(categoryName);
+        if (nameErr) {
+            showToast(nameErr, true);
             return;
         }
 
@@ -1685,7 +1989,7 @@
 
         var safeCategory = escapeForExtendScript(categoryName);
 
-        csInterface.evalScript('stashSelectedCompToTemp("' + safeCategory + '")', function(result) {
+        safeEvalScript('stashSelectedCompToTemp("' + safeCategory + '")', function(result) {
             (async function() {
                 try {
                     var parsed = JSON.parse(result);
@@ -1700,14 +2004,15 @@
                     var files = await readTempFiles(tempPath, categoryName);
 
                     if (isAdmin) {
-                        // Admin: upload directly to production path (current behavior)
+                        // Admin: upload directly to production path with preview frames
                         await window.cloudLibrary.uploadTemplate(categoryName, files.folderName, {
                             aep: files.aepBlob,
                             thumbnail: files.thumbnailBlob,
                             metadata: files.metadata,
+                            previewFrames: files.previewFrameBlobs,
                         });
 
-                        csInterface.evalScript('cleanupTempStash("' + escapeForExtendScript(tempPath) + '")');
+                        safeEvalScript('cleanupTempStash("' + escapeForExtendScript(tempPath) + '")');
                         showToast('Template added to cloud library!');
                         stashInProgress = false;
                         hideSpinner();
@@ -1728,16 +2033,28 @@
                             });
                         if (aepUpload.error) throw new Error('AEP upload failed: ' + aepUpload.error.message);
 
-                        // Upload thumbnail if present
+                        // Upload thumbnail if present (use comp.png for consistency)
                         if (files.thumbnailBlob) {
                             var thumbUpload = await sb.storage.from('blitzkrieg')
-                                .upload(pendingBasePath + '/thumbnail.png', files.thumbnailBlob, {
+                                .upload(pendingBasePath + '/comp.png', files.thumbnailBlob, {
                                     contentType: 'image/png',
                                     upsert: true,
                                 });
                             if (thumbUpload.error) {
                                 debugLog('Thumbnail upload warning: ' + thumbUpload.error.message, 'warn');
                             }
+                        }
+
+                        // Upload preview frames if present
+                        if (files.previewFrameBlobs && files.previewFrameBlobs.length > 0) {
+                            var frameUploads = files.previewFrameBlobs.map(function(blob, idx) {
+                                return sb.storage.from('blitzkrieg')
+                                    .upload(pendingBasePath + '/preview/frame_' + idx + '.png', blob, {
+                                        contentType: 'image/png',
+                                        upsert: true,
+                                    });
+                            });
+                            await Promise.all(frameUploads);
                         }
 
                         // Upload metadata
@@ -1751,10 +2068,12 @@
                         }
 
                         // Create submission record
+                        var submissionName = files.metadata && files.metadata.name ? files.metadata.name : files.folderName;
+                        if (submissionName && submissionName.length > 255) submissionName = submissionName.substring(0, 255);
                         var insertResult = await sb.from('blitzkrieg_template_submissions').insert({
                             user_id: userId,
                             team_member_id: teamMember ? teamMember.id : null,
-                            template_name: files.metadata && files.metadata.name ? files.metadata.name : files.folderName,
+                            template_name: submissionName,
                             category: categoryName,
                             storage_path: pendingBasePath,
                             status: 'pending',
@@ -1762,7 +2081,7 @@
                         });
                         if (insertResult.error) throw new Error('Submission record failed: ' + insertResult.error.message);
 
-                        csInterface.evalScript('cleanupTempStash("' + escapeForExtendScript(tempPath) + '")');
+                        safeEvalScript('cleanupTempStash("' + escapeForExtendScript(tempPath) + '")');
                         showToast('Template submitted for review!');
                         stashInProgress = false;
                         hideSpinner();
@@ -1778,32 +2097,92 @@
         });
     }
 
-    function readTempFiles(tempPath, categoryName) {
+    /**
+     * List directory contents via evalScript (works in all environments).
+     * Returns array of entry names; directories have trailing '/'.
+     */
+    function listDirAsync(dirPath) {
         return new Promise(function(resolve, reject) {
-            var safePath = escapeForExtendScript(tempPath + '/' + categoryName);
-            csInterface.evalScript('readStashedFilesAsBase64("' + safePath + '")', function(result) {
-                try {
-                    var data = JSON.parse(result);
-                    if (data.error) {
-                        reject(new Error(data.error));
-                        return;
-                    }
-
-                    // Convert base64 to blobs
-                    var aepBlob = base64ToBlob(data.aepBase64, 'application/octet-stream');
-                    var thumbnailBlob = data.thumbnailBase64 ? base64ToBlob(data.thumbnailBase64, 'image/png') : null;
-
-                    resolve({
-                        folderName: data.folderName,
-                        aepBlob: aepBlob,
-                        thumbnailBlob: thumbnailBlob,
-                        metadata: data.metadata,
-                    });
-                } catch (err) {
-                    reject(err);
+            var safe = escapeForExtendScript(dirPath);
+            safeEvalScript(
+                '(function(){ var f = new Folder("' + safe + '"); if (!f.exists) return "[]"; ' +
+                'var files = f.getFiles(); var names = []; ' +
+                'for(var i=0;i<files.length;i++) names.push(files[i].name + (files[i] instanceof Folder ? "/" : "")); ' +
+                'return JSON.stringify(names); })()',
+                function(r) {
+                    try { resolve(JSON.parse(r)); }
+                    catch (e) { reject(new Error('Cannot list dir: ' + dirPath)); }
                 }
-            });
+            );
         });
+    }
+
+    /**
+     * Read stashed temp files from disk.
+     * Fully async — uses evalScript for dir listing and readFileAsBlobAsync for reads.
+     */
+    async function readTempFiles(tempPath, categoryName) {
+        var categoryDir = tempPath + '/' + categoryName;
+
+        // List category dir to find the comp subfolder
+        var entries = await listDirAsync(categoryDir);
+        var folderName = null;
+        for (var i = 0; i < entries.length; i++) {
+            var eName = entries[i].replace(/\/$/, '');
+            if (eName === '.' || eName === '..' || eName === '.DS_Store') continue;
+            if (entries[i].endsWith('/')) { folderName = eName; break; }
+        }
+        if (!folderName) throw new Error('No comp folder found in ' + categoryDir);
+
+        var compDir = categoryDir + '/' + folderName;
+        var compEntries = await listDirAsync(compDir);
+
+        // Find .aep file
+        var aepName = null;
+        for (var j = 0; j < compEntries.length; j++) {
+            var ce = compEntries[j].replace(/\/$/, '');
+            if (ce.toLowerCase().endsWith('.aep')) { aepName = ce; break; }
+        }
+        if (!aepName) throw new Error('No .aep file found');
+
+        // Read AEP file
+        var aepBlob = await readFileAsBlobAsync(compDir + '/' + aepName, 'application/octet-stream');
+
+        // Read thumbnail
+        var thumbnailBlob = null;
+        var thumbNames = ['comp.png', 'thumbnail.png', 'thumbnail.jpg'];
+        for (var t = 0; t < thumbNames.length; t++) {
+            if (await fileExistsAsync(compDir + '/' + thumbNames[t])) {
+                thumbnailBlob = await readFileAsBlobAsync(compDir + '/' + thumbNames[t], 'image/png');
+                break;
+            }
+        }
+
+        // Read metadata
+        var metadata = {};
+        try {
+            var metaBlob = await readFileAsBlobAsync(compDir + '/metadata.json', 'application/json');
+            metadata = JSON.parse(await metaBlob.text());
+        } catch (e) { /* no metadata */ }
+
+        // Read preview frames
+        var previewFrameBlobs = [];
+        var frameCount = metadata.previewFrames || 0;
+        for (var fi = 0; fi < frameCount; fi++) {
+            var framePath = compDir + '/preview/frame_' + fi + '.png';
+            if (await fileExistsAsync(framePath)) {
+                try { previewFrameBlobs.push(await readFileAsBlobAsync(framePath, 'image/png')); }
+                catch (e) { /* skip missing frame */ }
+            }
+        }
+
+        return {
+            folderName: folderName,
+            aepBlob: aepBlob,
+            thumbnailBlob: thumbnailBlob,
+            metadata: metadata,
+            previewFrameBlobs: previewFrameBlobs,
+        };
     }
 
     function base64ToBlob(base64, contentType) {
@@ -1859,7 +2238,7 @@
         var safeCategory = escapeForExtendScript(info.category);
         var safeUniqueId = escapeForExtendScript(info.uniqueId);
 
-        csInterface.evalScript('deleteStashedComp("' + safePath + '","' + safeCategory + '","' + safeUniqueId + '")', function (result) {
+        safeEvalScript('deleteStashedComp("' + safePath + '","' + safeCategory + '","' + safeUniqueId + '")', function (result) {
             currentDeleteInfo = null;
             if (result && result.indexOf('Success') === 0) {
                 showToast('Deleted successfully.');
@@ -1891,9 +2270,9 @@
             showToast('Please enter a new name.', true);
             return;
         }
-        // Validate new name (prevent path traversal)
-        if (newName.indexOf('/') !== -1 || newName.indexOf('\\') !== -1 || newName.indexOf('..') !== -1) {
-            showToast('Name cannot contain path separators.', true);
+        var renameErr = validateName(newName);
+        if (renameErr) {
+            showToast(renameErr, true);
             return;
         }
 
@@ -1929,7 +2308,7 @@
         var safeUniqueId = escapeForExtendScript(info.uniqueId);
         var safeNewName = escapeForExtendScript(newName);
 
-        csInterface.evalScript('renameStashedComp("' + safePath + '","' + safeCategory + '","' + safeUniqueId + '","' + safeNewName + '")', function (result) {
+        safeEvalScript('renameStashedComp("' + safePath + '","' + safeCategory + '","' + safeUniqueId + '","' + safeNewName + '")', function (result) {
             if (result && result.indexOf('Success') === 0) {
                 showToast('Renamed successfully.');
                 loadLibrary();
@@ -2060,7 +2439,7 @@
      */
     function importComp(aepPath, uniqueId, storagePath) {
         // Check if we're in a CEP environment with ExtendScript support
-        if (!csInterface || typeof csInterface.evalScript !== 'function') {
+        if (!_hasCepBridge) {
             showToast('Import requires After Effects. Open this panel inside AE.', true);
             return;
         }
@@ -2077,23 +2456,23 @@
         if (storagePath && window.cloudLibrary) {
             showSpinner();
             showToast('Downloading template...');
+            debugLog('IMPORT: starting cloud import for ' + storagePath);
 
-            window.cloudLibrary.downloadTemplate(storagePath).then(function (downloaded) {
-                // Convert blob to base64, send to ExtendScript to write to temp
-                var reader = new FileReader();
-                reader.onload = function () {
-                    var base64 = reader.result.split(',')[1];
-                    var safeName = escapeForExtendScript(downloaded.fileName);
+            getTempDir().then(function(sysTempDir) {
+                debugLog('IMPORT: temp dir = ' + sysTempDir);
+                return window.cloudLibrary.downloadTemplate(storagePath);
+            }).then(function(downloaded) {
+                debugLog('IMPORT: downloaded ' + downloaded.fileName + ' (' + (downloaded.blob.size / 1024).toFixed(0) + 'KB)');
+                var tempAepPath = _cachedTempDir + '/blitzkrieg_import_' + downloaded.fileName;
+                return writeBlobToFile(downloaded.blob, tempAepPath).then(function(writtenPath) {
+                    debugLog('IMPORT: written to disk, calling ExtendScript importComp...');
+                    var aepDiskPath = writtenPath || tempAepPath;
+                    return new Promise(function(resolve, reject) {
+                        var safePath = escapeForExtendScript(aepDiskPath);
+                        safeEvalScript('importComp("' + safePath + '")', function(result) {
+                            // Clean up temp file
+                            try { safeEvalScript('(function(){ var f = new File("' + safePath + '"); if(f.exists) f.remove(); return "ok"; })()'); } catch(e) {}
 
-                    csInterface.evalScript('writeTempFileFromBase64("' + base64 + '", "' + safeName + '")', function(tempPath) {
-                        if (!tempPath || tempPath === 'EvalScript error.' || tempPath.indexOf('ERROR') === 0) {
-                            showToast('Failed to save template. Ensure After Effects is running.', true);
-                            hideSpinner();
-                            return;
-                        }
-
-                        // Import the comp from the temp file
-                        csInterface.evalScript('importComp("' + escapeForExtendScript(tempPath) + '")', function(result) {
                             hideSpinner();
                             if (result && result.indexOf('Success') === 0) {
                                 showToast('Imported and opened in timeline!');
@@ -2101,16 +2480,18 @@
                                 if (window.blitzkriegAnalytics && _trackComp) {
                                     window.blitzkriegAnalytics.trackImport(_trackComp.name, _trackComp.category, storagePath);
                                 }
+                                resolve();
                             } else {
                                 showToast(result || 'Unexpected error importing.', true);
+                                reject(new Error(result || 'Import failed'));
                             }
                         });
                     });
-                };
-                reader.readAsDataURL(downloaded.blob);
+                });
             }).catch(function (err) {
                 hideSpinner();
-                showToast('Failed to download template: ' + err.message, true);
+                debugLog('IMPORT FAIL: ' + err.message, 'error');
+                showToast('Import failed: ' + err.message, true);
             });
             return;
         }
@@ -2124,7 +2505,7 @@
         showSpinner();
         var safePath = escapeForExtendScript(aepPath);
 
-        csInterface.evalScript('importComp("' + safePath + '")', function (result) {
+        safeEvalScript('importComp("' + safePath + '")', function (result) {
             hideSpinner();
             if (!result) {
                 showToast('Unexpected error importing.', true);
@@ -2181,9 +2562,9 @@
             showToast('Please enter a new name.', true);
             return;
         }
-        // Validate new name
-        if (newName.indexOf('/') !== -1 || newName.indexOf('\\') !== -1 || newName.indexOf('..') !== -1) {
-            showToast('Name cannot contain path separators.', true);
+        var catRenameErr = validateName(newName);
+        if (catRenameErr) {
+            showToast(catRenameErr, true);
             return;
         }
 
@@ -2221,7 +2602,7 @@
         var safeOldName = escapeForExtendScript(info.category);
         var safeNewName = escapeForExtendScript(newName);
 
-        csInterface.evalScript('renameCategory("' + safePath + '","' + safeOldName + '","' + safeNewName + '")', function (result) {
+        safeEvalScript('renameCategory("' + safePath + '","' + safeOldName + '","' + safeNewName + '")', function (result) {
             hideSpinner();
             currentCategoryRenameInfo = null;
             if (result && result.indexOf('Success') === 0) {
@@ -2291,7 +2672,7 @@
         var safePath = escapeForExtendScript(libraryPath);
         var safeCategoryName = escapeForExtendScript(info.category);
 
-        csInterface.evalScript('deleteCategory("' + safePath + '","' + safeCategoryName + '")', function (result) {
+        safeEvalScript('deleteCategory("' + safePath + '","' + safeCategoryName + '")', function (result) {
             hideSpinner();
             currentCategoryDeleteInfo = null;
             if (result && result.indexOf('Success') === 0) {
@@ -2357,9 +2738,9 @@
             return;
         }
 
-        // Validate new category name
-        if (targetCategory.indexOf('/') !== -1 || targetCategory.indexOf('\\') !== -1 || targetCategory.indexOf('..') !== -1) {
-            showToast('Category name cannot contain path separators.', true);
+        var moveNameErr = validateName(targetCategory);
+        if (moveNameErr) {
+            showToast(moveNameErr, true);
             return;
         }
 
@@ -2418,7 +2799,7 @@
         var safeOldCategory = escapeForExtendScript(oldCategory);
         var safeNewCategory = escapeForExtendScript(newCategory);
 
-        csInterface.evalScript('moveCompToCategory("' + safePath + '","' + safeUniqueId + '","' + safeOldCategory + '","' + safeNewCategory + '")', function (result) {
+        safeEvalScript('moveCompToCategory("' + safePath + '","' + safeUniqueId + '","' + safeOldCategory + '","' + safeNewCategory + '")', function (result) {
             hideSpinner();
             if (result && result.indexOf('Success') === 0) {
                 showToast('"' + compName + '" moved to ' + newCategory + '.');
@@ -2685,8 +3066,8 @@
                 // Admin review actions
                 if (isReviewMode && isAdmin) {
                     html += '<div class="submission-actions">';
-                    html += '<button class="button-primary btn-approve" onclick="window.__approveSubmission(\'' + sub.id + '\')">Approve</button>';
-                    html += '<button class="button-danger btn-reject" onclick="window.__rejectSubmission(\'' + sub.id + '\')">Reject</button>';
+                    html += '<button class="button-primary btn-approve" data-action="approve-submission" data-submission-id="' + escapeHTML(sub.id) + '">Approve</button>';
+                    html += '<button class="button-danger btn-reject" data-action="reject-submission" data-submission-id="' + escapeHTML(sub.id) + '">Reject</button>';
                     html += '</div>';
                 }
 
@@ -2722,29 +3103,43 @@
                 var pendingPath = sub.storage_path;
                 var productionPath = sub.category + '/' + pendingPath.split('/').pop();
 
-                // List files in the pending path
-                sb.storage.from('blitzkrieg').list(pendingPath).then(function(listRes) {
+                // List files in the pending path (including preview subfolder)
+                sb.storage.from('blitzkrieg').list(pendingPath).then(async function(listRes) {
                     if (listRes.error || !listRes.data || listRes.data.length === 0) {
                         hideSpinner();
                         showToast('No files found in pending path.', true);
                         return;
                     }
 
-                    var files = listRes.data.filter(function(f) { return f.id !== null; });
-                    var copyPromises = files.map(function(file) {
-                        var srcPath = pendingPath + '/' + file.name;
-                        var destPath = productionPath + '/' + file.name;
+                    // Collect top-level files
+                    var filesToCopy = listRes.data
+                        .filter(function(f) { return f.id !== null; })
+                        .map(function(f) { return { src: pendingPath + '/' + f.name, dest: productionPath + '/' + f.name }; });
 
-                        // Download from pending, then upload to production
-                        return sb.storage.from('blitzkrieg').download(srcPath).then(function(dlRes) {
+                    // Check for preview subfolder
+                    var subFolders = listRes.data.filter(function(f) { return f.id === null; });
+                    for (var si = 0; si < subFolders.length; si++) {
+                        var subName = subFolders[si].name;
+                        var subListRes = await sb.storage.from('blitzkrieg').list(pendingPath + '/' + subName);
+                        if (subListRes.data) {
+                            subListRes.data.filter(function(f) { return f.id !== null; }).forEach(function(f) {
+                                filesToCopy.push({
+                                    src: pendingPath + '/' + subName + '/' + f.name,
+                                    dest: productionPath + '/' + subName + '/' + f.name,
+                                });
+                            });
+                        }
+                    }
+
+                    var copyPromises = filesToCopy.map(function(entry) {
+                        return sb.storage.from('blitzkrieg').download(entry.src).then(function(dlRes) {
                             if (dlRes.error) throw new Error('Download failed: ' + dlRes.error.message);
-                            return sb.storage.from('blitzkrieg').upload(destPath, dlRes.data, {
+                            return sb.storage.from('blitzkrieg').upload(entry.dest, dlRes.data, {
                                 upsert: true,
                             });
                         }).then(function(upRes) {
                             if (upRes.error) throw new Error('Upload failed: ' + upRes.error.message);
-                            // Delete the pending file
-                            return sb.storage.from('blitzkrieg').remove([srcPath]);
+                            return sb.storage.from('blitzkrieg').remove([entry.src]);
                         });
                     });
 
@@ -2764,6 +3159,7 @@
                             showToast('Files moved but DB update failed: ' + updateRes.error.message, true);
                         } else {
                             showToast('Submission approved and published!');
+                            window.cloudLibrary.invalidateCache();
                             loadSubmissionCounts();
                             renderSubmissionsGrid('pending_review');
                         }
@@ -2815,9 +3211,6 @@
             });
     }
 
-    // Expose review actions globally for inline onclick handlers
-    window.__approveSubmission = approveSubmission;
-    window.__rejectSubmission = promptRejectSubmission;
 
     /* --------- Analytics Dashboard (Admin) — Multi-view Drilldown --------- */
 
@@ -2828,6 +3221,7 @@
     var analyticsTemplateName = '';
     var analyticsTemplateCategory = '';
     var analyticsDateRange = '30d';
+    var analyticsShowAllEvents = false;
 
     var ANALYTICS_PERIOD_DAYS = { '7d': 7, '14d': 14, '30d': 30, '90d': 90 };
 
@@ -2930,20 +3324,18 @@
         }
         var maxVal = 1;
         dailyStats.forEach(function(d) {
-            maxVal = Math.max(maxVal, Number(d.import_count) || 0, Number(d.view_count) || 0);
+            maxVal = Math.max(maxVal, Number(d.import_count) || 0);
         });
         var showLabels = dailyStats.length <= 14;
         var html = '<div class="css-bar-chart-container">';
-        html += '<div class="css-bar-chart-title">Daily Activity</div>';
+        html += '<div class="css-bar-chart-title">Daily Imports</div>';
         html += '<div class="css-bar-chart">';
         dailyStats.forEach(function(d) {
             var importH = Math.max(((Number(d.import_count) || 0) / maxVal) * 100, 1.5);
-            var viewH = Math.max(((Number(d.view_count) || 0) / maxVal) * 100, 1.5);
             var dateLabel = new Date(d.stat_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-            html += '<div class="chart-bar-group" title="' + dateLabel + ': ' + (d.import_count || 0) + ' imports, ' + (d.view_count || 0) + ' views">';
+            html += '<div class="chart-bar-group" title="' + dateLabel + ': ' + (d.import_count || 0) + ' imports">';
             html += '<div class="chart-bar-pair">';
             html += '<div class="chart-bar imports" style="height:' + importH + '%"></div>';
-            html += '<div class="chart-bar views" style="height:' + viewH + '%"></div>';
             html += '</div>';
             if (showLabels) html += '<div class="chart-bar-label">' + dateLabel + '</div>';
             html += '</div>';
@@ -2951,20 +3343,29 @@
         html += '</div>';
         html += '<div class="chart-legend">';
         html += '<span class="chart-legend-item"><span class="chart-legend-dot imports"></span>Imports</span>';
-        html += '<span class="chart-legend-item"><span class="chart-legend-dot views"></span>Views</span>';
         html += '</div>';
         html += '</div>';
         return html;
     }
 
-    function buildActivityTimeline(events) {
+    function buildActivityTimeline(events, showAll) {
         if (!events || events.length === 0) {
             return '<p class="placeholder-text">No activity for this period.</p>';
         }
+
+        // Filter out view/browse noise unless showAll is true
+        var filtered = showAll ? events : events.filter(function(ev) {
+            return ev.event_type !== 'template_view' && ev.event_type !== 'category_browse';
+        });
+
+        if (filtered.length === 0) {
+            return '<p class="placeholder-text">No import activity for this period. Toggle "Show All Events" to see views.</p>';
+        }
+
         // Group by date
         var groups = {};
         var groupOrder = [];
-        events.forEach(function(ev) {
+        filtered.forEach(function(ev) {
             var dateKey = new Date(ev.created_at).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
             if (!groups[dateKey]) { groups[dateKey] = []; groupOrder.push(dateKey); }
             groups[dateKey].push(ev);
@@ -3066,7 +3467,7 @@
             sb.rpc('get_blitzkrieg_user_stats', { p_start_date: startDate }),
         ]).then(function(results) {
             var summary = (results[0].data && results[0].data[0]) ? results[0].data[0] : {
-                total_imports: 0, total_views: 0, active_users: 0, total_searches: 0, pending_submissions: 0
+                total_imports: 0, active_users: 0, avg_imports_per_user: 0, total_sessions: 0, unique_templates: 0, pending_submissions: 0
             };
             var dailyStats = results[1].data || [];
             var topTemplates = results[2].data || [];
@@ -3079,20 +3480,17 @@
             analyticsCache.userStats = userStats;
 
             var days = ANALYTICS_PERIOD_DAYS[analyticsDateRange] || 30;
-            var avgDaily = dailyStats.length > 0
-                ? (dailyStats.reduce(function(s, d) { return s + Number(d.unique_users || 0); }, 0) / dailyStats.length).toFixed(1)
-                : '0';
 
             var html = '';
 
             // 6 KPI Cards (3x2 grid)
             html += '<div class="analytics-stat-cards-3col">';
-            html += buildStatCard(analyticsFormatNumber(summary.total_imports), 'Imports (' + days + 'd)');
-            html += buildStatCard(analyticsFormatNumber(summary.active_users), 'Active Users', { clickable: true, action: 'goto-editors' });
+            html += buildStatCard(analyticsFormatNumber(summary.total_imports), 'Total Imports');
+            html += buildStatCard(analyticsFormatNumber(summary.active_users), 'Active Editors', { clickable: true, action: 'goto-editors' });
+            html += buildStatCard(analyticsFormatNumber(summary.avg_imports_per_user), 'Avg Imports/Editor');
+            html += buildStatCard(analyticsFormatNumber(summary.total_sessions), 'Total Sessions');
+            html += buildStatCard(analyticsFormatNumber(summary.unique_templates), 'Unique Templates');
             html += buildStatCard(analyticsFormatNumber(summary.pending_submissions), 'Pending Submissions');
-            html += buildStatCard(analyticsFormatNumber(summary.total_views), 'Template Views');
-            html += buildStatCard(analyticsFormatNumber(summary.total_searches), 'Searches');
-            html += buildStatCard(avgDaily, 'Avg Daily Users');
             html += '</div>';
 
             // Daily Activity Bar Chart
@@ -3103,7 +3501,7 @@
                 html += '<div class="analytics-table-section">';
                 html += '<h3 class="analytics-table-title">Top Templates (' + days + ' days)</h3>';
                 html += '<table class="analytics-table">';
-                html += '<thead><tr><th>#</th><th>Template</th><th>Category</th><th style="text-align:right">Imports</th><th style="text-align:right">Views</th><th style="text-align:right">Users</th></tr></thead>';
+                html += '<thead><tr><th>#</th><th>Template</th><th>Category</th><th style="text-align:right">Imports</th><th style="text-align:right">Users</th></tr></thead>';
                 html += '<tbody>';
                 topTemplates.forEach(function(t, i) {
                     html += '<tr class="clickable-row" data-analytics-action="goto-template" data-template-name="' +
@@ -3112,7 +3510,6 @@
                     html += '<td class="template-name-link">' + escapeHTML(t.template_name || 'Unknown') + '</td>';
                     html += '<td>' + escapeHTML(t.template_category || '-') + '</td>';
                     html += '<td style="text-align:right">' + analyticsFormatNumber(t.import_count) + '</td>';
-                    html += '<td style="text-align:right">' + analyticsFormatNumber(t.view_count) + '</td>';
                     html += '<td style="text-align:right">' + (t.unique_users || 0) + '</td>';
                     html += '</tr>';
                 });
@@ -3165,9 +3562,9 @@
             html += '</div></div>';
             html += '<div class="editor-stats-row">';
             html += '<div class="editor-stat"><span class="editor-stat-value">' + analyticsFormatNumber(user.import_count) + '</span><span class="editor-stat-label">Imports</span></div>';
-            html += '<div class="editor-stat"><span class="editor-stat-value">' + analyticsFormatNumber(user.view_count) + '</span><span class="editor-stat-label">Views</span></div>';
-            html += '<div class="editor-stat"><span class="editor-stat-value">' + analyticsFormatNumber(user.favorite_count) + '</span><span class="editor-stat-label">Favs</span></div>';
-            html += '<div class="editor-stat"><span class="editor-stat-value">' + analyticsFormatNumber(user.search_count) + '</span><span class="editor-stat-label">Searches</span></div>';
+            html += '<div class="editor-stat"><span class="editor-stat-value">' + analyticsFormatNumber(user.active_days) + '</span><span class="editor-stat-label">Active Days</span></div>';
+            html += '<div class="editor-stat"><span class="editor-stat-value">' + analyticsFormatNumber(user.session_count) + '</span><span class="editor-stat-label">Sessions</span></div>';
+            html += '<div class="editor-stat"><span class="editor-stat-value">' + analyticsFormatNumber(user.unique_templates) + '</span><span class="editor-stat-label">Templates</span></div>';
             html += '</div>';
             html += '<div class="editor-activity-bar"><div class="editor-activity-fill" style="width:' + activityPct + '%"></div></div>';
             html += '</div>';
@@ -3209,18 +3606,60 @@
         // KPI Row
         html += '<div class="analytics-stat-cards-row">';
         html += buildStatCard(analyticsFormatNumber(editorData ? editorData.import_count : 0), 'Imports (' + days + 'd)');
-        html += buildStatCard(analyticsFormatNumber(editorData ? editorData.view_count : 0), 'Views');
-        html += buildStatCard(analyticsFormatNumber(editorData ? editorData.favorite_count : 0), 'Favorites');
-        html += buildStatCard(analyticsFormatNumber(editorData ? editorData.search_count : 0), 'Searches');
+        html += buildStatCard(analyticsFormatNumber(editorData ? editorData.active_days : 0), 'Active Days');
+        html += buildStatCard(analyticsFormatNumber(editorData ? editorData.session_count : 0), 'Sessions');
+        html += buildStatCard(analyticsFormatNumber(editorData ? editorData.unique_templates : 0), 'Unique Templates');
         html += '</div>';
 
-        // Timeline placeholder
+        // Top Imported Templates placeholder
         html += '<div class="analytics-table-section">';
-        html += '<h3 class="analytics-table-title">Activity Timeline</h3>';
+        html += '<h3 class="analytics-table-title">Top Imported Templates</h3>';
+        html += '<div id="editor-top-templates"><div style="text-align:center;padding:20px"><div class="analytics-skeleton" style="width:40px;height:40px;margin:0 auto;border-radius:50%"></div></div></div>';
+        html += '</div>';
+
+        // Timeline placeholder with filter toggle
+        html += '<div class="analytics-table-section">';
+        html += '<div style="display:flex;align-items:center;gap:8px">';
+        html += '<h3 class="analytics-table-title" style="margin:0">Activity Timeline</h3>';
+        html += '<button class="timeline-filter-toggle' + (analyticsShowAllEvents ? ' active' : '') + '" data-analytics-action="toggle-view-events">' +
+            (analyticsShowAllEvents ? '✓ ' : '') + 'Show All Events</button>';
+        html += '</div>';
         html += '<div id="editor-timeline"><div style="text-align:center;padding:20px"><div class="analytics-skeleton" style="width:40px;height:40px;margin:0 auto;border-radius:50%"></div></div></div>';
         html += '</div>';
 
         contentEl.innerHTML = html;
+
+        // Load top templates
+        sb.rpc('get_blitzkrieg_editor_top_templates', {
+            p_user_id: analyticsEditorId,
+            p_start_date: analyticsStartDate(),
+            p_limit: 10,
+        }).then(function(res) {
+            var topEl = document.getElementById('editor-top-templates');
+            if (!topEl) return;
+            var templates = res.data || [];
+            if (templates.length === 0) {
+                topEl.innerHTML = '<p class="placeholder-text">No imports for this period.</p>';
+                return;
+            }
+            var tHtml = '<table class="analytics-table">';
+            tHtml += '<thead><tr><th>Template</th><th>Category</th><th style="text-align:right">Imports</th><th style="text-align:right">Last Imported</th></tr></thead>';
+            tHtml += '<tbody>';
+            templates.forEach(function(t) {
+                tHtml += '<tr class="clickable-row" data-analytics-action="goto-template" data-template-name="' +
+                    escapeHTML(t.template_name || '') + '" data-template-category="' + escapeHTML(t.template_category || '') + '">';
+                tHtml += '<td class="template-name-link">' + escapeHTML(t.template_name || 'Unknown') + '</td>';
+                tHtml += '<td>' + escapeHTML(t.template_category || '-') + '</td>';
+                tHtml += '<td style="text-align:right">' + analyticsFormatNumber(t.import_count) + '</td>';
+                tHtml += '<td style="text-align:right;color:var(--text-muted)">' + analyticsFormatTimeAgo(t.last_imported) + '</td>';
+                tHtml += '</tr>';
+            });
+            tHtml += '</tbody></table>';
+            topEl.innerHTML = tHtml;
+        }).catch(function(err) {
+            var topEl = document.getElementById('editor-top-templates');
+            if (topEl) topEl.innerHTML = '<p class="placeholder-text">Failed to load templates: ' + escapeHTML(err.message) + '</p>';
+        });
 
         // Load timeline
         sb.rpc('get_blitzkrieg_user_activity', {
@@ -3228,9 +3667,11 @@
             p_start_date: analyticsStartDate(),
             p_limit: 200,
         }).then(function(res) {
+            // Cache events for toggle
+            analyticsCache.editorEvents = res.data || [];
             var timelineEl = document.getElementById('editor-timeline');
             if (timelineEl) {
-                timelineEl.innerHTML = buildActivityTimeline(res.data || []);
+                timelineEl.innerHTML = buildActivityTimeline(analyticsCache.editorEvents, analyticsShowAllEvents);
             }
         }).catch(function(err) {
             var timelineEl = document.getElementById('editor-timeline');
@@ -3255,12 +3696,10 @@
         html += '<div class="template-detail-meta">' + escapeHTML(analyticsTemplateCategory || 'Uncategorized') + '</div>';
         html += '</div></div>';
 
-        // KPI placeholder
-        html += '<div class="analytics-stat-cards-row" id="template-kpi-row">';
+        // KPI placeholder (2-col)
+        html += '<div class="analytics-stat-cards" id="template-kpi-row">';
         html += buildStatCard('...', 'Imports');
-        html += buildStatCard('...', 'Views');
-        html += buildStatCard('...', 'Favorites');
-        html += buildStatCard('...', 'Users');
+        html += buildStatCard('...', 'Editors');
         html += '</div>';
 
         // Per-editor table placeholder
@@ -3278,25 +3717,21 @@
         }).then(function(res) {
             var users = res.data || [];
             var days = ANALYTICS_PERIOD_DAYS[analyticsDateRange] || 30;
-            var totalImports = 0, totalViews = 0, totalFavs = 0;
+            var totalImports = 0;
             users.forEach(function(u) {
                 totalImports += Number(u.import_count) || 0;
-                totalViews += Number(u.view_count) || 0;
-                totalFavs += Number(u.favorite_count) || 0;
             });
 
-            // Update KPI
+            // Update KPI (2 cards)
             var kpiEl = document.getElementById('template-kpi-row');
             if (kpiEl) {
                 var kpiHtml = '';
                 kpiHtml += buildStatCard(analyticsFormatNumber(totalImports), 'Imports (' + days + 'd)');
-                kpiHtml += buildStatCard(analyticsFormatNumber(totalViews), 'Views');
-                kpiHtml += buildStatCard(analyticsFormatNumber(totalFavs), 'Favorites');
-                kpiHtml += buildStatCard(analyticsFormatNumber(users.length), 'Users');
+                kpiHtml += buildStatCard(analyticsFormatNumber(users.length), 'Editors');
                 kpiEl.innerHTML = kpiHtml;
             }
 
-            // Per-editor table
+            // Per-editor table (imports only)
             var tableEl = document.getElementById('template-users-table');
             if (!tableEl) return;
 
@@ -3306,7 +3741,7 @@
             }
 
             var tableHtml = '<table class="analytics-table">';
-            tableHtml += '<thead><tr><th>Editor</th><th style="text-align:right">Imports</th><th style="text-align:right">Views</th><th style="text-align:right">Favorites</th><th style="text-align:right">Last Used</th></tr></thead>';
+            tableHtml += '<thead><tr><th>Editor</th><th style="text-align:right">Imports</th><th style="text-align:right">Last Used</th></tr></thead>';
             tableHtml += '<tbody>';
             users.forEach(function(u) {
                 var bgColor = analyticsAvatarColor(u.full_name || '');
@@ -3317,8 +3752,6 @@
                     '<span class="editor-avatar" style="background:' + bgColor + ';width:24px;height:24px;font-size:10px;border-radius:6px">' + initials + '</span>' +
                     '<span class="editor-name-link">' + escapeHTML(u.full_name || 'Unknown') + '</span></span></td>';
                 tableHtml += '<td style="text-align:right">' + analyticsFormatNumber(u.import_count) + '</td>';
-                tableHtml += '<td style="text-align:right">' + analyticsFormatNumber(u.view_count) + '</td>';
-                tableHtml += '<td style="text-align:right">' + analyticsFormatNumber(u.favorite_count) + '</td>';
                 tableHtml += '<td style="text-align:right;color:var(--text-muted)">' + analyticsFormatTimeAgo(u.last_used) + '</td>';
                 tableHtml += '</tr>';
             });
@@ -3376,134 +3809,398 @@
                 analyticsCache = { summary: null, dailyStats: [], topTemplates: [], userStats: [] };
                 renderAnalyticsDashboard();
                 break;
+
+            case 'toggle-view-events':
+                analyticsShowAllEvents = !analyticsShowAllEvents;
+                // Re-render timeline in-place if we have cached events
+                var toggleBtn = actionEl;
+                if (analyticsShowAllEvents) {
+                    toggleBtn.classList.add('active');
+                    toggleBtn.innerHTML = '✓ Show All Events';
+                } else {
+                    toggleBtn.classList.remove('active');
+                    toggleBtn.innerHTML = 'Show All Events';
+                }
+                var timelineEl = document.getElementById('editor-timeline');
+                if (timelineEl && analyticsCache.editorEvents) {
+                    timelineEl.innerHTML = buildActivityTimeline(analyticsCache.editorEvents, analyticsShowAllEvents);
+                }
+                break;
         }
     }
 
-    /* --------- Cloud Thumbnail Generation --------- */
+    /* --------- Cloud Thumbnail + Preview Generation --------- */
+
+    // Disk I/O: tested at runtime — cep.fs if it works, else evalScript (guaranteed)
+    var _diskIo = null;
+    var _cachedTempDir = null;
+
+    /** Get temp dir from ExtendScript (cached). */
+    function getTempDir() {
+        return new Promise(function(resolve, reject) {
+            if (_cachedTempDir) { resolve(_cachedTempDir); return; }
+            safeEvalScript('Folder.temp.fsName', function(r) {
+                if (!r || r === 'EvalScript error.') { reject(new Error('Cannot get temp dir')); return; }
+                _cachedTempDir = r;
+                resolve(r);
+            });
+        });
+    }
+
+    /** Initialize disk I/O — ACTUALLY TESTS each method before committing. */
+    function initDiskIo() {
+        if (_diskIo) return;
+
+        // Test cep.fs with a real write + read
+        try {
+            if (typeof cep !== 'undefined' && cep.fs && cep.fs.writeFile && cep.encoding && typeof cep.encoding.Base64 !== 'undefined') {
+                var testPath = '/tmp/blitz_io_test_' + Date.now() + '.bin';
+                var testB64 = 'dGVzdA=='; // base64("test")
+                var wr = cep.fs.writeFile(testPath, testB64, cep.encoding.Base64);
+                if (wr && wr.err === 0) {
+                    var rd = cep.fs.readFile(testPath, cep.encoding.Base64);
+                    try { cep.fs.deleteFile(testPath); } catch (e2) {}
+                    if (rd && rd.err === 0 && rd.data) {
+                        _diskIo = { type: 'cep' };
+                        debugLog('Disk I/O: cep.fs VERIFIED working', 'success');
+                        return;
+                    }
+                }
+                debugLog('Disk I/O: cep.fs exists but write/read failed (wr=' + (wr && wr.err) + ')', 'warn');
+            }
+        } catch (e) {
+            debugLog('Disk I/O: cep.fs test threw: ' + e.message, 'warn');
+        }
+
+        // Skip Node.js (unreliable in CEP) — go straight to evalScript
+        _diskIo = { type: 'evalscript' };
+        debugLog('Disk I/O: using evalScript chunked fallback', 'info');
+    }
+
+    /** Write a Blob to disk. Uses tested method: cep.fs or chunked evalScript. */
+    function writeBlobToFile(blob, filePath) {
+        initDiskIo();
+        return new Promise(function(resolve, reject) {
+            var reader = new FileReader();
+            reader.onerror = function() { reject(new Error('FileReader error')); };
+            reader.onload = function() {
+                var b64 = reader.result.split(',')[1];
+                if (!b64 || b64.length === 0) { reject(new Error('Empty base64 from blob')); return; }
+
+                if (_diskIo.type === 'cep') {
+                    try {
+                        var res = cep.fs.writeFile(filePath, b64, cep.encoding.Base64);
+                        if (res && res.err === 0) { resolve(filePath); }
+                        else { reject(new Error('cep.fs write err ' + (res ? res.err : 'null result'))); }
+                    } catch (e) { reject(new Error('cep.fs throw: ' + e.message)); }
+                } else {
+                    // Chunked evalScript: write base64 in 100KB pieces, then decode to binary
+                    var CHUNK = 100000;
+                    var safeTmpB64 = escapeForExtendScript(filePath + '.b64');
+                    var safeOut = escapeForExtendScript(filePath);
+                    var idx = 0;
+                    var totalChunks = Math.ceil(b64.length / CHUNK);
+                    debugLog('writeBlobToFile: ' + b64.length + ' bytes b64, ' + totalChunks + ' chunks → ' + filePath);
+                    function writeChunk() {
+                        if (idx >= b64.length) {
+                            // All chunks written — decode to binary
+                            safeEvalScript('decodeBase64FileToBinary("' + safeTmpB64 + '", "' + safeOut + '")', function(r) {
+                                if (!r || r.indexOf('ERROR') === 0) {
+                                    debugLog('decodeBase64FileToBinary failed: ' + r, 'error');
+                                    reject(new Error(r || 'Decode failed'));
+                                } else {
+                                    debugLog('writeBlobToFile: decode OK → ' + r);
+                                    resolve(r);
+                                }
+                            });
+                            return;
+                        }
+                        var chunk = b64.substring(idx, idx + CHUNK);
+                        // Validate chunk contains only valid base64 characters
+                        if (!/^[A-Za-z0-9+/=]*$/.test(chunk)) {
+                            reject(new Error('Invalid base64 data detected'));
+                            return;
+                        }
+                        var isFirst = idx === 0 ? 'true' : 'false';
+                        safeEvalScript('appendToTextFile("' + safeTmpB64 + '", "' + chunk + '", ' + isFirst + ')', function(r) {
+                            if (r !== 'ok') {
+                                debugLog('appendToTextFile chunk failed: ' + r, 'error');
+                                reject(new Error('Chunk write failed: ' + r));
+                                return;
+                            }
+                            idx += CHUNK;
+                            writeChunk();
+                        });
+                    }
+                    writeChunk();
+                }
+            };
+            reader.readAsDataURL(blob);
+        });
+    }
+
+    /** Read a file from disk as a Blob (async, works with all I/O methods). */
+    function readFileAsBlobAsync(filePath, contentType) {
+        initDiskIo();
+        if (_diskIo.type === 'cep') {
+            try {
+                var res = cep.fs.readFile(filePath, cep.encoding.Base64);
+                if (res && res.err === 0 && res.data) {
+                    return Promise.resolve(base64ToBlob(res.data, contentType || 'application/octet-stream'));
+                }
+            } catch (e) { /* fall through to evalScript */ }
+        }
+        // evalScript path: read file as base64 in ExtendScript
+        return new Promise(function(resolve, reject) {
+            var safePath = escapeForExtendScript(filePath);
+            safeEvalScript('readFileAsBase64(new File("' + safePath + '"))', function(b64) {
+                if (!b64 || b64 === 'EvalScript error.' || b64 === 'undefined' || b64.length < 4) {
+                    reject(new Error('Failed to read: ' + filePath));
+                } else {
+                    resolve(base64ToBlob(b64, contentType || 'application/octet-stream'));
+                }
+            });
+        });
+    }
+
+    /** Check file existence via evalScript (always works). */
+    function fileExistsAsync(filePath) {
+        return new Promise(function(resolve) {
+            safeEvalScript('(new File("' + escapeForExtendScript(filePath) + '")).exists', function(r) {
+                resolve(r === 'true');
+            });
+        });
+    }
 
     /**
-     * Generate a thumbnail for a single cloud template by downloading its .aep,
-     * rendering a frame via ExtendScript, and uploading the PNG back to Supabase.
-     * @param {object} comp - The comp object from allComps (needs storagePath, name)
-     * @returns {Promise<boolean>} - true if thumbnail was generated and uploaded
+     * Generate thumbnail + preview frames for a single cloud template.
+     * Downloads .aep, writes to disk, renders via ExtendScript,
+     * reads rendered files, uploads to Supabase.
      */
     function generateCloudThumbnail(comp) {
         if (!comp || !comp.storagePath) return Promise.reject(new Error('No storage path'));
-        if (!csInterface || typeof csInterface.evalScript !== 'function') {
+        if (!_hasCepBridge) {
             return Promise.reject(new Error('Requires After Effects'));
         }
 
         var sb = window.blitzkriegSupabase;
         if (!sb) return Promise.reject(new Error('No Supabase client'));
 
-        return window.cloudLibrary.downloadTemplate(comp.storagePath).then(function(downloaded) {
+        var tempDir, outputDir;
+        debugLog('GEN START: ' + comp.name + ' (' + comp.storagePath + ')');
+
+        return getTempDir().then(function(sysTempDir) {
+            tempDir = sysTempDir + '/blitzkrieg_gen_' + Date.now();
+            outputDir = tempDir + '/output';
+
             return new Promise(function(resolve, reject) {
-                // Convert blob to base64
-                var reader = new FileReader();
-                reader.onerror = function() { reject(new Error('FileReader error')); };
-                reader.onload = function() {
-                    var base64 = reader.result.split(',')[1];
-                    var safeName = escapeForExtendScript(downloaded.fileName);
-
-                    // Write AEP to temp
-                    csInterface.evalScript('writeTempFileFromBase64("' + base64 + '", "' + safeName + '")', function(tempPath) {
-                        if (!tempPath || tempPath === 'EvalScript error.' || tempPath.indexOf('ERROR') === 0) {
-                            reject(new Error('Failed to write temp AEP'));
-                            return;
-                        }
-
-                        // Generate thumbnail from the temp AEP
-                        var safeTemp = escapeForExtendScript(tempPath);
-                        csInterface.evalScript('generateThumbnailFromAep("' + safeTemp + '")', function(thumbResult) {
-                            // Clean up temp AEP
-                            try { csInterface.evalScript('(function(){ var f = new File("' + safeTemp + '"); if(f.exists) f.remove(); return "ok"; })()'); } catch(e) {}
-
-                            try {
-                                var parsed = JSON.parse(thumbResult);
-                                if (parsed.error) {
-                                    reject(new Error(parsed.error));
-                                    return;
-                                }
-                                if (!parsed.thumbnailBase64) {
-                                    reject(new Error('No thumbnail data returned'));
-                                    return;
-                                }
-
-                                // Convert base64 to blob and upload
-                                var thumbBlob = base64ToBlob(parsed.thumbnailBase64, 'image/png');
-                                var uploadPath = comp.storagePath + '/thumbnail.png';
-
-                                sb.storage.from('blitzkrieg').upload(uploadPath, thumbBlob, {
-                                    contentType: 'image/png',
-                                    upsert: true,
-                                }).then(function(uploadRes) {
-                                    if (uploadRes.error) {
-                                        reject(new Error('Upload failed: ' + uploadRes.error.message));
-                                    } else {
-                                        resolve(true);
-                                    }
-                                }).catch(reject);
-                            } catch(e) {
-                                reject(new Error('Parse error: ' + e.message));
-                            }
-                        });
-                    });
-                };
-                reader.readAsDataURL(downloaded.blob);
+                safeEvalScript(
+                    '(function(){ var a = new Folder("' + escapeForExtendScript(tempDir) + '"); a.create(); ' +
+                    'var b = new Folder("' + escapeForExtendScript(outputDir) + '"); b.create(); ' +
+                    'return b.exists ? "ok" : "fail"; })()',
+                    function(r) {
+                        if (r === 'ok') { debugLog('GEN: temp dirs created'); resolve(); }
+                        else { reject(new Error('Failed to create temp dirs: ' + r)); }
+                    }
+                );
             });
+        }).then(function() {
+            debugLog('GEN: downloading AEP...');
+            return window.cloudLibrary.downloadTemplate(comp.storagePath);
+        }).then(function(downloaded) {
+            debugLog('GEN: AEP downloaded (' + (downloaded.blob.size / 1024).toFixed(0) + 'KB), writing to disk...');
+            var aepPath = tempDir + '/' + downloaded.fileName;
+            return writeBlobToFile(downloaded.blob, aepPath).then(function() {
+                debugLog('GEN: AEP written, calling generatePreviewsToDisk...');
+                return new Promise(function(resolve, reject) {
+                    safeEvalScript(
+                        'generatePreviewsToDisk("' + escapeForExtendScript(aepPath) + '", "' + escapeForExtendScript(outputDir) + '")',
+                        function(result) {
+                            debugLog('GEN: ExtendScript result: ' + (result || '').substring(0, 200));
+                            try {
+                                var parsed = JSON.parse(result);
+                                if (parsed.error) { reject(new Error(parsed.error)); return; }
+                                debugLog('GEN: rendered ' + parsed.frameCount + ' frames');
+                                resolve(parsed);
+                            } catch (e) {
+                                reject(new Error('ExtendScript error: ' + (result || 'empty')));
+                            }
+                        }
+                    );
+                });
+            });
+        }).then(function(renderResult) {
+            debugLog('GEN: reading rendered files and uploading...');
+            var thumbPath = outputDir + '/comp.png';
+            return readFileAsBlobAsync(thumbPath, 'image/png').then(function(thumbBlob) {
+                var uploads = [
+                    sb.storage.from('blitzkrieg').upload(
+                        comp.storagePath + '/comp.png', thumbBlob,
+                        { contentType: 'image/png', upsert: true }
+                    )
+                ];
+
+                var frameCount = renderResult.frameCount || 0;
+                var frameChain = Promise.resolve();
+                for (var i = 0; i < frameCount; i++) {
+                    (function(idx) {
+                        frameChain = frameChain.then(function() {
+                            var framePath = outputDir + '/preview/frame_' + idx + '.png';
+                            return readFileAsBlobAsync(framePath, 'image/png').then(function(frameBlob) {
+                                uploads.push(
+                                    sb.storage.from('blitzkrieg').upload(
+                                        comp.storagePath + '/preview/frame_' + idx + '.png', frameBlob,
+                                        { contentType: 'image/png', upsert: true }
+                                    )
+                                );
+                            }).catch(function() { /* skip missing frame */ });
+                        });
+                    })(i);
+                }
+
+                return frameChain.then(function() {
+                    return Promise.all(uploads);
+                }).then(function(results) {
+                    var errs = results.filter(function(r) { return r.error; });
+                    if (errs.length > 0) debugLog('Upload errors: ' + errs.map(function(r) { return r.error.message; }).join(', '), 'warn');
+                    else debugLog('GEN: uploaded thumbnail + ' + frameCount + ' frames for ' + comp.name, 'success');
+
+                    if (comp.storagePath && thumbBlacklist[comp.storagePath]) {
+                        delete thumbBlacklist[comp.storagePath];
+                        try { localStorage.setItem('blitzkrieg_thumb_blacklist', JSON.stringify(thumbBlacklist)); } catch(e) {}
+                    }
+
+                    if (frameCount > 0) {
+                        return updateMetadataFrameCount(comp.storagePath, frameCount).then(function() { return true; }).catch(function() { return true; });
+                    }
+                    return true;
+                });
+            });
+        }).catch(function(err) {
+            debugLog('GEN FAIL [' + comp.name + ']: ' + err.message, 'error');
+            throw err; // re-throw so caller can count it
+        }).finally(function() {
+            if (tempDir) {
+                try {
+                    safeEvalScript('(function(){ var f = new Folder("' + escapeForExtendScript(tempDir) + '"); if(f.exists){ var rm = function(d){ var fs=d.getFiles(); for(var i=0;i<fs.length;i++){ if(fs[i] instanceof Folder) rm(fs[i]); else fs[i].remove(); } d.remove(); }; rm(f); } return "ok"; })()');
+                } catch(e) {}
+            }
         });
     }
 
     /**
-     * Admin batch function: generate thumbnails for all cloud templates that are missing them.
-     * Processes sequentially to avoid overwhelming AE.
+     * Update a template's metadata.json with previewFrames count.
      */
-    function generateAllMissingThumbnails() {
+    function updateMetadataFrameCount(storagePath, frameCount) {
+        var sb = window.blitzkriegSupabase;
+        if (!sb) return Promise.resolve();
+
+        var metaPath = storagePath + '/metadata.json';
+        return sb.storage.from('blitzkrieg').download(metaPath).then(function(res) {
+            if (res.error) return;
+            return res.data.text().then(function(text) {
+                try {
+                    var metadata = JSON.parse(text);
+                    metadata.previewFrames = frameCount;
+                    metadata.cloudPreviewFrameCount = frameCount;
+                    var metaBlob = new Blob([JSON.stringify(metadata)], { type: 'application/json' });
+                    return sb.storage.from('blitzkrieg').upload(metaPath, metaBlob, {
+                        contentType: 'application/json',
+                        upsert: true,
+                    });
+                } catch (e) {
+                    debugLog('Failed to parse metadata for ' + storagePath + ': ' + e.message, 'warn');
+                }
+            });
+        }).catch(function(err) {
+            debugLog('Failed to update metadata frame count: ' + err.message, 'warn');
+        });
+    }
+
+    /**
+     * Admin batch: generate thumbnails + preview frames for all templates missing them.
+     * Processes sequentially to avoid overwhelming AE.
+     * @param {boolean} forceAll - If true, regenerate even for templates that have thumbnails
+     */
+    function generateAllMissingThumbnails(forceAll) {
         if (!window.blitzkriegAuth || !window.blitzkriegAuth.isAdmin()) {
             showToast('Admin access required.', true);
             return;
         }
-        if (!csInterface || typeof csInterface.evalScript !== 'function') {
+        if (!_hasCepBridge) {
             showToast('Requires After Effects.', true);
             return;
         }
 
-        // Find comps without thumbnails (those with no thumbUrl or blob URL)
-        var compsToProcess = allComps.filter(function(c) {
-            return !c.thumbUrl || c.thumbUrl === '';
-        });
+        var compsToProcess;
+        if (forceAll) {
+            // Force regenerate all cloud templates
+            compsToProcess = allComps.filter(function(c) { return !!c.storagePath; });
+        } else {
+            // Templates missing thumbnails, blacklisted, or missing preview frames
+            compsToProcess = allComps.filter(function(c) {
+                if (!c.storagePath) return false;
+                if (!c.thumbUrl || c.thumbUrl === '') return true;
+                if (thumbBlacklist[c.storagePath]) return true;
+                if (!c.previewFrameCount) return true;
+                return false;
+            });
+        }
 
         if (compsToProcess.length === 0) {
             showToast('All templates already have thumbnails!');
             return;
         }
 
-        showToast('Generating thumbnails for ' + compsToProcess.length + ' templates...');
+        // Clear blacklist for templates we're about to generate
+        compsToProcess.forEach(function(c) {
+            if (c.storagePath && thumbBlacklist[c.storagePath]) {
+                delete thumbBlacklist[c.storagePath];
+            }
+        });
+        try { localStorage.setItem('blitzkrieg_thumb_blacklist', JSON.stringify(thumbBlacklist)); } catch(e) {}
+
         showSpinner();
         stashInProgress = true;
-
         var processed = 0;
         var succeeded = 0;
         var failed = 0;
+        var total = compsToProcess.length;
+
+        // Update progress bar
+        function updateProgress() {
+            var pct = Math.round((processed / total) * 100);
+            var bar = document.getElementById('generate-progress-bar');
+            var text = document.getElementById('generate-progress-text');
+            if (bar) bar.style.width = pct + '%';
+            if (text) text.textContent = processed + '/' + total + ' — ' + succeeded + ' done, ' + failed + ' failed';
+            showToast('Generating ' + (processed + 1) + '/' + total + ': ' + (compsToProcess[processed] ? compsToProcess[processed].name : ''));
+        }
 
         function processNext() {
-            if (processed >= compsToProcess.length) {
+            if (processed >= total) {
                 stashInProgress = false;
                 hideSpinner();
-                showToast('Thumbnails done: ' + succeeded + ' generated, ' + failed + ' failed.');
-                loadLibrary(); // Reload to show new thumbnails
+                var bar = document.getElementById('generate-progress-bar');
+                var text = document.getElementById('generate-progress-text');
+                if (bar) bar.style.width = '100%';
+                if (text) text.textContent = 'Done! ' + succeeded + ' generated, ' + failed + ' failed.';
+                showToast('Generation complete: ' + succeeded + ' thumbnails, ' + failed + ' failed.');
+                // Invalidate cache and reload to show new thumbnails + previews
+                window.cloudLibrary.invalidateCache();
+                loadLibrary();
                 return;
             }
 
+            updateProgress();
             var comp = compsToProcess[processed];
-            showToast('Generating thumbnail ' + (processed + 1) + '/' + compsToProcess.length + ': ' + comp.name);
 
             generateCloudThumbnail(comp).then(function() {
                 succeeded++;
                 processed++;
                 processNext();
             }).catch(function(err) {
-                debugLog('Thumbnail generation failed for ' + comp.name + ': ' + err.message, 'error');
+                debugLog('Generation failed for ' + comp.name + ': ' + err.message, 'error');
                 failed++;
                 processed++;
                 processNext();
@@ -3513,7 +4210,7 @@
         processNext();
     }
 
-    // Expose for dropdown menu
+    // Expose for dropdown menu and admin toolbar
     window.__blitzkriegGenerateThumbnails = generateAllMissingThumbnails;
 
     /* --------- Auth-gated initialization --------- */

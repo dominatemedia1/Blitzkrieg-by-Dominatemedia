@@ -5,7 +5,11 @@
       "Bash(npx tsc:*)",
       "Bash(npx:*)",
       "Bash(curl:*)",
-      "Bash(git:*)"
+      "Bash(git:*)",
+      "Bash(supabase migration:*)",
+      "Bash(supabase projects:*)",
+      "mcp__claude_ai_Supabase__list_projects",
+      "mcp__claude_ai_Supabase__execute_sql"
     ]
   }
 }

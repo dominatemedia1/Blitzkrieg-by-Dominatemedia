@@ -1821,8 +1821,10 @@ function readStashedFilesAsBase64(compFolderPath) {
 
         var aepBase64 = readFileAsBase64(aepFiles[0]);
 
-        // Read thumbnail
-        var thumbFiles = compFolder.getFiles('thumbnail.jpg');
+        // Read thumbnail (stashSelectedComp saves as comp.png)
+        var thumbFiles = compFolder.getFiles('comp.png');
+        if (thumbFiles.length === 0) thumbFiles = compFolder.getFiles('thumbnail.jpg');
+        if (thumbFiles.length === 0) thumbFiles = compFolder.getFiles('thumbnail.png');
         var thumbnailBase64 = thumbFiles.length > 0 ? readFileAsBase64(thumbFiles[0]) : null;
 
         // Read metadata
@@ -1835,11 +1837,25 @@ function readStashedFilesAsBase64(compFolderPath) {
             metadata = JSON.parse(metaContent);
         }
 
+        // Read preview frames if they exist
+        var previewFramesBase64 = [];
+        var previewFolder = new Folder(compFolder.fsName + '/preview');
+        if (previewFolder.exists) {
+            var frameCount = metadata.previewFrames || 0;
+            for (var fi = 0; fi < frameCount; fi++) {
+                var frameFile = new File(previewFolder.fsName + '/frame_' + fi + '.png');
+                if (frameFile.exists) {
+                    previewFramesBase64.push(readFileAsBase64(frameFile));
+                }
+            }
+        }
+
         return JSON.stringify({
             folderName: folderName,
             aepBase64: aepBase64,
             thumbnailBase64: thumbnailBase64,
-            metadata: metadata
+            metadata: metadata,
+            previewFramesBase64: previewFramesBase64
         });
     } catch (e) {
         return JSON.stringify({error: e.toString()});
@@ -1871,6 +1887,70 @@ function readFileAsBase64(file) {
         result += padding >= 2 ? '=' : base64chars.charAt(b3 & 63);
     }
     return result;
+}
+
+/**
+ * Append a text chunk to a file (used for chunked base64 writing from JS).
+ * @param {string} filePath - Full path to the text file
+ * @param {string} chunk - Text chunk to write/append
+ * @param {boolean} isFirst - If true, create/overwrite; if false, append
+ * @returns {string} "ok" or "ERROR: ..."
+ */
+function appendToTextFile(filePath, chunk, isFirst) {
+    try {
+        var f = new File(filePath);
+        f.encoding = 'UTF-8';
+        f.open(isFirst ? 'w' : 'a');
+        f.write(chunk);
+        f.close();
+        return 'ok';
+    } catch (e) {
+        return 'ERROR: ' + e.toString();
+    }
+}
+
+/**
+ * Read a base64 file from disk, decode to binary, and write to outputPath.
+ * Used after chunked base64 writing to produce the final binary file.
+ * @param {string} base64FilePath - Path to the text file containing base64
+ * @param {string} outputPath - Path to write the decoded binary file
+ * @returns {string} Output file path on success, or "ERROR: ..."
+ */
+function decodeBase64FileToBinary(base64FilePath, outputPath) {
+    try {
+        var b64File = new File(base64FilePath);
+        if (!b64File.exists) return 'ERROR: Base64 file not found';
+
+        b64File.encoding = 'UTF-8';
+        b64File.open('r');
+        var base64Data = b64File.read();
+        b64File.close();
+        b64File.remove();
+
+        var base64chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+        var binary = '';
+        var cleanBase64 = base64Data.replace(/[^A-Za-z0-9+\/]/g, '');
+        var i = 0;
+        while (i < cleanBase64.length) {
+            var b1 = base64chars.indexOf(cleanBase64.charAt(i++));
+            var b2 = base64chars.indexOf(cleanBase64.charAt(i++));
+            var b3 = base64chars.indexOf(cleanBase64.charAt(i++));
+            var b4 = base64chars.indexOf(cleanBase64.charAt(i++));
+            binary += String.fromCharCode((b1 << 2) | (b2 >> 4));
+            if (b3 !== -1) binary += String.fromCharCode(((b2 & 15) << 4) | (b3 >> 2));
+            if (b4 !== -1) binary += String.fromCharCode(((b3 & 3) << 6) | b4);
+        }
+
+        var outFile = new File(outputPath);
+        outFile.encoding = 'BINARY';
+        outFile.open('w');
+        outFile.write(binary);
+        outFile.close();
+
+        return outFile.exists ? outFile.fsName : 'ERROR: Write failed';
+    } catch (e) {
+        return 'ERROR: ' + e.toString();
+    }
 }
 
 /**
@@ -1929,6 +2009,266 @@ function cleanupTempStash(tempPath) {
         return 'OK';
     } catch (e) {
         return 'ERROR: ' + e.toString();
+    }
+}
+
+/**
+ * Generate a thumbnail from a temp AEP file and return as base64 PNG.
+ * Used for generating thumbnails for cloud templates.
+ * @param {string} tempAepPath - Path to the temp AEP file on disk
+ * @returns {string} - JSON with base64 thumbnail data or error
+ */
+function generateThumbnailFromAep(tempAepPath) {
+    try {
+        var aepFile = new File(tempAepPath);
+        if (!aepFile.exists) {
+            return JSON.stringify({error: 'AEP file not found: ' + tempAepPath});
+        }
+
+        // Import the AEP
+        var importOptions = new ImportOptions(aepFile);
+        importOptions.importAs = ImportAsType.PROJECT;
+        var importedItem = app.project.importFile(importOptions);
+
+        if (!importedItem) {
+            return JSON.stringify({error: 'Could not import AEP'});
+        }
+
+        // Find the main composition
+        var mainComp = null;
+        if (importedItem instanceof FolderItem) {
+            for (var gi = 1; gi <= importedItem.numItems; gi++) {
+                if (importedItem.item(gi) instanceof CompItem) {
+                    mainComp = importedItem.item(gi);
+                    break;
+                }
+            }
+        } else if (importedItem instanceof CompItem) {
+            mainComp = importedItem;
+        }
+
+        if (!mainComp) {
+            if (importedItem) importedItem.remove();
+            return JSON.stringify({error: 'No composition found in AEP'});
+        }
+
+        // Render the middle frame as thumbnail
+        var thumbTime = mainComp.workAreaStart + (mainComp.workAreaDuration / 2);
+        var tempThumb = new File(Folder.temp.fsName + '/blitzkrieg_thumb_' + (new Date()).getTime() + '.png');
+        mainComp.saveFrameToPng(thumbTime, tempThumb);
+
+        // Read as base64
+        var thumbBase64 = '';
+        if (tempThumb.exists) {
+            thumbBase64 = readFileAsBase64(tempThumb);
+            tempThumb.remove();
+        }
+
+        // Clean up imported project item
+        if (importedItem) importedItem.remove();
+
+        if (!thumbBase64) {
+            return JSON.stringify({error: 'Failed to render thumbnail frame'});
+        }
+
+        return JSON.stringify({thumbnailBase64: thumbBase64});
+    } catch (e) {
+        return JSON.stringify({error: e.toString()});
+    }
+}
+
+/**
+ * Generate a thumbnail AND preview frames from a temp AEP file.
+ * Returns JSON: {thumbnailBase64: "...", previewFrames: ["base64_0", "base64_1", ...]}
+ * @param {string} tempAepPath - Path to the temporary AEP file
+ * @param {number} maxFrames - Maximum preview frames to generate (default 8)
+ */
+function generateThumbnailAndPreviewFromAep(tempAepPath, maxFrames) {
+    if (!maxFrames || maxFrames < 1) maxFrames = 8;
+    try {
+        var aepFile = new File(tempAepPath);
+        if (!aepFile.exists) {
+            return JSON.stringify({error: 'AEP file not found: ' + tempAepPath});
+        }
+
+        var importOptions = new ImportOptions(aepFile);
+        importOptions.importAs = ImportAsType.PROJECT;
+        var importedItem = app.project.importFile(importOptions);
+
+        if (!importedItem) {
+            return JSON.stringify({error: 'Could not import AEP'});
+        }
+
+        // Find the main composition
+        var mainComp = null;
+        if (importedItem instanceof FolderItem) {
+            for (var gi = 1; gi <= importedItem.numItems; gi++) {
+                if (importedItem.item(gi) instanceof CompItem) {
+                    mainComp = importedItem.item(gi);
+                    break;
+                }
+            }
+        } else if (importedItem instanceof CompItem) {
+            mainComp = importedItem;
+        }
+
+        if (!mainComp) {
+            if (importedItem) importedItem.remove();
+            return JSON.stringify({error: 'No composition found in AEP'});
+        }
+
+        // Render thumbnail (middle frame)
+        var thumbTime = mainComp.workAreaStart + (mainComp.workAreaDuration / 2);
+        var tempThumb = new File(Folder.temp.fsName + '/blitzkrieg_thumb_' + (new Date()).getTime() + '.png');
+        mainComp.saveFrameToPng(thumbTime, tempThumb);
+
+        var thumbBase64 = '';
+        if (tempThumb.exists) {
+            thumbBase64 = readFileAsBase64(tempThumb);
+            tempThumb.remove();
+        }
+
+        // Render preview frames evenly distributed across duration
+        var frames = [];
+        var compDuration = mainComp.workAreaDuration;
+        var frameRate = mainComp.frameRate || 30;
+        var totalFrames = Math.floor(compDuration * frameRate);
+
+        if (totalFrames > 1) {
+            var actualFrameCount = Math.min(maxFrames, totalFrames);
+            for (var pf = 0; pf < actualFrameCount; pf++) {
+                try {
+                    var progress = (actualFrameCount > 1) ? (pf / (actualFrameCount - 1)) : 0;
+                    var previewTime = mainComp.workAreaStart + (progress * compDuration);
+                    var frameFile = new File(Folder.temp.fsName + '/blitzkrieg_frame_' + pf + '_' + (new Date()).getTime() + '.png');
+                    mainComp.saveFrameToPng(previewTime, frameFile);
+                    if (frameFile.exists) {
+                        frames.push(readFileAsBase64(frameFile));
+                        frameFile.remove();
+                    }
+                } catch (frameErr) {
+                    // Skip failed frames
+                }
+            }
+        }
+
+        // Clean up imported project item
+        if (importedItem) importedItem.remove();
+
+        if (!thumbBase64) {
+            return JSON.stringify({error: 'Failed to render thumbnail frame'});
+        }
+
+        return JSON.stringify({
+            thumbnailBase64: thumbBase64,
+            previewFrames: frames
+        });
+    } catch (e) {
+        return JSON.stringify({error: e.toString()});
+    }
+}
+
+/**
+ * Generate thumbnail + preview frames from an AEP file and write them to disk.
+ * Uses same dynamic frame count logic as stashSelectedComp (~6 FPS, min 12, max 72).
+ * Returns only a small JSON string (no base64), avoiding evalScript size limits.
+ *
+ * @param {string} aepPath - Path to the .aep file on disk
+ * @param {string} outputDir - Directory to write comp.png and preview/ frames into
+ * @returns {string} JSON: {frameCount: N} or {error: "..."}
+ */
+function generatePreviewsToDisk(aepPath, outputDir) {
+    try {
+        var aepFile = new File(aepPath);
+        if (!aepFile.exists) {
+            return JSON.stringify({error: 'AEP file not found: ' + aepPath});
+        }
+
+        // Ensure output directory exists
+        var outFolder = new Folder(outputDir);
+        if (!outFolder.exists) outFolder.create();
+
+        var importOptions = new ImportOptions(aepFile);
+        importOptions.importAs = ImportAsType.PROJECT;
+        var importedItem = app.project.importFile(importOptions);
+
+        if (!importedItem) {
+            return JSON.stringify({error: 'Could not import AEP'});
+        }
+
+        // Find the main composition
+        var mainComp = null;
+        if (importedItem instanceof FolderItem) {
+            for (var gi = 1; gi <= importedItem.numItems; gi++) {
+                if (importedItem.item(gi) instanceof CompItem) {
+                    mainComp = importedItem.item(gi);
+                    break;
+                }
+            }
+        } else if (importedItem instanceof CompItem) {
+            mainComp = importedItem;
+        }
+
+        if (!mainComp) {
+            if (importedItem) importedItem.remove();
+            return JSON.stringify({error: 'No composition found in AEP'});
+        }
+
+        // Render thumbnail (middle frame) as comp.png
+        var thumbTime = mainComp.workAreaStart + (mainComp.workAreaDuration / 2);
+        var thumbFile = new File(outFolder.fsName + '/comp.png');
+        mainComp.saveFrameToPng(thumbTime, thumbFile);
+
+        if (!thumbFile.exists) {
+            if (importedItem) importedItem.remove();
+            return JSON.stringify({error: 'Failed to render thumbnail frame'});
+        }
+
+        // Render preview frames using same dynamic logic as stashSelectedComp
+        var previewFrameCount = 0;
+        var compDuration = mainComp.workAreaDuration;
+        var frameRate = mainComp.frameRate || 30;
+        var totalFrames = Math.floor(compDuration * frameRate);
+
+        if (totalFrames > 1) {
+            var previewFolder = new Folder(outFolder.fsName + '/preview');
+            if (!previewFolder.exists) previewFolder.create();
+
+            // Dynamic frame count: ~6 FPS preview, min 12, max 72 frames
+            var targetPreviewFPS = 6;
+            var minFrames = 12;
+            var maxFrames = 72;
+            var dynamicFrameCount = Math.ceil(compDuration * targetPreviewFPS);
+            var actualFrameCount = Math.max(minFrames, Math.min(maxFrames, dynamicFrameCount));
+            actualFrameCount = Math.min(actualFrameCount, totalFrames);
+
+            for (var pf = 0; pf < actualFrameCount; pf++) {
+                try {
+                    var progress = (actualFrameCount > 1) ? (pf / (actualFrameCount - 1)) : 0;
+                    var previewTime = mainComp.workAreaStart + (progress * compDuration);
+                    var frameFile = new File(previewFolder.fsName + '/frame_' + pf + '.png');
+                    mainComp.saveFrameToPng(previewTime, frameFile);
+                    if (frameFile.exists) previewFrameCount++;
+                } catch (frameErr) {
+                    // Skip failed frames
+                }
+            }
+        }
+
+        // Clean up imported project item
+        if (importedItem) importedItem.remove();
+
+        // Clean up the temp AEP file
+        if (aepFile.exists) aepFile.remove();
+
+        return JSON.stringify({
+            frameCount: previewFrameCount,
+            duration: compDuration,
+            width: mainComp.width,
+            height: mainComp.height
+        });
+    } catch (e) {
+        return JSON.stringify({error: e.toString()});
     }
 }
 
