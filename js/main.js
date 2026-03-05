@@ -3976,9 +3976,21 @@
     }
 
     /**
+     * Sequential generation queue — ExtendScript is single-threaded so concurrent
+     * generatePreviewsToDisk calls interfere with each other (one import's missing
+     * footage contaminates the next check). This serializes all generation work.
+     */
+    var _genQueue = Promise.resolve();
+    function _enqueueGeneration(fn) {
+        _genQueue = _genQueue.then(fn, fn);
+        return _genQueue;
+    }
+
+    /**
      * Generate thumbnail + preview frames for a single cloud template.
      * Downloads .aep, writes to disk, renders via ExtendScript,
      * reads rendered files, uploads to Supabase.
+     * Queued sequentially to avoid concurrent ExtendScript calls.
      */
     function generateCloudThumbnail(comp) {
         if (!comp || !comp.storagePath) return Promise.reject(new Error('No storage path'));
@@ -3989,6 +4001,8 @@
         var sb = window.blitzkriegSupabase;
         if (!sb) return Promise.reject(new Error('No Supabase client'));
 
+        // Enqueue to prevent concurrent ExtendScript calls
+        return _enqueueGeneration(function() {
         var tempDir, outputDir;
         debugLog('GEN START: ' + comp.name + ' (' + comp.storagePath + ')');
 
@@ -4089,6 +4103,7 @@
                 } catch(e) {}
             }
         });
+        }); // end _enqueueGeneration
     }
 
     /**

@@ -2072,10 +2072,19 @@ function generateThumbnailFromAep(tempAepPath) {
             return JSON.stringify({error: 'No composition found in AEP'});
         }
 
-        // Render the middle frame as thumbnail
-        var thumbTime = mainComp.workAreaStart + (mainComp.workAreaDuration / 2);
+        // Render thumbnail — try multiple timestamps as fallback
+        var thumbTimes = [
+            mainComp.workAreaStart + (mainComp.workAreaDuration / 2),
+            mainComp.workAreaStart,
+            mainComp.workAreaStart + (mainComp.workAreaDuration * 0.25)
+        ];
         var tempThumb = new File(Folder.temp.fsName + '/blitzkrieg_thumb_' + (new Date()).getTime() + '.png');
-        mainComp.saveFrameToPng(thumbTime, tempThumb);
+        for (var tti = 0; tti < thumbTimes.length; tti++) {
+            try {
+                mainComp.saveFrameToPng(thumbTimes[tti], tempThumb);
+                if (tempThumb.exists) break;
+            } catch (thumbErr) { /* try next */ }
+        }
 
         // Read as base64
         var thumbBase64 = '';
@@ -2137,10 +2146,19 @@ function generateThumbnailAndPreviewFromAep(tempAepPath, maxFrames) {
             return JSON.stringify({error: 'No composition found in AEP'});
         }
 
-        // Render thumbnail (middle frame)
-        var thumbTime = mainComp.workAreaStart + (mainComp.workAreaDuration / 2);
+        // Render thumbnail — try multiple timestamps as fallback
+        var thumbTimesTP = [
+            mainComp.workAreaStart + (mainComp.workAreaDuration / 2),
+            mainComp.workAreaStart,
+            mainComp.workAreaStart + (mainComp.workAreaDuration * 0.25)
+        ];
         var tempThumb = new File(Folder.temp.fsName + '/blitzkrieg_thumb_' + (new Date()).getTime() + '.png');
-        mainComp.saveFrameToPng(thumbTime, tempThumb);
+        for (var tpi = 0; tpi < thumbTimesTP.length; tpi++) {
+            try {
+                mainComp.saveFrameToPng(thumbTimesTP[tpi], tempThumb);
+                if (tempThumb.exists) break;
+            } catch (thumbErrTP) { /* try next */ }
+        }
 
         var thumbBase64 = '';
         if (tempThumb.exists) {
@@ -2241,16 +2259,28 @@ function generatePreviewsToDisk(aepPath, outputDir) {
             return JSON.stringify({error: 'No composition found in AEP'});
         }
 
-        // Pre-check: detect missing footage to avoid AE modal dialogs from saveFrameToPng
+        // Pre-check: detect missing footage in THIS comp's layer tree only.
+        // Previously scanned all app.project items, causing false positives from
+        // the user's own project or remnants of prior batch imports.
         var hasMissing = false;
         try {
-            for (var fi = 1; fi <= app.project.numItems; fi++) {
-                var item = app.project.item(fi);
-                if (item instanceof FootageItem && item.footageMissing) {
-                    hasMissing = true;
-                    break;
+            var _checkedComps = {};
+            var _checkCompMissing = function(comp) {
+                if (!comp || _checkedComps[comp.id]) return false;
+                _checkedComps[comp.id] = true;
+                for (var li = 1; li <= comp.numLayers; li++) {
+                    var layer = comp.layer(li);
+                    if (!layer.enabled) continue;
+                    var src = layer.source;
+                    if (!src) continue;
+                    if (src instanceof FootageItem && src.footageMissing) return true;
+                    if (src instanceof CompItem) {
+                        if (_checkCompMissing(src)) return true;
+                    }
                 }
-            }
+                return false;
+            };
+            hasMissing = _checkCompMissing(mainComp);
         } catch (fmErr) { /* ignore check failure */ }
 
         if (hasMissing) {
@@ -2258,17 +2288,24 @@ function generatePreviewsToDisk(aepPath, outputDir) {
             return JSON.stringify({error: 'Comp has missing footage — skipping render to avoid AE dialogs'});
         }
 
-        // Render thumbnail (middle frame) as comp.png — single attempt only
-        // NOTE: saveFrameToPng shows an uncatchable AE modal dialog on failure,
-        // so we only attempt ONCE to minimize user disruption
-        var thumbTime = mainComp.workAreaStart + (mainComp.workAreaDuration / 2);
+        // Render thumbnail as comp.png — try multiple timestamps as fallback.
+        // saveFrameToPng can fail silently (no file created) if a specific frame
+        // is blank/transparent. Try middle, then first frame, then 25%.
+        var thumbTimes = [
+            mainComp.workAreaStart + (mainComp.workAreaDuration / 2),
+            mainComp.workAreaStart,
+            mainComp.workAreaStart + (mainComp.workAreaDuration * 0.25)
+        ];
         var thumbFile = new File(outFolder.fsName + '/comp.png');
-        try {
-            mainComp.saveFrameToPng(thumbTime, thumbFile);
-        } catch (thumbErr) { /* saveFrameToPng threw */ }
+        for (var tt = 0; tt < thumbTimes.length; tt++) {
+            try {
+                mainComp.saveFrameToPng(thumbTimes[tt], thumbFile);
+                if (thumbFile.exists) break;
+            } catch (thumbErr) { /* try next timestamp */ }
+        }
 
         if (!thumbFile.exists) {
-            // Thumbnail failed — do NOT attempt preview frames (each would show another dialog)
+            // All attempts failed — do NOT attempt preview frames
             if (importedItem) importedItem.remove();
             return JSON.stringify({error: 'Failed to render thumbnail frame'});
         }
