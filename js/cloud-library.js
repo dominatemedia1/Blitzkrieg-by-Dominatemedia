@@ -203,7 +203,7 @@
      * Falls back to single-page if offset isn't supported (detects duplicate results).
      */
     async function listAllPaginated(folder, opts) {
-        var PAGE = 100; // Conservative page size
+        var PAGE = 1000; // Supabase supports up to 1000 — reduces API round-trips
         var allItems = [];
         var offset = 0;
         var seenNames = {};

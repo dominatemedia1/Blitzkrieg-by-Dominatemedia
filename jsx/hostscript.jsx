@@ -1927,19 +1927,39 @@ function decodeBase64FileToBinary(base64FilePath, outputPath) {
         b64File.close();
         b64File.remove();
 
+        // Build lookup table for fast decoding
         var base64chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-        var binary = '';
+        var lookup = {};
+        for (var li = 0; li < base64chars.length; li++) {
+            lookup[base64chars.charAt(li)] = li;
+        }
+
         var cleanBase64 = base64Data.replace(/[^A-Za-z0-9+\/]/g, '');
+
+        // Decode in chunks to avoid O(n²) string concatenation
+        var DECODE_CHUNK = 32768;
+        var parts = [];
         var i = 0;
         while (i < cleanBase64.length) {
-            var b1 = base64chars.indexOf(cleanBase64.charAt(i++));
-            var b2 = base64chars.indexOf(cleanBase64.charAt(i++));
-            var b3 = base64chars.indexOf(cleanBase64.charAt(i++));
-            var b4 = base64chars.indexOf(cleanBase64.charAt(i++));
-            binary += String.fromCharCode((b1 << 2) | (b2 >> 4));
-            if (b3 !== -1) binary += String.fromCharCode(((b2 & 15) << 4) | (b3 >> 2));
-            if (b4 !== -1) binary += String.fromCharCode(((b3 & 3) << 6) | b4);
+            var chunk = '';
+            var end = Math.min(i + DECODE_CHUNK, cleanBase64.length);
+            // Ensure we process complete 4-byte groups
+            end = end - (end % 4);
+            if (end <= i) end = Math.min(i + 4, cleanBase64.length);
+            while (i < end) {
+                var b1 = lookup[cleanBase64.charAt(i++)] || 0;
+                var b2 = lookup[cleanBase64.charAt(i++)] || 0;
+                var b3c = cleanBase64.charAt(i++);
+                var b4c = cleanBase64.charAt(i++);
+                var b3 = b3c ? (lookup[b3c] !== undefined ? lookup[b3c] : -1) : -1;
+                var b4 = b4c ? (lookup[b4c] !== undefined ? lookup[b4c] : -1) : -1;
+                chunk += String.fromCharCode((b1 << 2) | (b2 >> 4));
+                if (b3 !== -1) chunk += String.fromCharCode(((b2 & 15) << 4) | (b3 >> 2));
+                if (b4 !== -1) chunk += String.fromCharCode(((b3 & 3) << 6) | b4);
+            }
+            parts.push(chunk);
         }
+        var binary = parts.join('');
 
         var outFile = new File(outputPath);
         outFile.encoding = 'BINARY';
@@ -2196,17 +2216,24 @@ function generatePreviewsToDisk(aepPath, outputDir) {
             return JSON.stringify({error: 'Could not import AEP'});
         }
 
-        // Find the main composition
+        // Find the main composition — search recursively through nested folders
         var mainComp = null;
-        if (importedItem instanceof FolderItem) {
-            for (var gi = 1; gi <= importedItem.numItems; gi++) {
-                if (importedItem.item(gi) instanceof CompItem) {
-                    mainComp = importedItem.item(gi);
-                    break;
-                }
-            }
-        } else if (importedItem instanceof CompItem) {
+        if (importedItem instanceof CompItem) {
             mainComp = importedItem;
+        } else if (importedItem instanceof FolderItem) {
+            var searchFolder = function(folder) {
+                for (var gi = 1; gi <= folder.numItems; gi++) {
+                    if (folder.item(gi) instanceof CompItem) return folder.item(gi);
+                }
+                for (var gj = 1; gj <= folder.numItems; gj++) {
+                    if (folder.item(gj) instanceof FolderItem) {
+                        var found = searchFolder(folder.item(gj));
+                        if (found) return found;
+                    }
+                }
+                return null;
+            };
+            mainComp = searchFolder(importedItem);
         }
 
         if (!mainComp) {
@@ -2214,10 +2241,19 @@ function generatePreviewsToDisk(aepPath, outputDir) {
             return JSON.stringify({error: 'No composition found in AEP'});
         }
 
-        // Render thumbnail (middle frame) as comp.png
-        var thumbTime = mainComp.workAreaStart + (mainComp.workAreaDuration / 2);
+        // Render thumbnail — try middle, start+1s, then start frame
         var thumbFile = new File(outFolder.fsName + '/comp.png');
-        mainComp.saveFrameToPng(thumbTime, thumbFile);
+        var thumbTimes = [
+            mainComp.workAreaStart + (mainComp.workAreaDuration / 2),
+            mainComp.workAreaStart + Math.min(1, mainComp.workAreaDuration),
+            mainComp.workAreaStart
+        ];
+        for (var ti = 0; ti < thumbTimes.length; ti++) {
+            try {
+                mainComp.saveFrameToPng(thumbTimes[ti], thumbFile);
+                if (thumbFile.exists) break;
+            } catch (thumbErr) { /* try next time */ }
+        }
 
         if (!thumbFile.exists) {
             if (importedItem) importedItem.remove();

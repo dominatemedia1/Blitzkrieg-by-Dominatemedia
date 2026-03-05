@@ -3854,7 +3854,9 @@
         // Test cep.fs with a real write + read
         try {
             if (typeof cep !== 'undefined' && cep.fs && cep.fs.writeFile && cep.encoding && typeof cep.encoding.Base64 !== 'undefined') {
-                var testPath = '/tmp/blitz_io_test_' + Date.now() + '.bin';
+                // Use platform-aware temp path — '/tmp/' doesn't exist on Windows
+                var sysTempDir = csInterface.getSystemPath(SystemPath.USER_DATA) || '/tmp';
+                var testPath = sysTempDir + '/blitz_io_test_' + Date.now() + '.bin';
                 var testB64 = 'dGVzdA=='; // base64("test")
                 var wr = cep.fs.writeFile(testPath, testB64, cep.encoding.Base64);
                 if (wr && wr.err === 0) {
@@ -3894,8 +3896,8 @@
                         else { reject(new Error('cep.fs write err ' + (res ? res.err : 'null result'))); }
                     } catch (e) { reject(new Error('cep.fs throw: ' + e.message)); }
                 } else {
-                    // Chunked evalScript: write base64 in 100KB pieces, then decode to binary
-                    var CHUNK = 100000;
+                    // Chunked evalScript: write base64 in 500KB pieces, then decode to binary
+                    var CHUNK = 500000;
                     var safeTmpB64 = escapeForExtendScript(filePath + '.b64');
                     var safeOut = escapeForExtendScript(filePath);
                     var idx = 0;
