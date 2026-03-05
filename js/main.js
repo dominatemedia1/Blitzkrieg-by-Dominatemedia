@@ -1668,6 +1668,7 @@
                     debugLog('Auto-generated preview for ' + compName, 'success');
                 }).catch(function(err) {
                     generating = false;
+                    generated = true; // Mark as "done" so hover doesn't retry failed comps
                     var gi = item.querySelector('.generating-indicator');
                     if (gi) gi.remove();
                     debugLog('Auto-generate failed for ' + compName + ': ' + err.message, 'warn');

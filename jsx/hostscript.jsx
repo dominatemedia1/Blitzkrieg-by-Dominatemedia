@@ -2241,21 +2241,34 @@ function generatePreviewsToDisk(aepPath, outputDir) {
             return JSON.stringify({error: 'No composition found in AEP'});
         }
 
-        // Render thumbnail — try middle, start+1s, then start frame
-        var thumbFile = new File(outFolder.fsName + '/comp.png');
-        var thumbTimes = [
-            mainComp.workAreaStart + (mainComp.workAreaDuration / 2),
-            mainComp.workAreaStart + Math.min(1, mainComp.workAreaDuration),
-            mainComp.workAreaStart
-        ];
-        for (var ti = 0; ti < thumbTimes.length; ti++) {
-            try {
-                mainComp.saveFrameToPng(thumbTimes[ti], thumbFile);
-                if (thumbFile.exists) break;
-            } catch (thumbErr) { /* try next time */ }
+        // Pre-check: detect missing footage to avoid AE modal dialogs from saveFrameToPng
+        var hasMissing = false;
+        try {
+            for (var fi = 1; fi <= app.project.numItems; fi++) {
+                var item = app.project.item(fi);
+                if (item instanceof FootageItem && item.footageMissing) {
+                    hasMissing = true;
+                    break;
+                }
+            }
+        } catch (fmErr) { /* ignore check failure */ }
+
+        if (hasMissing) {
+            if (importedItem) importedItem.remove();
+            return JSON.stringify({error: 'Comp has missing footage — skipping render to avoid AE dialogs'});
         }
 
+        // Render thumbnail (middle frame) as comp.png — single attempt only
+        // NOTE: saveFrameToPng shows an uncatchable AE modal dialog on failure,
+        // so we only attempt ONCE to minimize user disruption
+        var thumbTime = mainComp.workAreaStart + (mainComp.workAreaDuration / 2);
+        var thumbFile = new File(outFolder.fsName + '/comp.png');
+        try {
+            mainComp.saveFrameToPng(thumbTime, thumbFile);
+        } catch (thumbErr) { /* saveFrameToPng threw */ }
+
         if (!thumbFile.exists) {
+            // Thumbnail failed — do NOT attempt preview frames (each would show another dialog)
             if (importedItem) importedItem.remove();
             return JSON.stringify({error: 'Failed to render thumbnail frame'});
         }
@@ -2265,6 +2278,7 @@ function generatePreviewsToDisk(aepPath, outputDir) {
         var compDuration = mainComp.workAreaDuration;
         var frameRate = mainComp.frameRate || 30;
         var totalFrames = Math.floor(compDuration * frameRate);
+        var consecutiveFailures = 0;
 
         if (totalFrames > 1) {
             var previewFolder = new Folder(outFolder.fsName + '/preview');
@@ -2284,9 +2298,17 @@ function generatePreviewsToDisk(aepPath, outputDir) {
                     var previewTime = mainComp.workAreaStart + (progress * compDuration);
                     var frameFile = new File(previewFolder.fsName + '/frame_' + pf + '.png');
                     mainComp.saveFrameToPng(previewTime, frameFile);
-                    if (frameFile.exists) previewFrameCount++;
+                    if (frameFile.exists) {
+                        previewFrameCount++;
+                        consecutiveFailures = 0;
+                    } else {
+                        consecutiveFailures++;
+                        // Abort after 2 consecutive failures to prevent dialog spam
+                        if (consecutiveFailures >= 2) break;
+                    }
                 } catch (frameErr) {
-                    // Skip failed frames
+                    consecutiveFailures++;
+                    if (consecutiveFailures >= 2) break;
                 }
             }
         }
