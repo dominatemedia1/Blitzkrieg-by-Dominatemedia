@@ -1181,21 +1181,26 @@ function importComp(aepPath) {
             return "Error: Import returned no items.";
         }
 
-        // Fast comp discovery
+        // Recursive comp discovery — imported AEPs can have nested folders
         var mainComp = null;
-        if (importedItem instanceof FolderItem) {
-            importedItem.name = compName + " [Blitzkrieg]";
-            var numItems = importedItem.numItems;
-            for (var i = 1; i <= numItems; i++) {
-                var item = importedItem.item(i);
-                if (item instanceof CompItem) {
-                    if (!mainComp) mainComp = item;
-                    if (item.name === compName || item.name.indexOf(compName) !== -1) {
-                        mainComp = item;
-                        break;
+        function findCompInFolder(folder) {
+            for (var j = 1; j <= folder.numItems; j++) {
+                var child = folder.item(j);
+                if (child instanceof CompItem) {
+                    if (!mainComp) mainComp = child;
+                    if (child.name === compName || child.name.indexOf(compName) !== -1) {
+                        mainComp = child;
+                        return true; // exact match found
                     }
+                } else if (child instanceof FolderItem) {
+                    if (findCompInFolder(child)) return true;
                 }
             }
+            return false;
+        }
+        if (importedItem instanceof FolderItem) {
+            importedItem.name = compName + " [Blitzkrieg]";
+            findCompInFolder(importedItem);
         } else if (importedItem instanceof CompItem) {
             mainComp = importedItem;
         }
@@ -1216,21 +1221,27 @@ function importComp(aepPath) {
 
             // Schedule a delayed re-open to guarantee the comp appears in the Timeline.
             // scheduleTask runs after the CEP callback completes, when AE has focus again.
+            // Must search recursively because imported comps live inside FolderItems.
             try {
                 var _compId = mainComp.id;
                 app.scheduleTask(
                     '(function(){' +
-                    '  for(var i=1;i<=app.project.numItems;i++){' +
-                    '    try{' +
-                    '      var it=app.project.item(i);' +
-                    '      if(it instanceof CompItem && it.id==' + _compId + '){' +
-                    '        it.openInViewer();' +
-                    '        break;' +
-                    '      }' +
-                    '    }catch(e){}' +
+                    '  function find(parent){' +
+                    '    for(var i=1;i<=parent.numItems;i++){' +
+                    '      try{' +
+                    '        var it=parent.item(i);' +
+                    '        if(it instanceof CompItem && it.id==' + _compId + '){' +
+                    '          it.openInViewer();' +
+                    '          return true;' +
+                    '        }' +
+                    '        if(it instanceof FolderItem && find(it)) return true;' +
+                    '      }catch(e){}' +
+                    '    }' +
+                    '    return false;' +
                     '  }' +
+                    '  find(app.project.rootFolder);' +
                     '})()',
-                    200, false
+                    500, false
                 );
             } catch (schedErr) {
                 $.writeln("Blitzkrieg: scheduleTask failed: " + schedErr.toString());

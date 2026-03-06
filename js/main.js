@@ -1968,7 +1968,6 @@
     }
 
     function executeAddComp() {
-        var isAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
         var newCatName = newCategoryInput.value.trim();
         var existingCatName = existingCategorySelect.value;
         var categoryName = newCatName || existingCatName;
@@ -1986,7 +1985,7 @@
         addCompModal.style.display = 'none';
         stashInProgress = true;
         showSpinner();
-        showToast(isAdmin ? 'Saving composition...' : 'Submitting composition for review...');
+        showToast('Submitting composition for review...');
 
         var safeCategory = escapeForExtendScript(categoryName);
 
@@ -2004,28 +2003,8 @@
                     var tempPath = parsed.tempPath;
                     var files = await readTempFiles(tempPath, categoryName);
 
-                    if (isAdmin) {
-                        // Admin: upload directly to production path with preview frames
-                        debugLog('UPLOAD: admin uploading to ' + categoryName + '/' + files.folderName);
-                        await window.cloudLibrary.uploadTemplate(categoryName, files.folderName, {
-                            aep: files.aepBlob,
-                            thumbnail: files.thumbnailBlob,
-                            metadata: files.metadata,
-                            previewFrames: files.previewFrameBlobs,
-                        });
-                        debugLog('UPLOAD: upload complete, refreshing library...');
-
-                        safeEvalScript('cleanupTempStash("' + escapeForExtendScript(tempPath) + '")');
-                        showToast('Template added to cloud library!');
-                        stashInProgress = false;
-                        hideSpinner();
-                        activeCategory = categoryName;
-                        // Force full reload: invalidateCache clears localStorage meta cache
-                        // and signed URL cache, so loadLibrary takes the SLOW PATH (full fetch)
-                        window.cloudLibrary.invalidateCache();
-                        loadLibrary();
-                    } else {
-                        // Non-admin: upload to pending path and create submission record
+                    {
+                        // All uploads go through pending/approval flow
                         var userId = window.blitzkriegAuth.getUser().id;
                         var teamMember = window.blitzkriegAuth.getTeamMember();
                         var pendingBasePath = 'pending/' + userId + '/' + files.folderName;
@@ -2095,7 +2074,7 @@
                     }
                 } catch (err) {
                     debugLog('Upload error: ' + err.message, 'error');
-                    showToast('Failed to ' + (isAdmin ? 'upload' : 'submit') + ' template: ' + err.message, true);
+                    showToast('Failed to submit template: ' + err.message, true);
                     stashInProgress = false;
                     hideSpinner();
                 }
