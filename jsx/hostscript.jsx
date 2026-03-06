@@ -1204,21 +1204,36 @@ function importComp(aepPath) {
             mainComp.name = compName;
         }
 
-        // AUTO-OPEN: Open the imported comp in the viewer/timeline
+        // AUTO-OPEN: Open the imported comp in the viewer/timeline.
+        // openInViewer() during ExtendScript eval often fails to visually switch panels
+        // because the CEP panel still holds focus. We use scheduleTask to re-open
+        // after a short delay, by which time AE regains focus from the CEP callback.
         if (mainComp) {
             try {
-                // Method 1: Select the comp in the project panel first
                 mainComp.selected = true;
+                mainComp.openInViewer();
+            } catch (viewerErr) {}
 
-                // Method 2: Open the comp in the Composition panel (timeline/viewer)
-                var viewer = mainComp.openInViewer();
-
-                // Method 3: If viewer was opened, make sure it's active and maximized for visibility
-                if (viewer) {
-                    viewer.setActive();
-                }
-            } catch (viewerErr) {
-                $.writeln("Blitzkrieg: Warning - Could not open comp in viewer: " + viewerErr.toString());
+            // Schedule a delayed re-open to guarantee the comp appears in the Timeline.
+            // scheduleTask runs after the CEP callback completes, when AE has focus again.
+            try {
+                var _compId = mainComp.id;
+                app.scheduleTask(
+                    '(function(){' +
+                    '  for(var i=1;i<=app.project.numItems;i++){' +
+                    '    try{' +
+                    '      var it=app.project.item(i);' +
+                    '      if(it instanceof CompItem && it.id==' + _compId + '){' +
+                    '        it.openInViewer();' +
+                    '        break;' +
+                    '      }' +
+                    '    }catch(e){}' +
+                    '  }' +
+                    '})()',
+                    200, false
+                );
+            } catch (schedErr) {
+                $.writeln("Blitzkrieg: scheduleTask failed: " + schedErr.toString());
             }
         }
 

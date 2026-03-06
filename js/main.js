@@ -2006,18 +2006,23 @@
 
                     if (isAdmin) {
                         // Admin: upload directly to production path with preview frames
+                        debugLog('UPLOAD: admin uploading to ' + categoryName + '/' + files.folderName);
                         await window.cloudLibrary.uploadTemplate(categoryName, files.folderName, {
                             aep: files.aepBlob,
                             thumbnail: files.thumbnailBlob,
                             metadata: files.metadata,
                             previewFrames: files.previewFrameBlobs,
                         });
+                        debugLog('UPLOAD: upload complete, refreshing library...');
 
                         safeEvalScript('cleanupTempStash("' + escapeForExtendScript(tempPath) + '")');
                         showToast('Template added to cloud library!');
                         stashInProgress = false;
                         hideSpinner();
                         activeCategory = categoryName;
+                        // Force full reload: invalidateCache clears localStorage meta cache
+                        // and signed URL cache, so loadLibrary takes the SLOW PATH (full fetch)
+                        window.cloudLibrary.invalidateCache();
                         loadLibrary();
                     } else {
                         // Non-admin: upload to pending path and create submission record
@@ -2069,7 +2074,7 @@
                         }
 
                         // Create submission record
-                        var submissionName = files.metadata && files.metadata.name ? files.metadata.name : files.folderName;
+                        var submissionName = (files.metadata && (files.metadata.displayName || files.metadata.name)) || files.folderName;
                         if (submissionName && submissionName.length > 255) submissionName = submissionName.substring(0, 255);
                         var insertResult = await sb.from('blitzkrieg_template_submissions').insert({
                             user_id: userId,
