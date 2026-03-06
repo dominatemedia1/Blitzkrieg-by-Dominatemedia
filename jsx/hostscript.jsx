@@ -2259,10 +2259,10 @@ function generatePreviewsToDisk(aepPath, outputDir) {
             return JSON.stringify({error: 'No composition found in AEP'});
         }
 
-        // Pre-check: detect missing footage in THIS comp's layer tree only.
-        // Previously scanned all app.project items, causing false positives from
-        // the user's own project or remnants of prior batch imports.
-        var hasMissing = false;
+        // Detect missing footage in this comp's layer tree (for logging only).
+        // We NO LONGER bail — instead we try to render anyway because many comps
+        // render fine with missing footage (shape/text/solid layers still work).
+        var hasMissingFootage = false;
         try {
             var _checkedComps = {};
             var _checkCompMissing = function(comp) {
@@ -2280,17 +2280,10 @@ function generatePreviewsToDisk(aepPath, outputDir) {
                 }
                 return false;
             };
-            hasMissing = _checkCompMissing(mainComp);
-        } catch (fmErr) { /* ignore check failure */ }
-
-        if (hasMissing) {
-            if (importedItem) importedItem.remove();
-            return JSON.stringify({error: 'Comp has missing footage — skipping render to avoid AE dialogs'});
-        }
+            hasMissingFootage = _checkCompMissing(mainComp);
+        } catch (fmErr) { /* ignore */ }
 
         // Render thumbnail as comp.png — try multiple timestamps as fallback.
-        // saveFrameToPng can fail silently (no file created) if a specific frame
-        // is blank/transparent. Try middle, then first frame, then 25%.
         var thumbTimes = [
             mainComp.workAreaStart + (mainComp.workAreaDuration / 2),
             mainComp.workAreaStart,
@@ -2305,14 +2298,31 @@ function generatePreviewsToDisk(aepPath, outputDir) {
         }
 
         if (!thumbFile.exists) {
-            // All attempts failed — do NOT attempt preview frames
             if (importedItem) importedItem.remove();
-            return JSON.stringify({error: 'Failed to render thumbnail frame'});
+            try { app.purge(PurgeTarget.ALL_CACHES); } catch (purgeErr) {}
+            return JSON.stringify({error: hasMissingFootage ?
+                'Comp has missing footage and failed to render' :
+                'Failed to render thumbnail frame'});
         }
 
-        // Render preview frames using same dynamic logic as stashSelectedComp
-        var previewFrameCount = 0;
+        // If comp has missing footage, return thumbnail-only (skip preview frames
+        // to avoid potential dialog spam from 12-72 saveFrameToPng calls)
         var compDuration = mainComp.workAreaDuration;
+        if (hasMissingFootage) {
+            if (importedItem) importedItem.remove();
+            if (aepFile.exists) aepFile.remove();
+            try { app.purge(PurgeTarget.ALL_CACHES); } catch (purgeErr) {}
+            return JSON.stringify({
+                frameCount: 0,
+                duration: compDuration,
+                width: mainComp.width,
+                height: mainComp.height,
+                thumbnailOnly: true
+            });
+        }
+
+        // Render preview frames
+        var previewFrameCount = 0;
         var frameRate = mainComp.frameRate || 30;
         var totalFrames = Math.floor(compDuration * frameRate);
         var consecutiveFailures = 0;
@@ -2340,7 +2350,6 @@ function generatePreviewsToDisk(aepPath, outputDir) {
                         consecutiveFailures = 0;
                     } else {
                         consecutiveFailures++;
-                        // Abort after 2 consecutive failures to prevent dialog spam
                         if (consecutiveFailures >= 2) break;
                     }
                 } catch (frameErr) {
@@ -2356,6 +2365,9 @@ function generatePreviewsToDisk(aepPath, outputDir) {
         // Clean up the temp AEP file
         if (aepFile.exists) aepFile.remove();
 
+        // Free AE caches to prevent RAM buildup during batch generation
+        try { app.purge(PurgeTarget.ALL_CACHES); } catch (purgeErr) {}
+
         return JSON.stringify({
             frameCount: previewFrameCount,
             duration: compDuration,
@@ -2363,6 +2375,8 @@ function generatePreviewsToDisk(aepPath, outputDir) {
             height: mainComp.height
         });
     } catch (e) {
+        // Ensure cleanup even on unexpected errors
+        try { app.purge(PurgeTarget.ALL_CACHES); } catch (purgeErr) {}
         return JSON.stringify({error: e.toString()});
     }
 }

@@ -3977,12 +3977,25 @@
 
     /**
      * Sequential generation queue — ExtendScript is single-threaded so concurrent
-     * generatePreviewsToDisk calls interfere with each other (one import's missing
-     * footage contaminates the next check). This serializes all generation work.
+     * generatePreviewsToDisk calls interfere with each other. This serializes all
+     * generation work with a delay between items to let AE recover RAM.
      */
     var _genQueue = Promise.resolve();
+    var GEN_DELAY_MS = 500; // breathing room between generations to prevent AE crashes
     function _enqueueGeneration(fn) {
-        _genQueue = _genQueue.then(fn, fn);
+        _genQueue = _genQueue.then(function() {
+            return fn();
+        }).then(function(result) {
+            // Delay after success to let AE free memory
+            return new Promise(function(resolve) {
+                setTimeout(function() { resolve(result); }, GEN_DELAY_MS);
+            });
+        }, function(err) {
+            // Delay after failure too
+            return new Promise(function(_, reject) {
+                setTimeout(function() { reject(err); }, GEN_DELAY_MS);
+            });
+        });
         return _genQueue;
     }
 
@@ -4037,7 +4050,11 @@
                             try {
                                 var parsed = JSON.parse(result);
                                 if (parsed.error) { reject(new Error(parsed.error)); return; }
-                                debugLog('GEN: rendered ' + parsed.frameCount + ' frames');
+                                if (parsed.thumbnailOnly) {
+                                    debugLog('GEN: thumbnail only (missing footage, skipped preview frames)');
+                                } else {
+                                    debugLog('GEN: rendered ' + parsed.frameCount + ' frames');
+                                }
                                 resolve(parsed);
                             } catch (e) {
                                 reject(new Error('ExtendScript error: ' + (result || 'empty')));
@@ -4097,9 +4114,17 @@
             debugLog('GEN FAIL [' + comp.name + ']: ' + err.message, 'error');
             throw err; // re-throw so caller can count it
         }).finally(function() {
+            // Clean up temp dir and purge AE caches to prevent RAM buildup / crashes
             if (tempDir) {
                 try {
-                    safeEvalScript('(function(){ var f = new Folder("' + escapeForExtendScript(tempDir) + '"); if(f.exists){ var rm = function(d){ var fs=d.getFiles(); for(var i=0;i<fs.length;i++){ if(fs[i] instanceof Folder) rm(fs[i]); else fs[i].remove(); } d.remove(); }; rm(f); } return "ok"; })()');
+                    safeEvalScript(
+                        '(function(){' +
+                        ' var f = new Folder("' + escapeForExtendScript(tempDir) + '");' +
+                        ' if(f.exists){ var rm = function(d){ var fs=d.getFiles(); for(var i=0;i<fs.length;i++){ if(fs[i] instanceof Folder) rm(fs[i]); else fs[i].remove(); } d.remove(); }; rm(f); }' +
+                        ' try { app.purge(PurgeTarget.ALL_CACHES); } catch(e) {}' +
+                        ' return "ok";' +
+                        '})()'
+                    );
                 } catch(e) {}
             }
         });
