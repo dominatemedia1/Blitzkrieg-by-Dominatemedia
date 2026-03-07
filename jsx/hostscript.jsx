@@ -1141,7 +1141,7 @@ function stashSelectedComp(libraryPath, categoryName) {
  * - Streamlined import process
  * - Faster comp discovery
  */
-function importComp(aepPath) {
+function importComp(aepPath, displayName) {
     if (!isValidPath(aepPath)) {
         return "Error: Invalid file path.";
     }
@@ -1152,22 +1152,25 @@ function importComp(aepPath) {
         var fileToImport = fileFromPath(aepPath);
         if (!fileToImport.exists) return "Error: Source AEP file not found.";
 
-        // Quick metadata read for comp name - use parent Folder object for macOS compatibility
-        var parentFolder = fileToImport.parent;
-        var metadataFile = new File(buildPath(parentFolder, "metadata.json"));
-        var compName = "Imported Comp";
+        // Use provided displayName (from JS side) or fall back to metadata.json
+        var compName = displayName || "";
 
-        if (metadataFile.exists) {
-            try {
-                metadataFile.open('r');
-                var metaContent = metadataFile.read();
-                metadataFile.close();
-                if (metaContent) {
-                    var metadata = JSON.parse(metaContent);
-                    compName = metadata.displayName || compName;
-                }
-            } catch(e) {}
+        if (!compName) {
+            var parentFolder = fileToImport.parent;
+            var metadataFile = new File(buildPath(parentFolder, "metadata.json"));
+            if (metadataFile.exists) {
+                try {
+                    metadataFile.open('r');
+                    var metaContent = metadataFile.read();
+                    metadataFile.close();
+                    if (metaContent) {
+                        var metadata = JSON.parse(metaContent);
+                        compName = metadata.displayName || "";
+                    }
+                } catch(e) {}
+            }
         }
+        if (!compName) compName = "Imported Comp";
 
         app.beginUndoGroup("Blitzkrieg Import");
 
@@ -1210,42 +1213,41 @@ function importComp(aepPath) {
         }
 
         // AUTO-OPEN: Open the imported comp in the viewer/timeline.
-        // openInViewer() during ExtendScript eval often fails to visually switch panels
-        // because the CEP panel still holds focus. We use scheduleTask to re-open
-        // after a short delay, by which time AE regains focus from the CEP callback.
+        // openInViewer() during ExtendScript eval often fails because the CEP panel
+        // holds focus. We schedule multiple delayed attempts that also call
+        // viewer.setActive() to force the Timeline panel to the front.
         if (mainComp) {
             try {
                 mainComp.selected = true;
-                mainComp.openInViewer();
+                var v = mainComp.openInViewer();
+                if (v) try { v.setActive(); } catch(e) {}
             } catch (viewerErr) {}
 
-            // Schedule a delayed re-open to guarantee the comp appears in the Timeline.
-            // scheduleTask runs after the CEP callback completes, when AE has focus again.
-            // Must search recursively because imported comps live inside FolderItems.
-            try {
-                var _compId = mainComp.id;
-                app.scheduleTask(
-                    '(function(){' +
-                    '  function find(parent){' +
-                    '    for(var i=1;i<=parent.numItems;i++){' +
-                    '      try{' +
-                    '        var it=parent.item(i);' +
-                    '        if(it instanceof CompItem && it.id==' + _compId + '){' +
-                    '          it.openInViewer();' +
-                    '          return true;' +
-                    '        }' +
-                    '        if(it instanceof FolderItem && find(it)) return true;' +
-                    '      }catch(e){}' +
-                    '    }' +
-                    '    return false;' +
-                    '  }' +
-                    '  find(app.project.rootFolder);' +
-                    '})()',
-                    500, false
-                );
-            } catch (schedErr) {
-                $.writeln("Blitzkrieg: scheduleTask failed: " + schedErr.toString());
-            }
+            // Build a reusable script that recursively finds the comp and opens it.
+            // Scheduled tasks run after CEP releases focus, so openInViewer works.
+            var _openScript =
+                '(function(){' +
+                '  function find(p){' +
+                '    for(var i=1;i<=p.numItems;i++){' +
+                '      try{' +
+                '        var it=p.item(i);' +
+                '        if(it instanceof CompItem && it.id==' + mainComp.id + '){' +
+                '          it.selected=true;' +
+                '          var v=it.openInViewer();' +
+                '          if(v)try{v.setActive();}catch(e){}' +
+                '          return true;' +
+                '        }' +
+                '        if(it instanceof FolderItem && find(it))return true;' +
+                '      }catch(e){}' +
+                '    }' +
+                '    return false;' +
+                '  }' +
+                '  find(app.project.rootFolder);' +
+                '})()';
+
+            // Schedule two attempts at staggered delays for reliability
+            try { app.scheduleTask(_openScript, 300, false); } catch(e) {}
+            try { app.scheduleTask(_openScript, 800, false); } catch(e) {}
         }
 
         app.endUndoGroup();

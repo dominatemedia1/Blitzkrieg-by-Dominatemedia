@@ -2454,9 +2454,12 @@
                     var aepDiskPath = writtenPath || tempAepPath;
                     return new Promise(function(resolve, reject) {
                         var safePath = escapeForExtendScript(aepDiskPath);
-                        safeEvalScript('importComp("' + safePath + '")', function(result) {
-                            // Clean up temp file
-                            try { safeEvalScript('(function(){ var f = new File("' + safePath + '"); if(f.exists) f.remove(); return "ok"; })()'); } catch(e) {}
+                        var safeDisplayName = _trackComp ? escapeForExtendScript(_trackComp.name) : '';
+                        safeEvalScript('importComp("' + safePath + '","' + safeDisplayName + '")', function(result) {
+                            // Delay cleanup so AE's scheduleTask can finish opening the comp
+                            setTimeout(function() {
+                                try { safeEvalScript('(function(){ var f = new File("' + safePath + '"); if(f.exists) f.remove(); return "ok"; })()'); } catch(e) {}
+                            }, 2000);
 
                             hideSpinner();
                             if (result && result.indexOf('Success') === 0) {
@@ -2489,8 +2492,9 @@
 
         showSpinner();
         var safePath = escapeForExtendScript(aepPath);
+        var safeDisplayName = _trackComp ? escapeForExtendScript(_trackComp.name) : '';
 
-        safeEvalScript('importComp("' + safePath + '")', function (result) {
+        safeEvalScript('importComp("' + safePath + '","' + safeDisplayName + '")', function (result) {
             hideSpinner();
             if (!result) {
                 showToast('Unexpected error importing.', true);
