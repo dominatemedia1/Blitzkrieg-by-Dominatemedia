@@ -3969,22 +3969,27 @@
      * generation work with a delay between items to let AE recover RAM.
      */
     var _genQueue = Promise.resolve();
-    var GEN_DELAY_MS = 500; // breathing room between generations to prevent AE crashes
+    var GEN_DELAY_MS = 800; // breathing room between generations to prevent AE crashes
     function _enqueueGeneration(fn) {
+        // Wrap fn result so the queue always resolves (never stays rejected).
+        // This prevents one failure from killing all subsequent generations.
         _genQueue = _genQueue.then(function() {
-            return fn();
-        }).then(function(result) {
-            // Delay after success to let AE free memory
-            return new Promise(function(resolve) {
-                setTimeout(function() { resolve(result); }, GEN_DELAY_MS);
+            return fn().then(function(result) {
+                return { ok: true, value: result };
+            }, function(err) {
+                return { ok: false, error: err };
             });
-        }, function(err) {
-            // Delay after failure too
-            return new Promise(function(_, reject) {
-                setTimeout(function() { reject(err); }, GEN_DELAY_MS);
+        }).then(function(wrapped) {
+            return new Promise(function(resolve) {
+                setTimeout(function() { resolve(wrapped); }, GEN_DELAY_MS);
             });
         });
-        return _genQueue;
+        // Return a promise that rejects if this specific generation failed,
+        // so the caller can distinguish success from failure.
+        return _genQueue.then(function(wrapped) {
+            if (wrapped.ok) return wrapped.value;
+            throw wrapped.error;
+        });
     }
 
     /**
