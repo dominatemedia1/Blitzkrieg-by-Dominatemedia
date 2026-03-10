@@ -1449,7 +1449,7 @@
         if (!label) return;
         var cloudComps = allComps.filter(function(c) { return !!c.storagePath; });
         var missing = cloudComps.filter(function(c) {
-            if (!c.thumbUrl || c.thumbUrl === '') return true;
+            if (!c.thumbnailVerified) return true;
             if (thumbBlacklist[c.storagePath]) return true;
             return false;
         }).length;
@@ -1495,10 +1495,10 @@
         var isAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
         var isBlacklisted = comp.storagePath && thumbBlacklist[comp.storagePath];
         var generatePreviewBtn = '';
-        if (comp.storagePath && isAdmin && (!thumbSrc || isBlacklisted)) {
-            // Cloud template: admin can generate thumbnail (show when missing or blacklisted)
+        if (comp.storagePath && isAdmin && (!comp.thumbnailVerified || isBlacklisted)) {
+            // Cloud template: admin can generate thumbnail (show when not verified or blacklisted)
             generatePreviewBtn = '<button class="generate-preview-btn" title="Generate Thumbnail + Preview"><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg> Generate</button>';
-        } else if (!hasPreview && !thumbSrc && comp.storagePath) {
+        } else if (!hasPreview && !comp.thumbnailVerified && comp.storagePath) {
             generatePreviewBtn = '<button class="generate-preview-btn" title="Generate Thumbnail"><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg> Thumb</button>';
         } else if (!hasPreview && !comp.storagePath) {
             generatePreviewBtn = '<button class="generate-preview-btn" title="Generate Preview Animation"><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> Preview</button>';
@@ -4955,37 +4955,42 @@
                         try { localStorage.setItem('blitzkrieg_thumb_blacklist', JSON.stringify(thumbBlacklist)); } catch(e) {}
                     }
 
-                    if (frameCount > 0) {
-                        return updateMetadataFrameCount(comp.storagePath, frameCount).then(function() { return true; }).catch(function() { return true; });
-                    }
-                    return true;
+                    return updateMetadataAfterGeneration(comp.storagePath, frameCount).then(function() { return true; }).catch(function() { return true; });
                 });
             });
-        }).catch(function(err) {
+        }).then(function(result) {
+            // Success: clean up temp dir and purge AE caches
+            _cleanupTempDir(tempDir);
+            return result;
+        }, function(err) {
+            // Failure: log, clean up, re-throw so caller can count it
             debugLog('GEN FAIL [' + comp.name + ']: ' + err.message, 'error');
-            throw err; // re-throw so caller can count it
-        }).finally(function() {
-            // Clean up temp dir and purge AE caches to prevent RAM buildup / crashes
-            if (tempDir) {
-                try {
-                    safeEvalScript(
-                        '(function(){' +
-                        ' var f = new Folder("' + escapeForExtendScript(tempDir) + '");' +
-                        ' if(f.exists){ var rm = function(d){ var fs=d.getFiles(); for(var i=0;i<fs.length;i++){ if(fs[i] instanceof Folder) rm(fs[i]); else fs[i].remove(); } d.remove(); }; rm(f); }' +
-                        ' try { app.purge(PurgeTarget.ALL_CACHES); } catch(e) {}' +
-                        ' return "ok";' +
-                        '})()'
-                    );
-                } catch(e) {}
-            }
+            _cleanupTempDir(tempDir);
+            throw err;
         });
         }); // end _enqueueGeneration
     }
 
+    /** Clean up temp directory and purge AE caches (used after generation) */
+    function _cleanupTempDir(tempDir) {
+        if (!tempDir) return;
+        try {
+            safeEvalScript(
+                '(function(){' +
+                ' var f = new Folder("' + escapeForExtendScript(tempDir) + '");' +
+                ' if(f.exists){ var rm = function(d){ var fs=d.getFiles(); for(var i=0;i<fs.length;i++){ if(fs[i] instanceof Folder) rm(fs[i]); else fs[i].remove(); } d.remove(); }; rm(f); }' +
+                ' try { app.purge(PurgeTarget.ALL_CACHES); } catch(e) {}' +
+                ' return "ok";' +
+                '})()'
+            );
+        } catch(e) {}
+    }
+
     /**
-     * Update a template's metadata.json with previewFrames count.
+     * Update a template's metadata.json after successful generation.
+     * Sets cloudThumbnailGenerated flag + preview frame count.
      */
-    function updateMetadataFrameCount(storagePath, frameCount) {
+    function updateMetadataAfterGeneration(storagePath, frameCount) {
         var sb = window.blitzkriegSupabase;
         if (!sb) return Promise.resolve();
 
@@ -4995,8 +5000,11 @@
             return res.data.text().then(function(text) {
                 try {
                     var metadata = JSON.parse(text);
-                    metadata.previewFrames = frameCount;
-                    metadata.cloudPreviewFrameCount = frameCount;
+                    metadata.cloudThumbnailGenerated = true;
+                    if (frameCount > 0) {
+                        metadata.previewFrames = frameCount;
+                        metadata.cloudPreviewFrameCount = frameCount;
+                    }
                     var metaBlob = new Blob([JSON.stringify(metadata)], { type: 'application/json' });
                     return sb.storage.from('blitzkrieg').upload(metaPath, metaBlob, {
                         contentType: 'application/json',
@@ -5007,7 +5015,7 @@
                 }
             });
         }).catch(function(err) {
-            debugLog('Failed to update metadata frame count: ' + err.message, 'warn');
+            debugLog('Failed to update metadata after generation: ' + err.message, 'warn');
         });
     }
 
@@ -5031,10 +5039,13 @@
             // Force regenerate all cloud templates
             compsToProcess = allComps.filter(function(c) { return !!c.storagePath; });
         } else {
-            // Templates missing thumbnails, blacklisted, or missing preview frames
+            // Templates missing thumbnails, blacklisted, or missing preview frames.
+            // NOTE: thumbUrl is NOT a reliable signal — Supabase createSignedUrls
+            // generates signed URLs even for non-existent files. Use thumbnailVerified
+            // (metadata-based) instead.
             compsToProcess = allComps.filter(function(c) {
                 if (!c.storagePath) return false;
-                if (!c.thumbUrl || c.thumbUrl === '') return true;
+                if (!c.thumbnailVerified) return true;
                 if (thumbBlacklist[c.storagePath]) return true;
                 if (!c.previewFrameCount) return true;
                 return false;
@@ -5043,6 +5054,8 @@
 
         if (compsToProcess.length === 0) {
             showToast('All templates already have thumbnails!');
+            var emptyBar = document.getElementById('admin-bar-progress');
+            if (emptyBar) emptyBar.style.display = 'none';
             return;
         }
 

@@ -152,6 +152,11 @@
             if (typeof mr.metadata.previewFrames === 'number') previewFrameCount = mr.metadata.previewFrames;
             if (mr.metadata.cloudPreviewFrameCount) previewFrameCount = Math.max(previewFrameCount, mr.metadata.cloudPreviewFrameCount);
 
+            // A template's thumbnail is "verified" if we have evidence it was generated:
+            // either via cloud generation (cloudThumbnailGenerated flag or cloudPreviewFrameCount)
+            // or via stash upload (previewFrameCount > 0 means thumbnail was included)
+            var thumbnailVerified = !!(mr.metadata.cloudThumbnailGenerated || previewFrameCount > 0);
+
             allComps.push({
                 name: mr.metadata.displayName || mr.folderName,
                 category: mr.categoryName,
@@ -165,6 +170,7 @@
                 frameRate: mr.metadata.frameRate || 0,
                 previewFrames: null,  // Signed lazily on hover
                 previewFrameCount: previewFrameCount,
+                thumbnailVerified: thumbnailVerified,
                 storagePath: storagePath,
             });
         });
