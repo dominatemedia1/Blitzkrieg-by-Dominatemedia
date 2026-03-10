@@ -138,10 +138,50 @@
     <div id="delete-category-modal" class="modal-overlay" style="display: none;">
         <div class="modal-box">
             <h3>Delete Category</h3>
-            <p>Are you sure you want to permanently delete the category "<strong id="category-to-delete-name"></strong>" and ALL its compositions? This action cannot be undone.</p>
+            <p>Category "<strong id="category-to-delete-name"></strong>" has <strong id="category-to-delete-count">0</strong> template(s). What would you like to do?</p>
+            <div class="delete-category-options">
+                <label class="radio-option">
+                    <input type="radio" name="delete-category-action" value="transfer" checked>
+                    <span>Transfer templates to another category, then delete</span>
+                </label>
+                <div id="transfer-category-group" class="form-group" style="margin-left: 24px;">
+                    <select id="transfer-to-category-select"></select>
+                </div>
+                <label class="radio-option">
+                    <input type="radio" name="delete-category-action" value="delete-all">
+                    <span>Permanently delete category and ALL templates</span>
+                </label>
+            </div>
             <div class="modal-buttons">
                 <button id="cancel-delete-category-btn" class="button-secondary">Cancel</button>
                 <button id="confirm-delete-category-btn" class="button-danger">Delete Category</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- === BULK ACTIONS MODAL === -->
+    <div id="bulk-move-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-box">
+            <h3>Move Selected Templates</h3>
+            <p>Move <strong id="bulk-move-count">0</strong> selected template(s) to:</p>
+            <div class="form-group">
+                <label for="bulk-move-category-select">Select Category</label>
+                <select id="bulk-move-category-select"></select>
+            </div>
+            <div class="modal-buttons">
+                <button id="cancel-bulk-move-btn" class="button-secondary">Cancel</button>
+                <button id="confirm-bulk-move-btn" class="button-primary" style="width:auto; margin-bottom:0;">Move Templates</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="bulk-delete-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-box">
+            <h3>Delete Selected Templates</h3>
+            <p>Are you sure you want to permanently delete <strong id="bulk-delete-count">0</strong> selected template(s)? This action cannot be undone.</p>
+            <div class="modal-buttons">
+                <button id="cancel-bulk-delete-btn" class="button-secondary">Cancel</button>
+                <button id="confirm-bulk-delete-btn" class="button-danger">Delete Templates</button>
             </div>
         </div>
     </div>
@@ -178,6 +218,16 @@
             <div class="modal-buttons">
                 <button id="cancel-reject-btn" class="button-secondary">Cancel</button>
                 <button id="confirm-reject-btn" class="button-danger">Reject Submission</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- === SUBMISSION DETAIL MODAL === -->
+    <div id="submission-detail-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-box submission-detail-box">
+            <button id="submission-detail-close" class="submission-detail-close-btn" title="Close">&times;</button>
+            <div id="submission-detail-content">
+                <!-- Populated by JS -->
             </div>
         </div>
     </div>
@@ -230,6 +280,20 @@
                     <div class="nav-section-title">Categories</div>
                     <div id="category-filters">
                         <!-- Categories will be rendered here by JS -->
+                    </div>
+                    <!-- New Category inline form (admin only) -->
+                    <div id="new-category-inline" class="new-category-inline" style="display:none;">
+                        <button id="new-category-toggle-btn" class="new-category-toggle-btn" title="Create new category">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                            <span>New Category</span>
+                        </button>
+                        <div id="new-category-form" class="new-category-form" style="display:none;">
+                            <input type="text" id="inline-new-category-input" class="inline-new-category-input" placeholder="Category name...">
+                            <div class="new-category-form-actions">
+                                <button id="inline-new-category-save" class="button-primary new-cat-save-btn" title="Create">Create</button>
+                                <button id="inline-new-category-cancel" class="button-secondary new-cat-cancel-btn" title="Cancel">Cancel</button>
+                            </div>
+                        </div>
                     </div>
                 </div>
 

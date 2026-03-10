@@ -491,21 +491,39 @@
         return basePath;
     }
 
-    // Delete a template from the bucket (admin-only, RLS enforced)
-    async function deleteTemplate(storagePath) {
-        var filesResult = await sb.storage.from(BUCKET).list(storagePath, { limit: 100 });
-        if (filesResult.error) {
-            throw new Error('Failed to list files for deletion: ' + filesResult.error.message);
+    /**
+     * Recursively collect ALL file paths under a storage folder (handles nested subfolders like preview/).
+     */
+    async function collectAllFiles(folderPath) {
+        var result = await sb.storage.from(BUCKET).list(folderPath, { limit: 1000 });
+        if (result.error) return [];
+        var items = result.data || [];
+        var filePaths = [];
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].id === null) {
+                // It's a subfolder — recurse into it
+                var subFiles = await collectAllFiles(folderPath + '/' + items[i].name);
+                filePaths = filePaths.concat(subFiles);
+            } else {
+                filePaths.push(folderPath + '/' + items[i].name);
+            }
         }
+        return filePaths;
+    }
 
-        var filePaths = (filesResult.data || []).map(function (f) {
-            return storagePath + '/' + f.name;
-        });
+    // Delete a template from the bucket (admin-only, RLS enforced)
+    // Now recursively deletes all files including nested preview/ subfolders
+    async function deleteTemplate(storagePath) {
+        var filePaths = await collectAllFiles(storagePath);
 
         if (filePaths.length > 0) {
-            var removeResult = await sb.storage.from(BUCKET).remove(filePaths);
-            if (removeResult.error) {
-                throw new Error('Failed to delete template: ' + removeResult.error.message);
+            // Batch delete in chunks of 100
+            for (var b = 0; b < filePaths.length; b += 100) {
+                var batch = filePaths.slice(b, b + 100);
+                var removeResult = await sb.storage.from(BUCKET).remove(batch);
+                if (removeResult.error) {
+                    throw new Error('Failed to delete template: ' + removeResult.error.message);
+                }
             }
         }
         invalidateCache();
@@ -535,60 +553,30 @@
         invalidateCache();
     }
 
-    // Rename a category
+    // Rename a category (now handles nested subfolders like preview/)
     async function renameCategory(oldCategoryName, newCategoryName) {
-        var foldersResult = await sb.storage.from(BUCKET).list(oldCategoryName, { limit: 1000 });
-        if (foldersResult.error) {
-            throw new Error('Failed to list category: ' + foldersResult.error.message);
-        }
+        var allFiles = await collectAllFiles(oldCategoryName);
 
-        var compFolders = (foldersResult.data || []).filter(function (item) {
-            return item.id === null;
-        });
-
-        for (var i = 0; i < compFolders.length; i++) {
-            var folder = compFolders[i];
-            var oldFolderPath = oldCategoryName + '/' + folder.name;
-            var newFolderPath = newCategoryName + '/' + folder.name;
-
-            var filesResult = await sb.storage.from(BUCKET).list(oldFolderPath, { limit: 100 });
-            if (filesResult.error) continue;
-
-            var files = (filesResult.data || []).filter(function (f) { return f.id !== null; });
-            for (var j = 0; j < files.length; j++) {
-                var oldFilePath = oldFolderPath + '/' + files[j].name;
-                var newFilePath = newFolderPath + '/' + files[j].name;
-                var moveResult = await sb.storage.from(BUCKET).move(oldFilePath, newFilePath);
-                if (moveResult.error) {
-                    throw new Error('Failed to move ' + files[j].name + ': ' + moveResult.error.message);
-                }
+        for (var i = 0; i < allFiles.length; i++) {
+            var oldPath = allFiles[i];
+            var newPath = newCategoryName + oldPath.substring(oldCategoryName.length);
+            var moveResult = await sb.storage.from(BUCKET).move(oldPath, newPath);
+            if (moveResult.error) {
+                throw new Error('Failed to move ' + oldPath + ': ' + moveResult.error.message);
             }
         }
         invalidateCache();
     }
 
-    // Delete an entire category
+    // Delete an entire category (now recursively handles nested subfolders)
     async function deleteCategory(categoryName) {
-        var foldersResult = await sb.storage.from(BUCKET).list(categoryName, { limit: 1000 });
-        if (foldersResult.error) {
-            throw new Error('Failed to list category: ' + foldersResult.error.message);
-        }
+        var allFiles = await collectAllFiles(categoryName);
 
-        var compFolders = (foldersResult.data || []).filter(function (item) {
-            return item.id === null;
-        });
-
-        for (var i = 0; i < compFolders.length; i++) {
-            var folderPath = categoryName + '/' + compFolders[i].name;
-            var filesResult = await sb.storage.from(BUCKET).list(folderPath, { limit: 100 });
-            if (filesResult.error) continue;
-
-            var filePaths = (filesResult.data || [])
-                .filter(function (f) { return f.id !== null; })
-                .map(function (f) { return folderPath + '/' + f.name; });
-
-            if (filePaths.length > 0) {
-                var removeResult = await sb.storage.from(BUCKET).remove(filePaths);
+        if (allFiles.length > 0) {
+            // Batch delete in chunks of 100
+            for (var b = 0; b < allFiles.length; b += 100) {
+                var batch = allFiles.slice(b, b + 100);
+                var removeResult = await sb.storage.from(BUCKET).remove(batch);
                 if (removeResult.error) {
                     throw new Error('Failed to delete files: ' + removeResult.error.message);
                 }
@@ -597,23 +585,47 @@
         invalidateCache();
     }
 
-    // Move a single template from one category to another
+    // Move ALL templates from one category to another (for transfer-before-delete flow)
+    async function moveAllTemplates(fromCategory, toCategory) {
+        var allFiles = await collectAllFiles(fromCategory);
+
+        for (var i = 0; i < allFiles.length; i++) {
+            var oldPath = allFiles[i];
+            var newPath = toCategory + oldPath.substring(fromCategory.length);
+            var moveResult = await sb.storage.from(BUCKET).move(oldPath, newPath);
+            if (moveResult.error) {
+                throw new Error('Failed to move ' + oldPath + ': ' + moveResult.error.message);
+            }
+        }
+        invalidateCache();
+    }
+
+    // Delete multiple templates at once (for bulk operations)
+    async function deleteTemplates(storagePaths) {
+        for (var i = 0; i < storagePaths.length; i++) {
+            await deleteTemplate(storagePaths[i]);
+        }
+    }
+
+    // Move multiple templates to a new category (for bulk operations)
+    async function moveTemplates(storagePaths, toCategory) {
+        for (var i = 0; i < storagePaths.length; i++) {
+            await moveTemplate(storagePaths[i], toCategory);
+        }
+    }
+
+    // Move a single template from one category to another (handles nested subfolders)
     async function moveTemplate(oldStoragePath, newCategoryName) {
         var folderName = oldStoragePath.split('/').pop();
         var newBasePath = newCategoryName + '/' + folderName;
 
-        var filesResult = await sb.storage.from(BUCKET).list(oldStoragePath, { limit: 100 });
-        if (filesResult.error) {
-            throw new Error('Failed to list template files: ' + filesResult.error.message);
-        }
-
-        var files = (filesResult.data || []).filter(function (f) { return f.id !== null; });
-        for (var i = 0; i < files.length; i++) {
-            var oldPath = oldStoragePath + '/' + files[i].name;
-            var newPath = newBasePath + '/' + files[i].name;
+        var allFiles = await collectAllFiles(oldStoragePath);
+        for (var i = 0; i < allFiles.length; i++) {
+            var oldPath = allFiles[i];
+            var newPath = newBasePath + oldPath.substring(oldStoragePath.length);
             var moveResult = await sb.storage.from(BUCKET).move(oldPath, newPath);
             if (moveResult.error) {
-                throw new Error('Failed to move ' + files[i].name + ': ' + moveResult.error.message);
+                throw new Error('Failed to move ' + oldPath + ': ' + moveResult.error.message);
             }
         }
         invalidateCache();
@@ -633,19 +645,45 @@
         return result.data.signedUrl || result.data.signedURL;
     }
 
+    /**
+     * Sign arbitrary storage paths and return a map of path → signedUrl.
+     * Used by submissions UI to get thumbnails for pending items.
+     */
+    async function signPaths(paths) {
+        if (!paths || paths.length === 0) return {};
+        var result = {};
+        var BATCH = 100;
+        for (var b = 0; b < paths.length; b += BATCH) {
+            var batch = paths.slice(b, b + BATCH);
+            var signResult = await sb.storage.from(BUCKET).createSignedUrls(batch, SIGNED_URL_EXPIRY);
+            if (signResult.data) {
+                signResult.data.forEach(function(item) {
+                    if (!item.error && item.signedUrl) {
+                        result[item.path] = item.signedUrl;
+                    }
+                });
+            }
+        }
+        return result;
+    }
+
     // Expose globally
     window.cloudLibrary = {
         listTemplates: listTemplates,
         downloadTemplate: downloadTemplate,
         uploadTemplate: uploadTemplate,
         deleteTemplate: deleteTemplate,
+        deleteTemplates: deleteTemplates,
         renameTemplate: renameTemplate,
         renameCategory: renameCategory,
         deleteCategory: deleteCategory,
         moveTemplate: moveTemplate,
+        moveTemplates: moveTemplates,
+        moveAllTemplates: moveAllTemplates,
         getArchives: getArchives,
         getArchiveDownloadUrl: getArchiveDownloadUrl,
         invalidateCache: invalidateCache,
         signPreviewFrames: signPreviewFrames,
+        signPaths: signPaths,
     };
 })();

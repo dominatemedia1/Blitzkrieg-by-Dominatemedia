@@ -65,6 +65,9 @@
     // Category delete modal elements
     var deleteCategoryModal = document.getElementById('delete-category-modal');
     var categoryToDeleteName = document.getElementById('category-to-delete-name');
+    var categoryToDeleteCount = document.getElementById('category-to-delete-count');
+    var transferToCategorySelect = document.getElementById('transfer-to-category-select');
+    var transferCategoryGroup = document.getElementById('transfer-category-group');
     var confirmDeleteCategoryBtn = document.getElementById('confirm-delete-category-btn');
     var cancelDeleteCategoryBtn = document.getElementById('cancel-delete-category-btn');
 
@@ -75,6 +78,17 @@
     var moveToNewCategoryInput = document.getElementById('move-to-new-category-input');
     var confirmMoveCompBtn = document.getElementById('confirm-move-comp-btn');
     var cancelMoveCompBtn = document.getElementById('cancel-move-comp-btn');
+
+    // Bulk action modal elements
+    var bulkMoveModal = document.getElementById('bulk-move-modal');
+    var bulkMoveCount = document.getElementById('bulk-move-count');
+    var bulkMoveCategorySelect = document.getElementById('bulk-move-category-select');
+    var confirmBulkMoveBtn = document.getElementById('confirm-bulk-move-btn');
+    var cancelBulkMoveBtn = document.getElementById('cancel-bulk-move-btn');
+    var bulkDeleteModal = document.getElementById('bulk-delete-modal');
+    var bulkDeleteCount = document.getElementById('bulk-delete-count');
+    var confirmBulkDeleteBtn = document.getElementById('confirm-bulk-delete-btn');
+    var cancelBulkDeleteBtn = document.getElementById('cancel-bulk-delete-btn');
 
     var creditBtn = document.getElementById('credit-button');
     var toastElement = document.getElementById('toast-notification');
@@ -103,6 +117,8 @@
     var isLoading = false; // Prevents race conditions in async operations
     var pendingLibraryReload = false; // Deferred reload when loadLibrary is called while isLoading
     var stashInProgress = false; // Suppresses focus-triggered loads during stash/generate operations
+    var bulkSelectedIds = new Set(); // Track selected items for bulk operations
+    var bulkMode = false; // Whether bulk selection mode is active
 
     // Favorites and recent comps
     var favoriteComps = []; // Array of uniqueIds
@@ -631,6 +647,10 @@
                             '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/></svg>' +
                             ' Clear Cache' +
                         '</button>' +
+                        '<button class="admin-bar-btn admin-bar-btn-select" id="admin-bulk-select-btn" title="Select multiple templates for bulk operations">' +
+                            '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>' +
+                            ' Select Mode' +
+                        '</button>' +
                     '</div>' +
                     '<div class="admin-bar-progress" id="admin-bar-progress" style="display:none;">' +
                         '<div class="progress-track"><div class="progress-fill" id="generate-progress-bar"></div></div>' +
@@ -655,6 +675,9 @@
                     window.cloudLibrary.invalidateCache();
                     showToast('Cache cleared. Reloading...');
                     loadLibrary();
+                });
+                document.getElementById('admin-bulk-select-btn').addEventListener('click', function() {
+                    toggleBulkMode();
                 });
             }
         }
@@ -859,10 +882,118 @@
         if (cancelMoveCompBtn) cancelMoveCompBtn.addEventListener('click', function () { moveCompModal.style.display = 'none'; currentMoveCompInfo = null; });
         if (confirmMoveCompBtn) confirmMoveCompBtn.addEventListener('click', executeMoveComp);
 
+        // Bulk action modal handlers
+        if (cancelBulkMoveBtn) cancelBulkMoveBtn.addEventListener('click', function () { bulkMoveModal.style.display = 'none'; });
+        if (confirmBulkMoveBtn) confirmBulkMoveBtn.addEventListener('click', executeBulkMove);
+        if (cancelBulkDeleteBtn) cancelBulkDeleteBtn.addEventListener('click', function () { bulkDeleteModal.style.display = 'none'; });
+        if (confirmBulkDeleteBtn) confirmBulkDeleteBtn.addEventListener('click', executeBulkDelete);
+
+        // Submission detail modal handlers
+        var submissionDetailModal = document.getElementById('submission-detail-modal');
+        var submissionDetailClose = document.getElementById('submission-detail-close');
+        if (submissionDetailClose) {
+            submissionDetailClose.addEventListener('click', function() {
+                if (submissionDetailModal) submissionDetailModal.style.display = 'none';
+            });
+        }
+        // Click overlay background to close detail modal
+        if (submissionDetailModal) {
+            submissionDetailModal.addEventListener('click', function(e) {
+                if (e.target === submissionDetailModal) submissionDetailModal.style.display = 'none';
+            });
+        }
+
         // Initialize keyboard shortcuts
         initKeyboardShortcuts();
 
+        // New category inline form (sidebar)
+        initNewCategoryForm();
+
         hideSpinner();
+    }
+
+    /**
+     * Initialize the "New Category" inline form in the sidebar.
+     * Creates an empty placeholder in Supabase storage to establish the folder.
+     */
+    function initNewCategoryForm() {
+        var container = document.getElementById('new-category-inline');
+        var toggleBtn = document.getElementById('new-category-toggle-btn');
+        var form = document.getElementById('new-category-form');
+        var input = document.getElementById('inline-new-category-input');
+        var saveBtn = document.getElementById('inline-new-category-save');
+        var cancelBtn = document.getElementById('inline-new-category-cancel');
+        if (!container || !toggleBtn || !form || !input || !saveBtn || !cancelBtn) return;
+
+        // Show only for admins
+        function updateVisibility() {
+            var isAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
+            container.style.display = isAdmin ? '' : 'none';
+        }
+        updateVisibility();
+        // Re-check on auth changes
+        window.addEventListener('blitzkrieg-auth-ready', updateVisibility);
+
+        toggleBtn.addEventListener('click', function() {
+            toggleBtn.style.display = 'none';
+            form.style.display = '';
+            input.value = '';
+            input.focus();
+        });
+
+        cancelBtn.addEventListener('click', function() {
+            form.style.display = 'none';
+            toggleBtn.style.display = '';
+        });
+
+        function createCategory() {
+            var name = input.value.trim();
+            if (!name) {
+                showToast('Category name cannot be empty.', true);
+                return;
+            }
+            var nameErr = validateName(name);
+            if (nameErr) {
+                showToast(nameErr, true);
+                return;
+            }
+            // Check if category already exists
+            var existing = allComps.some(function(c) { return c.category.toLowerCase() === name.toLowerCase(); });
+            if (existing) {
+                showToast('Category "' + name + '" already exists.', true);
+                return;
+            }
+
+            var sb = window.blitzkriegSupabase;
+            if (!sb) {
+                showToast('Not connected to cloud.', true);
+                return;
+            }
+
+            showToast('Creating category "' + name + '"...');
+            // Upload a placeholder file to create the folder in Supabase storage
+            var placeholder = new Blob([''], { type: 'text/plain' });
+            sb.storage.from('blitzkrieg').upload(name + '/.emptyFolderPlaceholder', placeholder, {
+                contentType: 'text/plain',
+                upsert: true,
+            }).then(function(result) {
+                if (result.error) {
+                    showToast('Failed to create category: ' + result.error.message, true);
+                    return;
+                }
+                form.style.display = 'none';
+                toggleBtn.style.display = '';
+                showToast('Category "' + name + '" created!');
+                window.cloudLibrary.invalidateCache();
+                loadLibrary();
+            });
+        }
+
+        saveBtn.addEventListener('click', createCategory);
+        input.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') { e.preventDefault(); createCategory(); }
+            if (e.key === 'Escape') { form.style.display = 'none'; toggleBtn.style.display = ''; }
+        });
     }
 
     function loadLibrary() {
@@ -1011,17 +1142,13 @@
             }
         }
 
-        // Render categories in the sidebar with action buttons
+        // Render categories in the sidebar — only admins see rename/delete buttons
+        var sidebarIsAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
         categoryFiltersContainer.innerHTML = categories.map(function(cat) {
             var safeCat = escapeHTML(cat);
             var count = allComps.filter(function(c) { return c.category === cat; }).length;
             var isActive = cat === activeCategory;
-            return '<div class="nav-item' + (isActive ? ' active' : '') + '" data-category="' + safeCat + '" draggable="false">' +
-                '<svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
-                    '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>' +
-                '</svg>' +
-                '<span class="nav-label">' + safeCat + '</span>' +
-                '<span class="nav-count">' + count + '</span>' +
+            var actionBtns = sidebarIsAdmin ? (
                 '<div class="nav-item-actions">' +
                     '<button class="nav-action-btn rename-category-btn" title="Rename category">' +
                         '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>' +
@@ -1029,7 +1156,15 @@
                     '<button class="nav-action-btn delete-category-btn" title="Delete category">' +
                         '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>' +
                     '</button>' +
-                '</div>' +
+                '</div>'
+            ) : '';
+            return '<div class="nav-item' + (isActive ? ' active' : '') + '" data-category="' + safeCat + '" draggable="false">' +
+                '<svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+                    '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>' +
+                '</svg>' +
+                '<span class="nav-label">' + safeCat + '</span>' +
+                '<span class="nav-count">' + count + '</span>' +
+                actionBtns +
             '</div>';
         }).join('');
 
@@ -1136,6 +1271,10 @@
         }
 
         if (!lazyLoadObserver) {
+            // Use .grid-container as root since it's the scrolling ancestor.
+            // Without this, images inside the scrollable grid may never
+            // intersect the default viewport root, causing thumbnails to not load.
+            var scrollRoot = document.querySelector('.grid-container') || null;
             lazyLoadObserver = new IntersectionObserver(function(entries) {
                 entries.forEach(function(entry) {
                     if (entry.isIntersecting) {
@@ -1148,7 +1287,8 @@
                     }
                 });
             }, {
-                rootMargin: '100px',
+                root: scrollRoot,
+                rootMargin: '200px',
                 threshold: 0.01
             });
         }
@@ -1389,7 +1529,10 @@
 
         var previewCountAttr = comp.previewFrameCount ? ' data-preview-count="' + comp.previewFrameCount + '"' : '';
 
+        var bulkCheckbox = isAdmin ? '<div class="bulk-select-checkbox" data-unique-id="' + safeUniqueId + '"></div>' : '';
+
         return '<div class="stash-item' + previewClass + favClass + '" data-unique-id="' + safeUniqueId + '" data-category="' + safeCategory + '" data-aep-path="' + safeAepPath + '" data-storage-path="' + safeStoragePath + '" data-name="' + safeName + '"' + previewDataAttr + durationAttr + previewCountAttr + ' draggable="true">' +
+            bulkCheckbox +
             '<div class="item-actions">' +
                 '<button class="action-btn favorite-btn" title="' + favTitle + '"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="' + favFill + '" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg></button>' +
                 adminBtns +
@@ -1426,6 +1569,28 @@
         }
         // Show admin bar for template views
         if (adminBar) adminBar.style.display = '';
+
+        // Inject bulk action bar if admin (once)
+        var renderIsAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
+        if (renderIsAdmin && !document.getElementById('bulk-action-bar')) {
+            var bulkBar = document.createElement('div');
+            bulkBar.id = 'bulk-action-bar';
+            bulkBar.className = 'bulk-action-bar';
+            bulkBar.innerHTML =
+                '<span class="bulk-count">0 selected</span>' +
+                '<button class="bulk-select-all" onclick="return false;">Select All</button>' +
+                '<button class="bulk-deselect" onclick="return false;">Deselect</button>' +
+                '<button class="bulk-move-btn" onclick="return false;">Move Selected</button>' +
+                '<button class="bulk-delete-btn" onclick="return false;">Delete Selected</button>' +
+                '<button class="bulk-cancel" onclick="return false;">Exit Selection</button>';
+            stashGrid.parentElement.insertBefore(bulkBar, stashGrid);
+
+            bulkBar.querySelector('.bulk-select-all').addEventListener('click', function() { selectAllVisible(); });
+            bulkBar.querySelector('.bulk-deselect').addEventListener('click', function() { deselectAll(); });
+            bulkBar.querySelector('.bulk-move-btn').addEventListener('click', function() { promptBulkMove(); });
+            bulkBar.querySelector('.bulk-delete-btn').addEventListener('click', function() { promptBulkDelete(); });
+            bulkBar.querySelector('.bulk-cancel').addEventListener('click', function() { toggleBulkMode(false); });
+        }
 
         // Clear any existing preview animations
         Object.keys(previewAnimations).forEach(function(id) {
@@ -1719,11 +1884,12 @@
     function setupScrollSentinel(sentinel) {
         if (scrollSentinelObserver) scrollSentinelObserver.disconnect();
 
+        var scrollRoot = document.querySelector('.grid-container') || null;
         scrollSentinelObserver = new IntersectionObserver(function(entries) {
             if (entries[0].isIntersecting) {
                 loadMoreComps();
             }
-        }, { rootMargin: '200px', threshold: 0.01 });
+        }, { root: scrollRoot, rootMargin: '200px', threshold: 0.01 });
 
         scrollSentinelObserver.observe(sentinel);
     }
@@ -1840,11 +2006,38 @@
             var subId = actionBtn.dataset.submissionId;
             if (action === 'approve-submission' && subId) { approveSubmission(subId); return; }
             if (action === 'reject-submission' && subId) { promptRejectSubmission(subId); return; }
+            if (action === 'withdraw-submission' && subId) { withdrawSubmission(subId); return; }
+            if (action === 'resubmit-submission' && subId) { resubmitSubmission(subId); return; }
+        }
+
+        // Submission card click → open detail modal
+        var submissionCard = e.target.closest('.submission-card');
+        if (submissionCard && !e.target.closest('[data-action]')) {
+            var clickedSubId = submissionCard.dataset.submissionId;
+            if (clickedSubId) { openSubmissionDetail(clickedSubId); return; }
+        }
+
+        // Bulk checkbox click
+        var checkbox = e.target.closest('.bulk-select-checkbox');
+        if (checkbox) {
+            var cbId = checkbox.dataset.uniqueId;
+            if (cbId) {
+                if (!bulkMode) toggleBulkMode(true);
+                toggleBulkSelect(cbId);
+            }
+            return;
         }
 
         var item = e.target.closest('.stash-item');
         if (!item) return;
         var uniqueId = item.dataset.uniqueId, category = item.dataset.category, aepPath = item.dataset.aepPath, storagePath = item.dataset.storagePath, name = item.dataset.name;
+
+        // In bulk mode, clicking the card itself toggles selection
+        if (bulkMode && !e.target.closest('.action-btn') && !e.target.closest('.import-btn') && !e.target.closest('.generate-preview-btn')) {
+            toggleBulkSelect(uniqueId);
+            return;
+        }
+
         if (e.target.closest('.import-btn')) { importComp(aepPath, uniqueId, storagePath); }
         else if (e.target.closest('.rename-btn')) { renameComp(uniqueId, category, name, storagePath); }
         else if (e.target.closest('.delete-btn')) { promptDelete(uniqueId, category, name, storagePath); }
@@ -1964,6 +2157,12 @@
         existingCategorySelect.disabled = categories.length === 0;
         if (categories.length === 0) { existingCategorySelect.innerHTML = '<option value="">No categories yet</option>'; }
         newCategoryInput.value = '';
+        // Only admins can create new categories
+        var newCatGroup = newCategoryInput.closest('.form-group');
+        if (newCatGroup) {
+            var addIsAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
+            newCatGroup.style.display = addIsAdmin ? '' : 'none';
+        }
         addCompModal.style.display = 'flex';
     }
 
@@ -2071,6 +2270,16 @@
                         stashInProgress = false;
                         hideSpinner();
                         loadSubmissionCounts();
+
+                        // Navigate to the review queue so admin can immediately review
+                        var submitIsAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
+                        if (submitIsAdmin) {
+                            activeCategory = '__review_pending';
+                        } else {
+                            activeCategory = '__submissions_pending';
+                        }
+                        updateNavActiveState();
+                        renderSubmissionsGrid(submitIsAdmin ? 'pending_review' : 'pending');
                     }
                 } catch (err) {
                     debugLog('Upload error: ' + err.message, 'error');
@@ -2611,8 +2820,48 @@
      * @param {string} categoryName - Category to delete
      */
     function promptCategoryDelete(categoryName) {
-        currentCategoryDeleteInfo = { category: categoryName };
+        var compCount = allComps.filter(function(c) { return c.category === categoryName; }).length;
+        currentCategoryDeleteInfo = { category: categoryName, compCount: compCount };
         if (categoryToDeleteName) categoryToDeleteName.textContent = categoryName;
+        if (categoryToDeleteCount) categoryToDeleteCount.textContent = compCount;
+
+        // Populate transfer category dropdown (exclude current category)
+        var categories = Array.from(new Set(allComps.map(function(c) { return c.category; }))).sort();
+        var otherCategories = categories.filter(function(cat) { return cat !== categoryName; });
+        if (transferToCategorySelect) {
+            transferToCategorySelect.innerHTML = otherCategories.map(function(cat) {
+                return '<option value="' + escapeHTML(cat) + '">' + escapeHTML(cat) + '</option>';
+            }).join('');
+            if (otherCategories.length === 0) {
+                transferToCategorySelect.innerHTML = '<option value="">No other categories</option>';
+            }
+        }
+
+        // Show/hide transfer option based on whether there are templates and other categories
+        var transferRadio = document.querySelector('input[name="delete-category-action"][value="transfer"]');
+        if (transferRadio) {
+            if (compCount === 0 || otherCategories.length === 0) {
+                transferRadio.closest('.radio-option').style.display = 'none';
+                if (transferCategoryGroup) transferCategoryGroup.style.display = 'none';
+                var deleteAllRadio = document.querySelector('input[name="delete-category-action"][value="delete-all"]');
+                if (deleteAllRadio) deleteAllRadio.checked = true;
+            } else {
+                transferRadio.closest('.radio-option').style.display = '';
+                if (transferCategoryGroup) transferCategoryGroup.style.display = '';
+                transferRadio.checked = true;
+            }
+        }
+
+        // Toggle transfer dropdown visibility based on radio selection
+        var radios = document.querySelectorAll('input[name="delete-category-action"]');
+        radios.forEach(function(r) {
+            r.onchange = function() {
+                if (transferCategoryGroup) {
+                    transferCategoryGroup.style.display = r.value === 'transfer' && r.checked ? '' : 'none';
+                }
+            };
+        });
+
         if (deleteCategoryModal) deleteCategoryModal.style.display = 'flex';
     }
 
@@ -2628,23 +2877,53 @@
         var info = currentCategoryDeleteInfo;
         if (!info) return;
 
+        // Determine user choice: transfer or delete-all
+        var selectedAction = 'delete-all';
+        var checkedRadio = document.querySelector('input[name="delete-category-action"]:checked');
+        if (checkedRadio) selectedAction = checkedRadio.value;
+
+        var transferTarget = transferToCategorySelect ? transferToCategorySelect.value : '';
+
+        if (selectedAction === 'transfer' && !transferTarget) {
+            showToast('Please select a category to transfer templates to.', true);
+            return;
+        }
+
         deleteCategoryModal.style.display = 'none';
         showSpinner();
 
-        // Cloud delete: remove all files in the category
-        if (window.cloudLibrary && window.cloudLibrary.deleteCategory) {
-            window.cloudLibrary.deleteCategory(info.category).then(function() {
+        // Cloud path
+        if (window.cloudLibrary) {
+            var promise;
+            if (selectedAction === 'transfer' && transferTarget && info.compCount > 0) {
+                // Transfer all templates to target category, then delete the empty category
+                showToast('Transferring templates to "' + transferTarget + '"...');
+                promise = window.cloudLibrary.moveAllTemplates(info.category, transferTarget);
+            } else {
+                // Permanent delete of everything in the category
+                promise = window.cloudLibrary.deleteCategory(info.category);
+            }
+
+            promise.then(function() {
                 hideSpinner();
                 currentCategoryDeleteInfo = null;
-                showToast('Category deleted successfully.');
-                if (activeCategory === info.category) {
-                    activeCategory = 'All';
+                if (selectedAction === 'transfer') {
+                    showToast('Templates transferred and category "' + info.category + '" removed.');
+                } else {
+                    showToast('Category "' + info.category + '" deleted permanently.');
                 }
+                if (activeCategory === info.category) {
+                    activeCategory = selectedAction === 'transfer' ? transferTarget : 'All';
+                }
+                // Remove deleted category comps from local state immediately
+                // so modals (add comp, move, etc.) don't show stale categories
+                allComps = allComps.filter(function(c) { return c.category !== info.category; });
+                renderUI();
                 loadLibrary();
             }).catch(function(err) {
                 hideSpinner();
                 currentCategoryDeleteInfo = null;
-                showToast('Failed to delete category: ' + err.message, true);
+                showToast('Failed: ' + err.message, true);
             });
             return;
         }
@@ -2799,6 +3078,152 @@
         });
     }
 
+    /* --------- Bulk Selection & Actions (Admin) --------- */
+
+    function toggleBulkMode(enable) {
+        bulkMode = typeof enable === 'boolean' ? enable : !bulkMode;
+        if (!bulkMode) {
+            bulkSelectedIds.clear();
+        }
+        var gridContainer = stashGrid.closest('.grid-container') || stashGrid.parentElement;
+        if (gridContainer) {
+            gridContainer.classList.toggle('bulk-mode', bulkMode);
+        }
+        updateBulkActionBar();
+    }
+
+    function toggleBulkSelect(uniqueId) {
+        if (bulkSelectedIds.has(uniqueId)) {
+            bulkSelectedIds.delete(uniqueId);
+        } else {
+            bulkSelectedIds.add(uniqueId);
+        }
+        // Update visual state
+        var item = stashGrid.querySelector('.stash-item[data-unique-id="' + uniqueId + '"]');
+        if (item) {
+            item.classList.toggle('bulk-selected', bulkSelectedIds.has(uniqueId));
+        }
+        updateBulkActionBar();
+    }
+
+    function selectAllVisible() {
+        var items = stashGrid.querySelectorAll('.stash-item');
+        items.forEach(function(item) {
+            var uid = item.dataset.uniqueId;
+            if (uid) {
+                bulkSelectedIds.add(uid);
+                item.classList.add('bulk-selected');
+            }
+        });
+        updateBulkActionBar();
+    }
+
+    function deselectAll() {
+        bulkSelectedIds.clear();
+        stashGrid.querySelectorAll('.stash-item.bulk-selected').forEach(function(item) {
+            item.classList.remove('bulk-selected');
+        });
+        updateBulkActionBar();
+    }
+
+    function updateBulkActionBar() {
+        var bar = document.getElementById('bulk-action-bar');
+        if (!bar) return;
+        var count = bulkSelectedIds.size;
+        if (bulkMode) {
+            bar.classList.add('active');
+            bar.querySelector('.bulk-count').textContent = count > 0 ? count + ' selected' : 'Select templates...';
+        } else {
+            bar.classList.remove('active');
+        }
+    }
+
+    function getSelectedComps() {
+        return allComps.filter(function(c) { return bulkSelectedIds.has(c.uniqueId); });
+    }
+
+    function promptBulkMove() {
+        var selected = getSelectedComps();
+        if (selected.length === 0) return;
+        if (bulkMoveCount) bulkMoveCount.textContent = selected.length;
+
+        var categories = Array.from(new Set(allComps.map(function(c) { return c.category; }))).sort();
+        if (bulkMoveCategorySelect) {
+            bulkMoveCategorySelect.innerHTML = categories.map(function(cat) {
+                return '<option value="' + escapeHTML(cat) + '">' + escapeHTML(cat) + '</option>';
+            }).join('');
+        }
+        if (bulkMoveModal) bulkMoveModal.style.display = 'flex';
+    }
+
+    function executeBulkMove() {
+        if (!window.blitzkriegAuth || !window.blitzkriegAuth.isAdmin()) {
+            showToast('Admin permission required.', true);
+            return;
+        }
+        var targetCategory = bulkMoveCategorySelect ? bulkMoveCategorySelect.value : '';
+        if (!targetCategory) {
+            showToast('Please select a category.', true);
+            return;
+        }
+        var selected = getSelectedComps();
+        var storagePaths = selected.filter(function(c) { return c.storagePath; }).map(function(c) { return c.storagePath; });
+
+        if (storagePaths.length === 0) {
+            showToast('No cloud templates selected.', true);
+            return;
+        }
+
+        bulkMoveModal.style.display = 'none';
+        showSpinner();
+        showToast('Moving ' + storagePaths.length + ' template(s)...');
+
+        window.cloudLibrary.moveTemplates(storagePaths, targetCategory).then(function() {
+            hideSpinner();
+            showToast(storagePaths.length + ' template(s) moved to "' + targetCategory + '".');
+            toggleBulkMode(false);
+            loadLibrary();
+        }).catch(function(err) {
+            hideSpinner();
+            showToast('Bulk move failed: ' + err.message, true);
+        });
+    }
+
+    function promptBulkDelete() {
+        var selected = getSelectedComps();
+        if (selected.length === 0) return;
+        if (bulkDeleteCount) bulkDeleteCount.textContent = selected.length;
+        if (bulkDeleteModal) bulkDeleteModal.style.display = 'flex';
+    }
+
+    function executeBulkDelete() {
+        if (!window.blitzkriegAuth || !window.blitzkriegAuth.isAdmin()) {
+            showToast('Admin permission required.', true);
+            return;
+        }
+        var selected = getSelectedComps();
+        var storagePaths = selected.filter(function(c) { return c.storagePath; }).map(function(c) { return c.storagePath; });
+
+        if (storagePaths.length === 0) {
+            showToast('No cloud templates selected.', true);
+            return;
+        }
+
+        bulkDeleteModal.style.display = 'none';
+        showSpinner();
+        showToast('Deleting ' + storagePaths.length + ' template(s)...');
+
+        window.cloudLibrary.deleteTemplates(storagePaths).then(function() {
+            hideSpinner();
+            showToast(storagePaths.length + ' template(s) deleted.');
+            toggleBulkMode(false);
+            loadLibrary();
+        }).catch(function(err) {
+            hideSpinner();
+            showToast('Bulk delete failed: ' + err.message, true);
+        });
+    }
+
     /* --------- Keyboard Shortcuts --------- */
 
     /**
@@ -2915,7 +3340,16 @@
             currentMoveCompInfo = null;
         }
 
+        if (bulkMoveModal) bulkMoveModal.style.display = 'none';
+        if (bulkDeleteModal) bulkDeleteModal.style.display = 'none';
+
+        // Exit bulk mode on Escape
+        if (bulkMode) toggleBulkMode(false);
+
         if (settingsModal) settingsModal.style.display = 'none';
+
+        var subDetailModal = document.getElementById('submission-detail-modal');
+        if (subDetailModal) subDetailModal.style.display = 'none';
     }
 
     /* --------- Submissions & Review Workflow --------- */
@@ -2991,7 +3425,7 @@
     }
 
     /**
-     * Load and render submissions grid
+     * Load and render submissions grid with visual thumbnails + preview frames
      * @param {string} statusFilter - 'pending', 'approved', 'rejected', or 'pending_review' (admin view)
      */
     function renderSubmissionsGrid(statusFilter) {
@@ -3007,43 +3441,115 @@
             .order('created_at', { ascending: false });
 
         if (isReviewMode) {
-            // Admin review: show all pending submissions
             query = query.eq('status', 'pending');
         } else {
-            // User view: show own submissions with filter
             query = query.eq('user_id', window.blitzkriegAuth.getUser().id)
                          .eq('status', statusFilter);
         }
 
-        query.then(function(res) {
-            hideSpinner();
+        query.then(async function(res) {
             if (res.error) {
+                hideSpinner();
                 showPlaceholder('Failed to load submissions.');
                 return;
             }
 
             var submissions = res.data || [];
             if (submissions.length === 0) {
+                hideSpinner();
                 var msg = isReviewMode ? 'No submissions pending review.' : 'No ' + statusFilter + ' submissions.';
                 showPlaceholder(msg);
                 return;
             }
 
+            // Sign thumbnail + preview frame URLs for all submissions
+            var thumbPaths = [];
+            var previewPaths = {}; // submissionId -> [paths]
+            submissions.forEach(function(sub) {
+                if (sub.storage_path) {
+                    thumbPaths.push(sub.storage_path + '/comp.png');
+                    // Check metadata for preview frame count
+                    var meta = sub.metadata || {};
+                    var frameCount = meta.previewFrames || meta.cloudPreviewFrameCount || 0;
+                    if (frameCount > 0) {
+                        var paths = [];
+                        for (var i = 0; i < frameCount; i++) {
+                            paths.push(sub.storage_path + '/preview/frame_' + i + '.png');
+                        }
+                        previewPaths[sub.id] = paths;
+                        thumbPaths = thumbPaths.concat(paths);
+                    }
+                }
+            });
+
+            var signedUrlMap = {};
+            if (thumbPaths.length > 0 && window.cloudLibrary && window.cloudLibrary.signPaths) {
+                try {
+                    signedUrlMap = await window.cloudLibrary.signPaths(thumbPaths);
+                } catch (e) {
+                    debugLog('Failed to sign submission thumbnails: ' + e.message, 'warn');
+                }
+            }
+
+            hideSpinner();
+
+            var currentUserId = window.blitzkriegAuth.getUser().id;
             var html = '';
             submissions.forEach(function(sub) {
                 var statusClass = 'status-' + sub.status;
                 var statusLabel = sub.status.charAt(0).toUpperCase() + sub.status.slice(1);
                 var dateStr = new Date(sub.created_at).toLocaleDateString();
+                var thumbUrl = sub.storage_path ? (signedUrlMap[sub.storage_path + '/comp.png'] || '') : '';
+                var nameInitial = (sub.template_name || '?').charAt(0).toUpperCase();
+                var meta = sub.metadata || {};
+                var frameCount = meta.previewFrames || meta.cloudPreviewFrameCount || 0;
+                var isOwnSubmission = sub.user_id === currentUserId;
 
-                html += '<div class="stash-item submission-card" data-submission-id="' + sub.id + '">';
+                html += '<div class="stash-item submission-card" data-submission-id="' + escapeHTML(sub.id) + '">';
+
+                // Thumbnail with status badge overlay
+                html += '<div class="submission-thumbnail">';
+                if (thumbUrl) {
+                    html += '<img src="' + escapeHTML(thumbUrl) + '" alt="' + escapeHTML(sub.template_name) + '" class="submission-thumb-img">';
+                    html += '<div class="submission-thumb-placeholder" style="display:none;">' + escapeHTML(nameInitial) + '</div>';
+                } else {
+                    html += '<div class="submission-thumb-placeholder">' + escapeHTML(nameInitial) + '</div>';
+                }
+                html += '<span class="status-badge-overlay ' + statusClass + '">' + statusLabel + '</span>';
+                html += '</div>';
+
+                // Preview frames strip
+                if (frameCount > 0 && previewPaths[sub.id]) {
+                    var hasFrames = false;
+                    var stripHtml = '<div class="submission-preview-strip">';
+                    previewPaths[sub.id].forEach(function(path) {
+                        var frameUrl = signedUrlMap[path];
+                        if (frameUrl) {
+                            hasFrames = true;
+                            stripHtml += '<img src="' + escapeHTML(frameUrl) + '" alt="Preview frame">';
+                        }
+                    });
+                    stripHtml += '</div>';
+                    if (hasFrames) html += stripHtml;
+                }
+
+                // Card body
+                html += '<div class="submission-card-body">';
                 html += '<div class="submission-card-header">';
                 html += '<span class="submission-name">' + escapeHTML(sub.template_name) + '</span>';
-                html += '<span class="status-badge ' + statusClass + '">' + statusLabel + '</span>';
                 html += '</div>';
                 html += '<div class="submission-card-meta">';
                 html += '<span class="submission-category">' + escapeHTML(sub.category) + '</span>';
                 html += '<span class="submission-date">' + dateStr + '</span>';
                 html += '</div>';
+
+                // Submitter info (for admin review mode)
+                if (isReviewMode && sub.metadata && sub.metadata.submitterName) {
+                    html += '<div class="submission-submitter">';
+                    html += '<span class="submitter-avatar">' + escapeHTML(sub.metadata.submitterName.charAt(0).toUpperCase()) + '</span>';
+                    html += '<span>' + escapeHTML(sub.metadata.submitterName) + '</span>';
+                    html += '</div>';
+                }
 
                 // Show rejection notes if rejected
                 if (sub.status === 'rejected' && sub.reviewer_notes) {
@@ -3052,19 +3558,214 @@
                     html += '</div>';
                 }
 
-                // Admin review actions
-                if (isReviewMode && isAdmin) {
+                // Admin actions — show on pending submissions if admin AND not own submission
+                if (isAdmin && sub.status === 'pending' && !isOwnSubmission) {
                     html += '<div class="submission-actions">';
                     html += '<button class="button-primary btn-approve" data-action="approve-submission" data-submission-id="' + escapeHTML(sub.id) + '">Approve</button>';
                     html += '<button class="button-danger btn-reject" data-action="reject-submission" data-submission-id="' + escapeHTML(sub.id) + '">Reject</button>';
                     html += '</div>';
                 }
 
-                html += '</div>';
+                // User actions — withdraw own pending submission
+                if (isOwnSubmission && sub.status === 'pending') {
+                    html += '<div class="submission-actions">';
+                    html += '<button class="button-danger btn-reject" data-action="withdraw-submission" data-submission-id="' + escapeHTML(sub.id) + '">Withdraw</button>';
+                    html += '</div>';
+                }
+
+                // User actions — resubmit rejected submission
+                if (isOwnSubmission && sub.status === 'rejected') {
+                    html += '<div class="submission-actions">';
+                    html += '<button class="button-primary btn-approve" data-action="resubmit-submission" data-submission-id="' + escapeHTML(sub.id) + '">Resubmit</button>';
+                    html += '</div>';
+                }
+
+                html += '</div>'; // .submission-card-body
+                html += '</div>'; // .submission-card
             });
 
             stashGrid.innerHTML = html;
+
+            // Bind error handlers for submission thumbnails (no inline onerror)
+            stashGrid.querySelectorAll('.submission-thumb-img').forEach(function(img) {
+                img.addEventListener('error', function() {
+                    this.style.display = 'none';
+                    var placeholder = this.parentElement.querySelector('.submission-thumb-placeholder');
+                    if (placeholder) placeholder.style.display = 'flex';
+                });
+            });
         });
+    }
+
+    /**
+     * Open submission detail modal — fetches submission data and shows full preview
+     */
+    function openSubmissionDetail(submissionId) {
+        var sb = window.blitzkriegSupabase;
+        if (!sb) return;
+
+        var detailModal = document.getElementById('submission-detail-modal');
+        var detailContent = document.getElementById('submission-detail-content');
+        if (!detailModal || !detailContent) return;
+
+        detailContent.innerHTML = '<p style="padding:32px;text-align:center;color:var(--text-muted);">Loading...</p>';
+        detailModal.style.display = 'flex';
+
+        sb.from('blitzkrieg_template_submissions')
+            .select('*')
+            .eq('id', submissionId)
+            .single()
+            .then(async function(res) {
+                if (res.error || !res.data) {
+                    detailContent.innerHTML = '<p style="padding:32px;text-align:center;color:var(--error);">Submission not found.</p>';
+                    return;
+                }
+
+                var sub = res.data;
+                var meta = sub.metadata || {};
+                var isAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
+
+                // Sign thumbnail + preview frames
+                var pathsToSign = [];
+                var previewFramePaths = [];
+                if (sub.storage_path) {
+                    pathsToSign.push(sub.storage_path + '/comp.png');
+                    var frameCount = meta.previewFrames || meta.cloudPreviewFrameCount || 0;
+                    for (var i = 0; i < frameCount; i++) {
+                        var framePath = sub.storage_path + '/preview/frame_' + i + '.png';
+                        pathsToSign.push(framePath);
+                        previewFramePaths.push(framePath);
+                    }
+                }
+
+                var signedMap = {};
+                if (pathsToSign.length > 0 && window.cloudLibrary && window.cloudLibrary.signPaths) {
+                    try { signedMap = await window.cloudLibrary.signPaths(pathsToSign); } catch(e) {}
+                }
+
+                var thumbUrl = sub.storage_path ? (signedMap[sub.storage_path + '/comp.png'] || '') : '';
+                var nameInitial = (sub.template_name || '?').charAt(0).toUpperCase();
+                var statusClass = 'status-' + sub.status;
+                var statusLabel = sub.status.charAt(0).toUpperCase() + sub.status.slice(1);
+                var dateStr = new Date(sub.created_at).toLocaleDateString();
+
+                var html = '';
+
+                // Preview area
+                html += '<div class="submission-detail-preview">';
+                if (thumbUrl) {
+                    html += '<img src="' + escapeHTML(thumbUrl) + '" alt="' + escapeHTML(sub.template_name) + '" id="submission-detail-main-img" class="submission-thumb-img">';
+                    html += '<div class="detail-thumb-placeholder" style="display:none;">' + escapeHTML(nameInitial) + '</div>';
+                } else {
+                    html += '<div class="detail-thumb-placeholder">' + escapeHTML(nameInitial) + '</div>';
+                }
+                html += '</div>';
+
+                // Preview frames strip
+                if (previewFramePaths.length > 0) {
+                    var hasAnyFrame = false;
+                    var framesHtml = '<div class="submission-detail-frames">';
+                    previewFramePaths.forEach(function(path) {
+                        var frameUrl = signedMap[path];
+                        if (frameUrl) {
+                            hasAnyFrame = true;
+                            framesHtml += '<img src="' + escapeHTML(frameUrl) + '" alt="Frame" data-full-url="' + escapeHTML(frameUrl) + '">';
+                        }
+                    });
+                    framesHtml += '</div>';
+                    if (hasAnyFrame) html += framesHtml;
+                }
+
+                // Body
+                html += '<div class="submission-detail-body">';
+                html += '<div class="submission-detail-title">' + escapeHTML(sub.template_name) + '</div>';
+                html += '<span class="submission-detail-status status-badge-overlay ' + statusClass + '">' + statusLabel + '</span>';
+
+                // Metadata grid
+                html += '<div class="submission-detail-meta">';
+                html += '<div class="submission-detail-meta-item"><span class="submission-detail-meta-label">Category</span><span class="submission-detail-meta-value">' + escapeHTML(sub.category) + '</span></div>';
+                html += '<div class="submission-detail-meta-item"><span class="submission-detail-meta-label">Submitted</span><span class="submission-detail-meta-value">' + escapeHTML(dateStr) + '</span></div>';
+                if (meta.duration) {
+                    html += '<div class="submission-detail-meta-item"><span class="submission-detail-meta-label">Duration</span><span class="submission-detail-meta-value">' + meta.duration.toFixed(1) + 's</span></div>';
+                }
+                if (meta.width && meta.height) {
+                    html += '<div class="submission-detail-meta-item"><span class="submission-detail-meta-label">Resolution</span><span class="submission-detail-meta-value">' + meta.width + ' x ' + meta.height + '</span></div>';
+                }
+                if (meta.frameRate) {
+                    html += '<div class="submission-detail-meta-item"><span class="submission-detail-meta-label">Frame Rate</span><span class="submission-detail-meta-value">' + meta.frameRate + ' fps</span></div>';
+                }
+                if (meta.submitterName) {
+                    html += '<div class="submission-detail-meta-item"><span class="submission-detail-meta-label">Submitter</span><span class="submission-detail-meta-value">' + escapeHTML(meta.submitterName) + '</span></div>';
+                }
+                html += '</div>';
+
+                // Rejection notes
+                if (sub.status === 'rejected' && sub.reviewer_notes) {
+                    html += '<div class="submission-detail-rejection"><strong>Rejection Feedback:</strong> ' + escapeHTML(sub.reviewer_notes) + '</div>';
+                }
+
+                // Admin actions for pending submissions (can't review own)
+                var detailCurrentUserId = window.blitzkriegAuth.getUser().id;
+                var detailIsOwn = sub.user_id === detailCurrentUserId;
+                if (isAdmin && sub.status === 'pending' && !detailIsOwn) {
+                    html += '<div class="submission-detail-actions">';
+                    html += '<button class="btn-detail-approve" data-action="approve-submission" data-submission-id="' + escapeHTML(sub.id) + '">Approve</button>';
+                    html += '<button class="btn-detail-reject" data-action="reject-submission" data-submission-id="' + escapeHTML(sub.id) + '">Reject</button>';
+                    html += '</div>';
+                }
+
+                // Own submission actions
+                if (detailIsOwn && sub.status === 'pending') {
+                    html += '<div class="submission-detail-actions">';
+                    html += '<button class="btn-detail-reject" data-action="withdraw-submission" data-submission-id="' + escapeHTML(sub.id) + '">Withdraw Submission</button>';
+                    html += '</div>';
+                }
+                if (detailIsOwn && sub.status === 'rejected') {
+                    html += '<div class="submission-detail-actions">';
+                    html += '<button class="btn-detail-approve" data-action="resubmit-submission" data-submission-id="' + escapeHTML(sub.id) + '">Resubmit for Review</button>';
+                    html += '</div>';
+                }
+
+                html += '</div>'; // .submission-detail-body
+
+                detailContent.innerHTML = html;
+
+                // Bind error handler for detail thumbnail
+                var detailImg = detailContent.querySelector('.submission-thumb-img');
+                if (detailImg) {
+                    detailImg.addEventListener('error', function() {
+                        this.style.display = 'none';
+                        var ph = this.parentElement.querySelector('.detail-thumb-placeholder');
+                        if (ph) ph.style.display = 'flex';
+                    });
+                }
+
+                // Click preview frame → swap main image
+                detailContent.querySelectorAll('.submission-detail-frames img').forEach(function(frameImg) {
+                    frameImg.addEventListener('click', function() {
+                        var mainImg = document.getElementById('submission-detail-main-img');
+                        if (mainImg) {
+                            mainImg.src = this.dataset.fullUrl;
+                        }
+                        // Highlight active frame
+                        detailContent.querySelectorAll('.submission-detail-frames img').forEach(function(f) { f.classList.remove('active-frame'); });
+                        this.classList.add('active-frame');
+                    });
+                });
+
+                // Bind all actions from detail modal
+                detailContent.querySelectorAll('[data-action]').forEach(function(btn) {
+                    btn.addEventListener('click', function() {
+                        var action = this.dataset.action;
+                        var sid = this.dataset.submissionId;
+                        detailModal.style.display = 'none';
+                        if (action === 'approve-submission') approveSubmission(sid);
+                        if (action === 'reject-submission') promptRejectSubmission(sid);
+                        if (action === 'withdraw-submission') withdrawSubmission(sid);
+                        if (action === 'resubmit-submission') resubmitSubmission(sid);
+                    });
+                });
+            });
     }
 
     /**
@@ -3089,6 +3790,14 @@
                 }
 
                 var sub = res.data;
+
+                // Prevent self-approval
+                if (sub.user_id === window.blitzkriegAuth.getUser().id) {
+                    hideSpinner();
+                    showToast('You cannot approve your own submission. Another admin must review it.', true);
+                    return;
+                }
+
                 var pendingPath = sub.storage_path;
                 var productionPath = sub.category + '/' + pendingPath.split('/').pop();
 
@@ -3150,7 +3859,14 @@
                             showToast('Submission approved and published!');
                             window.cloudLibrary.invalidateCache();
                             loadSubmissionCounts();
-                            renderSubmissionsGrid('pending_review');
+                            // Re-render whatever submission view is currently active
+                            if (activeCategory === '__review_pending') {
+                                renderSubmissionsGrid('pending_review');
+                            } else if (activeCategory.indexOf('__submissions_') === 0) {
+                                renderSubmissionsGrid(activeCategory.replace('__submissions_', ''));
+                            } else {
+                                renderSubmissionsGrid('pending_review');
+                            }
                         }
                     }).catch(function(err) {
                         hideSpinner();
@@ -3174,20 +3890,37 @@
      */
     function executeRejectSubmission(submissionId, notes) {
         var sb = window.blitzkriegSupabase;
-        if (!sb) return;
+        if (!sb || !window.blitzkriegAuth || !window.blitzkriegAuth.isAdmin()) {
+            showToast('You do not have permission to reject submissions.', true);
+            return;
+        }
 
         rejectSubmissionModal.style.display = 'none';
         showSpinner();
 
+        // Prevent self-rejection — must not be your own submission
         sb.from('blitzkrieg_template_submissions')
-            .update({
-                status: 'rejected',
-                reviewer_id: window.blitzkriegAuth.getUser().id,
-                reviewer_notes: notes || '',
-                reviewed_at: new Date().toISOString(),
-            })
+            .select('user_id')
             .eq('id', submissionId)
+            .single()
+            .then(function(checkRes) {
+                if (checkRes.data && checkRes.data.user_id === window.blitzkriegAuth.getUser().id) {
+                    hideSpinner();
+                    pendingRejectId = null;
+                    showToast('You cannot reject your own submission.', true);
+                    return;
+                }
+                return sb.from('blitzkrieg_template_submissions')
+                    .update({
+                        status: 'rejected',
+                        reviewer_id: window.blitzkriegAuth.getUser().id,
+                        reviewer_notes: notes || '',
+                        reviewed_at: new Date().toISOString(),
+                    })
+                    .eq('id', submissionId);
+            })
             .then(function(res) {
+                if (!res) return; // Self-rejection was blocked
                 hideSpinner();
                 pendingRejectId = null;
                 if (res.error) {
@@ -3195,11 +3928,136 @@
                 } else {
                     showToast('Submission rejected.');
                     loadSubmissionCounts();
-                    renderSubmissionsGrid('pending_review');
+                    // Re-render whatever submission view is currently active
+                    if (activeCategory === '__review_pending') {
+                        renderSubmissionsGrid('pending_review');
+                    } else if (activeCategory.indexOf('__submissions_') === 0) {
+                        renderSubmissionsGrid(activeCategory.replace('__submissions_', ''));
+                    } else {
+                        renderSubmissionsGrid('pending_review');
+                    }
                 }
             });
     }
 
+
+    /**
+     * Withdraw a pending submission (own submissions only).
+     * Deletes files from pending storage and removes the DB record.
+     */
+    function withdrawSubmission(submissionId) {
+        var sb = window.blitzkriegSupabase;
+        if (!sb || !window.blitzkriegAuth) return;
+
+        var userId = window.blitzkriegAuth.getUser().id;
+
+        // Verify it's the user's own pending submission
+        sb.from('blitzkrieg_template_submissions')
+            .select('*')
+            .eq('id', submissionId)
+            .eq('user_id', userId)
+            .eq('status', 'pending')
+            .single()
+            .then(async function(res) {
+                if (res.error || !res.data) {
+                    showToast('Cannot withdraw — submission not found or not yours.', true);
+                    return;
+                }
+
+                showSpinner();
+                showToast('Withdrawing submission...');
+
+                var sub = res.data;
+                // Delete files from pending storage
+                if (sub.storage_path) {
+                    try {
+                        var allFiles = await window.cloudLibrary.collectAllFilesForPath ?
+                            window.cloudLibrary.collectAllFilesForPath(sub.storage_path) : [];
+                        // Fallback: list and delete manually
+                        if (!allFiles || allFiles.length === 0) {
+                            var listRes = await sb.storage.from('blitzkrieg').list(sub.storage_path);
+                            if (listRes.data) {
+                                allFiles = listRes.data
+                                    .filter(function(f) { return f.id !== null; })
+                                    .map(function(f) { return sub.storage_path + '/' + f.name; });
+                                // Check subfolders
+                                var subFolders = listRes.data.filter(function(f) { return f.id === null; });
+                                for (var sf = 0; sf < subFolders.length; sf++) {
+                                    var subList = await sb.storage.from('blitzkrieg').list(sub.storage_path + '/' + subFolders[sf].name);
+                                    if (subList.data) {
+                                        subList.data.filter(function(f) { return f.id !== null; }).forEach(function(f) {
+                                            allFiles.push(sub.storage_path + '/' + subFolders[sf].name + '/' + f.name);
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        if (allFiles.length > 0) {
+                            await sb.storage.from('blitzkrieg').remove(allFiles);
+                        }
+                    } catch (e) {
+                        debugLog('Withdraw file cleanup warning: ' + e.message, 'warn');
+                    }
+                }
+
+                // Delete DB record
+                var delRes = await sb.from('blitzkrieg_template_submissions')
+                    .delete()
+                    .eq('id', submissionId)
+                    .eq('user_id', userId);
+
+                hideSpinner();
+                if (delRes.error) {
+                    showToast('Withdraw failed: ' + delRes.error.message, true);
+                } else {
+                    showToast('Submission withdrawn.');
+                    loadSubmissionCounts();
+                    // Re-render current view
+                    if (activeCategory === '__review_pending') {
+                        renderSubmissionsGrid('pending_review');
+                    } else if (activeCategory.indexOf('__submissions_') === 0) {
+                        renderSubmissionsGrid(activeCategory.replace('__submissions_', ''));
+                    }
+                }
+            });
+    }
+
+    /**
+     * Resubmit a rejected submission — resets status to 'pending' for admin review.
+     */
+    function resubmitSubmission(submissionId) {
+        var sb = window.blitzkriegSupabase;
+        if (!sb || !window.blitzkriegAuth) return;
+
+        var userId = window.blitzkriegAuth.getUser().id;
+
+        showSpinner();
+        showToast('Resubmitting for review...');
+
+        sb.from('blitzkrieg_template_submissions')
+            .update({
+                status: 'pending',
+                reviewer_id: null,
+                reviewer_notes: null,
+                reviewed_at: null,
+            })
+            .eq('id', submissionId)
+            .eq('user_id', userId)
+            .eq('status', 'rejected')
+            .then(function(res) {
+                hideSpinner();
+                if (res.error) {
+                    showToast('Resubmit failed: ' + res.error.message, true);
+                } else {
+                    showToast('Submission resubmitted for review!');
+                    loadSubmissionCounts();
+                    // Navigate to pending view
+                    activeCategory = '__submissions_pending';
+                    updateNavActiveState();
+                    renderSubmissionsGrid('pending');
+                }
+            });
+    }
 
     /* --------- Analytics Dashboard (Admin) — Multi-view Drilldown --------- */
 
