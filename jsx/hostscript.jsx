@@ -2244,21 +2244,34 @@ function generateThumbnailAndPreviewFromAep(tempAepPath, maxFrames) {
  * @returns {string} JSON: {frameCount: N} or {error: "..."}
  */
 function generatePreviewsToDisk(aepPath, outputDir) {
+    // Suppress all AE dialogs during batch generation — on Windows,
+    // saveFrameToPng shows modal "Could not create file" dialogs instead
+    // of throwing catchable errors, blocking the entire script.
+    var _dialogsSuppressed = false;
+    try { app.beginSuppressDialogs(); _dialogsSuppressed = true; } catch (sdErr) { /* AE < 13.8 */ }
+
     try {
         var aepFile = new File(aepPath);
         if (!aepFile.exists) {
+            if (_dialogsSuppressed) try { app.endSuppressDialogs(false); } catch(e) {}
             return JSON.stringify({error: 'AEP file not found: ' + aepPath});
         }
 
-        // Ensure output directory exists
+        // Ensure output directory exists — use fsName for Windows-native paths
         var outFolder = new Folder(outputDir);
         if (!outFolder.exists) outFolder.create();
+        // Double-check: if the folder still doesn't exist, bail
+        if (!outFolder.exists) {
+            if (_dialogsSuppressed) try { app.endSuppressDialogs(false); } catch(e) {}
+            return JSON.stringify({error: 'Cannot create output dir: ' + outFolder.fsName});
+        }
 
         var importOptions = new ImportOptions(aepFile);
         importOptions.importAs = ImportAsType.PROJECT;
         var importedItem = app.project.importFile(importOptions);
 
         if (!importedItem) {
+            if (_dialogsSuppressed) try { app.endSuppressDialogs(false); } catch(e) {}
             return JSON.stringify({error: 'Could not import AEP'});
         }
 
@@ -2284,6 +2297,7 @@ function generatePreviewsToDisk(aepPath, outputDir) {
 
         if (!mainComp) {
             if (importedItem) importedItem.remove();
+            if (_dialogsSuppressed) try { app.endSuppressDialogs(false); } catch(e) {}
             return JSON.stringify({error: 'No composition found in AEP'});
         }
 
@@ -2328,6 +2342,7 @@ function generatePreviewsToDisk(aepPath, outputDir) {
         if (!thumbFile.exists) {
             if (importedItem) importedItem.remove();
             try { app.purge(PurgeTarget.ALL_CACHES); } catch (purgeErr) {}
+            if (_dialogsSuppressed) try { app.endSuppressDialogs(false); } catch(e) {}
             return JSON.stringify({error: hasMissingFootage ?
                 'Comp has missing footage and failed to render' :
                 'Failed to render thumbnail frame'});
@@ -2340,6 +2355,7 @@ function generatePreviewsToDisk(aepPath, outputDir) {
             if (importedItem) importedItem.remove();
             if (aepFile.exists) aepFile.remove();
             try { app.purge(PurgeTarget.ALL_CACHES); } catch (purgeErr) {}
+            if (_dialogsSuppressed) try { app.endSuppressDialogs(false); } catch(e) {}
             return JSON.stringify({
                 frameCount: 0,
                 duration: compDuration,
@@ -2396,6 +2412,9 @@ function generatePreviewsToDisk(aepPath, outputDir) {
         // Free AE caches to prevent RAM buildup during batch generation
         try { app.purge(PurgeTarget.ALL_CACHES); } catch (purgeErr) {}
 
+        // Re-enable dialogs (false = discard suppressed messages silently)
+        if (_dialogsSuppressed) try { app.endSuppressDialogs(false); } catch(e) {}
+
         return JSON.stringify({
             frameCount: previewFrameCount,
             duration: compDuration,
@@ -2405,6 +2424,7 @@ function generatePreviewsToDisk(aepPath, outputDir) {
     } catch (e) {
         // Ensure cleanup even on unexpected errors
         try { app.purge(PurgeTarget.ALL_CACHES); } catch (purgeErr) {}
+        if (_dialogsSuppressed) try { app.endSuppressDialogs(false); } catch(e2) {}
         return JSON.stringify({error: e.toString()});
     }
 }

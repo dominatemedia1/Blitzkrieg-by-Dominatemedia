@@ -37,7 +37,7 @@ js/
   CSInterface.js         # Adobe CEP JS bridge (vendored)
   analytics.js           # Analytics
 jsx/
-  hostscript.jsx         # ExtendScript — runs in After Effects host process
+  hostscript.jsx         # ExtendScript — runs in After Effects host process; includes JSON polyfill (always replaces native JSON), AE version detection, and macOS path utilities
 README.md
 ```
 
@@ -71,6 +71,9 @@ Data flow:
 - **Sort order values**: Valid values are `name-asc`, `name-desc`, `date-desc`, `date-asc`, `duration-desc`, `duration-asc`; default is `name-asc`; persisted to `blitzkrieg_sort_order`
 - **Modal structure**: All modals in `index.html` use `.modal-overlay > .modal-box` with action buttons following `.button-primary` / `.button-secondary` / `.button-danger` classes; modal shells start `display:none` and are toggled by JS
 - **Auth screen structure**: Auth screens (login, denied, offline) use `.auth-screen > .auth-container` with `.auth-logo`, `.auth-title`, `.auth-subtitle`; start `display:none`; z-index 3000 places them above all other UI
+- **ExtendScript path encoding**: Use `normalizeFsPath(path)` for macOS paths — encodes ONLY space→`%20`, `#`→`%23`, `?`→`%3F`; do NOT use `encodeURIComponent` (breaks non-ASCII chars in ExtendScript); Windows drive-letter paths are returned unchanged
+- **ExtendScript path helpers**: Use `buildPath(parent, child)` (extracts `fsName` from Folder/File objects + normalizes), `folderFromPath(fsPath)` and `fileFromPath(fsPath)` (each tries normalized path then falls back to raw path)
+- **ExtendScript safe decode**: Use `safeDecodeURI(str)` instead of bare `decodeURI()` — catches URIError when folder names contain literal `%` (e.g., "50%OFF")
 
 <!-- END AUTO-MANAGED -->
 
@@ -100,6 +103,10 @@ Data flow:
 - **Cross-platform file URL**: `pathToFileUrl(path)` normalises macOS (`/path`) → `file:///path` and Windows (`C:\path`) → `file:///C:/path` with URL-safe encoding
 - **Virtual nav categories**: Sidebar `data-category` values drive view switching — real categories are strings from storage; virtual views use reserved values: `All`, `Favorites`, `Recent`, `__submissions_pending`, `__submissions_approved`, `__submissions_rejected`, `__review_pending`, `__analytics`
 - **Admin-only sidebar sections**: `#review-section` and `#analytics-section` have class `nav-section-admin-only` and start `display:none`; shown via `querySelectorAll('.nav-section-admin-only')` when user is admin. `#new-category-inline` is hidden separately (inline `display:none`, no admin class) and shown by `initNewCategoryForm()` for admins
+- **ExtendScript JSON polyfill**: `hostscript.jsx` unconditionally replaces `JSON = {}` with a Crockford JSON2 polyfill — never conditional — because AE 2024/2025 on macOS ships a native `JSON.stringify` that drops all keys/values (producing `[{: ,: }]`). A self-test verifies `JSON.stringify({"a":"b"})` contains `"a"` on every load.
+- **AE version detection**: `AE_VERSION_INFO` global object set at startup via `app.version`; fields: `majorVersion`, `minorVersion`, `isAE2024` (majorVersion===24), `isAE2025` (majorVersion===25), `isAE2025OrLater` (majorVersion>=25); exposed via `getAEVersionInfo()` returning JSON string
+- **robustGetFolders pattern**: `robustGetFolders(parentFolder)` tries 4 strategies for macOS `getFiles()` reliability — function filter, unfiltered + instanceof check, recreate Folder from `fsName`, then URI-encode spaces in path; always returns array (never throws)
+- **robustFindAep pattern**: `robustFindAep(compFolder)` tries 4 strategies — glob `"*.aep"`, all files + manual extension check (skips `._` macOS resource forks), recreate from `fsName`, URI-encode spaces; returns first matching `File` or `null`
 
 <!-- END AUTO-MANAGED -->
 
