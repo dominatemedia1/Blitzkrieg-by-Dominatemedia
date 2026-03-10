@@ -91,11 +91,12 @@ Data flow:
 - **Stash guard flag**: `stashInProgress = true` during stash/generate operations to suppress focus-triggered `loadLibrary()` calls that would interfere
 - **Bulk selection state**: `bulkSelectedIds` (Set of uniqueIds) + `bulkMode` boolean; toggled separately from normal single-item actions
 - **Favorites and recents**: `favoriteComps` (array of uniqueIds) and `recentComps` (array of `{uniqueId, timestamp}`, capped at `MAX_RECENT_COMPS=10`) tracked in `main.js`
-- **Archive detection**: `fetchAllMetadata()` stores RAR/ZIP/7z files found at bucket root in `listTemplates._archives` for separate UI handling
+- **Archive detection**: `fetchAllMetadata()` stores RAR/ZIP/7z files found at bucket root in `listTemplates._archives` for separate UI handling; root items named `pending` and `.emptyFolderPlaceholder` are always excluded from category listing
+- **Comp object shape**: `buildCompsFromMetadata()` produces objects with fields: `name`, `category`, `uniqueId`, `folderName`, `thumbUrl`, `thumbUrlAlt`, `duration`, `width`, `height`, `frameRate`, `previewFrames` (always `null` — lazy signed on hover), `previewFrameCount`, `storagePath`
 - **Two-stage download**: `downloadTemplate()` tries `storagePath/template.aep` directly first; falls back to listing the folder and finding any `.aep` file
 - **Cross-platform file URL**: `pathToFileUrl(path)` normalises macOS (`/path`) → `file:///path` and Windows (`C:\path`) → `file:///C:/path` with URL-safe encoding
 - **Virtual nav categories**: Sidebar `data-category` values drive view switching — real categories are strings from storage; virtual views use reserved values: `All`, `Favorites`, `Recent`, `__submissions_pending`, `__submissions_approved`, `__submissions_rejected`, `__review_pending`, `__analytics`
-- **Admin-only sidebar sections**: `#review-section`, `#analytics-section`, and `#new-category-inline` are `display:none` by default with class `nav-section-admin-only`; `auth.js` shows them based on user role after login
+- **Admin-only sidebar sections**: `#review-section` and `#analytics-section` have class `nav-section-admin-only` and start `display:none`; shown via `querySelectorAll('.nav-section-admin-only')` when user is admin. `#new-category-inline` is hidden separately (inline `display:none`, no admin class) and shown by `initNewCategoryForm()` for admins
 
 <!-- END AUTO-MANAGED -->
 
