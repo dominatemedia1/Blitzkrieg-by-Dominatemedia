@@ -375,6 +375,45 @@ function buildPath(parent, child) {
 }
 
 /**
+ * Returns a safe temp Folder for writing files.
+ * On macOS, Folder.temp resolves to /var/folders/.../T/TemporaryItems/ which
+ * has OS-managed cleanup and permission restrictions that prevent After Effects'
+ * rendering engine (saveFrameToPng) from writing files reliably.
+ * Tries multiple fallbacks: /tmp, ~/Library/Caches, desktop, then Folder.temp.
+ * Validates writability with a test file before returning.
+ */
+function getSafeTempFolder() {
+    var candidates = [];
+    // macOS: prefer /tmp (always writable, no TemporaryItems restrictions)
+    if ($.os.indexOf('Mac') !== -1 || $.os.indexOf('Macintosh') !== -1) {
+        candidates.push(new Folder('/tmp'));
+        // Fallback: user Library/Caches
+        try { candidates.push(new Folder(Folder.userData.fsName + '/Caches')); } catch(e) {}
+    }
+    // Cross-platform: desktop as last resort before Folder.temp
+    try { candidates.push(Folder.desktop); } catch(e) {}
+    candidates.push(Folder.temp);
+
+    for (var ci = 0; ci < candidates.length; ci++) {
+        var f = candidates[ci];
+        if (!f || !f.exists) continue;
+        // Write test: verify AE can actually create files here
+        try {
+            var testFile = new File(f.fsName + '/_blitz_write_test_' + Date.now() + '.tmp');
+            testFile.open('w');
+            testFile.write('ok');
+            testFile.close();
+            if (testFile.exists) {
+                testFile.remove();
+                return f;
+            }
+        } catch (wErr) { /* try next candidate */ }
+    }
+    // Absolute last resort
+    return Folder.temp;
+}
+
+/**
  * Creates a Folder object from an fsName path, with fallback.
  * First tries the normalized (URI-encoded) path, then falls back to the raw path.
  * This ensures folders are found even if normalizeFsPath produces an unexpected result.
@@ -978,7 +1017,7 @@ function stashSelectedComp(libraryPath, categoryName) {
         // --- Save the project first if it hasn't been saved ---
         if (!originalProjectFile) {
             // Project hasn't been saved yet - we need to save it first
-            var tempProjectFile = new File(buildPath(Folder.temp, "blitzkrieg_temp_" + timestamp + ".aep"));
+            var tempProjectFile = new File(buildPath(getSafeTempFolder(), "blitzkrieg_temp_" + timestamp + ".aep"));
             app.project.save(tempProjectFile);
             originalProjectFile = tempProjectFile;
         } else if (projectWasDirty) {
@@ -1811,7 +1850,7 @@ function saveBlitzkriegSettings(settingsJson) {
  * Reuses the existing stashSelectedComp logic but targets temp folder.
  */
 function stashSelectedCompToTemp(categoryName) {
-    var tempFolder = Folder.temp;
+    var tempFolder = getSafeTempFolder();
     var tempLibPath = tempFolder.fsName + '/blitzkrieg_temp';
 
     // Create temp directory
@@ -2007,7 +2046,7 @@ function decodeBase64FileToBinary(base64FilePath, outputPath) {
  */
 function writeTempFileFromBase64(base64Data, fileName) {
     try {
-        var tempFolder = Folder.temp;
+        var tempFolder = getSafeTempFolder();
         var tempFile = new File(tempFolder.fsName + '/blitzkrieg_import_' + fileName);
 
         // Decode base64
@@ -2106,7 +2145,7 @@ function generateThumbnailFromAep(tempAepPath) {
             mainComp.workAreaStart,
             mainComp.workAreaStart + (mainComp.workAreaDuration * 0.25)
         ];
-        var tempThumb = new File(Folder.temp.fsName + '/blitzkrieg_thumb_' + (new Date()).getTime() + '.png');
+        var tempThumb = new File(getSafeTempFolder().fsName + '/blitzkrieg_thumb_' + (new Date()).getTime() + '.png');
         for (var tti = 0; tti < thumbTimes.length; tti++) {
             try {
                 mainComp.saveFrameToPng(thumbTimes[tti], tempThumb);
@@ -2180,7 +2219,7 @@ function generateThumbnailAndPreviewFromAep(tempAepPath, maxFrames) {
             mainComp.workAreaStart,
             mainComp.workAreaStart + (mainComp.workAreaDuration * 0.25)
         ];
-        var tempThumb = new File(Folder.temp.fsName + '/blitzkrieg_thumb_' + (new Date()).getTime() + '.png');
+        var tempThumb = new File(getSafeTempFolder().fsName + '/blitzkrieg_thumb_' + (new Date()).getTime() + '.png');
         for (var tpi = 0; tpi < thumbTimesTP.length; tpi++) {
             try {
                 mainComp.saveFrameToPng(thumbTimesTP[tpi], tempThumb);
@@ -2206,7 +2245,7 @@ function generateThumbnailAndPreviewFromAep(tempAepPath, maxFrames) {
                 try {
                     var progress = (actualFrameCount > 1) ? (pf / (actualFrameCount - 1)) : 0;
                     var previewTime = mainComp.workAreaStart + (progress * compDuration);
-                    var frameFile = new File(Folder.temp.fsName + '/blitzkrieg_frame_' + pf + '_' + (new Date()).getTime() + '.png');
+                    var frameFile = new File(getSafeTempFolder().fsName + '/blitzkrieg_frame_' + pf + '_' + (new Date()).getTime() + '.png');
                     mainComp.saveFrameToPng(previewTime, frameFile);
                     if (frameFile.exists) {
                         frames.push(readFileAsBase64(frameFile));
@@ -2340,12 +2379,22 @@ function generatePreviewsToDisk(aepPath, outputDir) {
         }
 
         if (!thumbFile.exists) {
+            // If missing footage caused the failure, return a skip result
+            // instead of an error — the comp simply can't be rendered.
             if (importedItem) importedItem.remove();
             try { app.purge(PurgeTarget.ALL_CACHES); } catch (purgeErr) {}
             if (_dialogsSuppressed) try { app.endSuppressDialogs(false); } catch(e) {}
-            return JSON.stringify({error: hasMissingFootage ?
-                'Comp has missing footage and failed to render' :
-                'Failed to render thumbnail frame'});
+            if (hasMissingFootage) {
+                return JSON.stringify({
+                    frameCount: 0,
+                    duration: mainComp.workAreaDuration,
+                    width: mainComp.width,
+                    height: mainComp.height,
+                    skipped: true,
+                    skipReason: 'missing_footage'
+                });
+            }
+            return JSON.stringify({error: 'Failed to render thumbnail frame'});
         }
 
         // If comp has missing footage, return thumbnail-only (skip preview frames
@@ -2439,4 +2488,40 @@ function removeFolderRecursive(folder) {
         }
     }
     folder.remove();
+}
+
+/**
+ * Get the extension root path (parent of jsx/ folder where this script lives).
+ */
+function getExtensionRootPath() {
+    try {
+        var scriptFile = new File($.fileName);
+        var jsxFolder = scriptFile.parent;
+        var rootFolder = jsxFolder.parent;
+        return rootFolder.fsName;
+    } catch (e) {
+        return JSON.stringify({error: e.toString()});
+    }
+}
+
+/**
+ * Write a text file to disk. Creates parent directories if needed.
+ * Used by the OTA update system to write JS/CSS files.
+ */
+function writeUpdateFile(filePath, content) {
+    try {
+        var f = new File(filePath);
+        // Create parent directories if they don't exist
+        var parentFolder = f.parent;
+        if (!parentFolder.exists) {
+            parentFolder.create();
+        }
+        f.open('w');
+        f.encoding = 'UTF-8';
+        f.write(content);
+        f.close();
+        return 'ok';
+    } catch (e) {
+        return JSON.stringify({error: e.toString()});
+    }
 }

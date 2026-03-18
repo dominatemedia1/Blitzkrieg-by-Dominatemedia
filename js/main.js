@@ -3,6 +3,7 @@
     'use strict';
 
     var csInterface = new CSInterface();
+    var BLITZKRIEG_LOCAL_VERSION = '1.2.0';
 
     // CEP bridge detection — window.__adobe_cep__ is the native bridge to ExtendScript.
     // csInterface.evalScript is always a function (prototype), but it THROWS if __adobe_cep__ is missing.
@@ -172,6 +173,11 @@
         if (level === 'error') console.error('Blitzkrieg:', message);
         else if (level === 'warn') console.warn('Blitzkrieg:', message);
         else console.log('Blitzkrieg:', message);
+
+        // Auto-report errors and warnings to server
+        if ((level === 'error' || level === 'warn') && window.blitzkriegAnalytics && window.blitzkriegAnalytics.reportError) {
+            window.blitzkriegAnalytics.reportError(message, level, { source: 'debugLog' });
+        }
     }
 
     function toggleDebugLog() {
@@ -596,6 +602,17 @@
             });
         }
 
+        // Global error handler — catches uncaught exceptions
+        window.onerror = function(msg, url, line, col, err) {
+            if (window.blitzkriegAnalytics && window.blitzkriegAnalytics.reportError) {
+                window.blitzkriegAnalytics.reportError(
+                    String(msg),
+                    'error',
+                    { source: 'window.onerror', url: url, line: line, col: col, stack: err ? err.stack : '' }
+                );
+            }
+        };
+
         // Show logged-in user info in sidebar
         var userInfo = document.getElementById('sidebar-user-info');
         var userName = document.getElementById('sidebar-user-name');
@@ -606,6 +623,28 @@
                 userName.textContent = tm.full_name || (user ? user.email : '');
                 userInfo.style.display = 'block';
             }
+        }
+
+        // Bind invite button
+        var inviteBtn = document.getElementById('invite-blitzkrieg-btn');
+        if (inviteBtn) {
+            inviteBtn.addEventListener('click', function() {
+                var inviteUrl = 'https://portal.dominatemedia.io/apply/blitzkrieg';
+                // Add UTM params with referrer's name
+                var tmRef = window.blitzkriegAuth ? window.blitzkriegAuth.getTeamMember() : null;
+                if (tmRef && tmRef.full_name) {
+                    var refName = tmRef.full_name.trim().toLowerCase().replace(/\s+/g, '-');
+                    inviteUrl += '?utm_source=blitzkrieg&utm_medium=referral&utm_campaign=invite-a-friend&utm_content=' + encodeURIComponent(refName);
+                }
+                try {
+                    navigator.clipboard.writeText(inviteUrl).then(function() {
+                        showToast('Invite link copied to clipboard!');
+                    });
+                } catch (e) {
+                    // Fallback for CEP environments without clipboard API
+                    showToast('Invite link: ' + inviteUrl);
+                }
+            });
         }
 
         // Show footer for all users, but adjust button text for non-admins
@@ -720,15 +759,22 @@
 
     /* --------- Utility Functions --------- */
     function copyToClipboard(text) {
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(text);
-        } else {
+        // CEP's Chromium often lacks Clipboard API permissions, so navigator.clipboard.writeText
+        // returns a rejected Promise. Always fall back to execCommand on failure.
+        var fallback = function() {
             var textarea = document.createElement('textarea');
             textarea.value = text;
+            textarea.style.position = 'fixed';
+            textarea.style.opacity = '0';
             document.body.appendChild(textarea);
             textarea.select();
             document.execCommand('copy');
             document.body.removeChild(textarea);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(function() {}, fallback);
+        } else {
+            fallback();
         }
     }
 
@@ -851,6 +897,16 @@
         // Note: categoryFiltersContainer is inside sidebarNav, so the sidebarNav
         // click listener (below) already handles category clicks via event delegation
         stashGrid.addEventListener('click', handleStashGridClick);
+
+        // Change event delegation for toggle switches (team management)
+        stashGrid.addEventListener('change', function(e) {
+            var input = e.target;
+            if (!input || input.tagName !== 'INPUT') return;
+            var action = input.dataset.analyticsAction;
+            if (action === 'toggle-access' || action === 'toggle-admin') {
+                handleToggleAccess(input.dataset.memberId, input.dataset.field, input.dataset.memberName, input);
+            }
+        });
 
         // Double-click to import
         stashGrid.addEventListener('dblclick', handleStashGridDoubleClick);
@@ -1822,18 +1878,20 @@
                 }
                 if (!comp) { comp = { storagePath: storagePath, name: compName }; }
 
-                generateCloudThumbnail(comp).then(function() {
+                generateCloudThumbnail(comp).then(function(result) {
                     generated = true;
                     generating = false;
-                    // Remove generating indicator
                     var gi = item.querySelector('.generating-indicator');
                     if (gi) gi.remove();
-                    // Invalidate cache so next load picks up new frames
-                    window.cloudLibrary.invalidateCache();
-                    debugLog('Auto-generated preview for ' + compName, 'success');
+                    if (result && result.skipped) {
+                        debugLog('Auto-generate skipped for ' + compName + ': ' + (result.reason || 'unrenderable'), 'warn');
+                    } else {
+                        window.cloudLibrary.invalidateCache();
+                        debugLog('Auto-generated preview for ' + compName, 'success');
+                    }
                 }).catch(function(err) {
                     generating = false;
-                    generated = true; // Mark as "done" so hover doesn't retry failed comps
+                    generated = true;
                     var gi = item.querySelector('.generating-indicator');
                     if (gi) gi.remove();
                     debugLog('Auto-generate failed for ' + compName + ': ' + err.message, 'warn');
@@ -3384,35 +3442,26 @@
         var userId = window.blitzkriegAuth.getUser().id;
         var isAdmin = window.blitzkriegAuth.isAdmin();
 
-        // Load user's own submission counts
+        // User's own submission counts (single query, count per status client-side)
         sb.from('blitzkrieg_template_submissions')
-            .select('status', { count: 'exact', head: true })
+            .select('status')
             .eq('user_id', userId)
-            .eq('status', 'pending')
             .then(function(res) {
-                var el = document.getElementById('my-submissions-pending-count');
-                if (el) el.textContent = res.count || 0;
+                var counts = { pending: 0, approved: 0, rejected: 0 };
+                (res.data || []).forEach(function(row) {
+                    if (counts.hasOwnProperty(row.status)) counts[row.status]++;
+                });
+                var pendingEl = document.getElementById('my-submissions-pending-count');
+                var approvedEl = document.getElementById('my-submissions-approved-count');
+                var rejectedEl = document.getElementById('my-submissions-rejected-count');
+                if (pendingEl) pendingEl.textContent = counts.pending;
+                if (approvedEl) approvedEl.textContent = counts.approved;
+                if (rejectedEl) rejectedEl.textContent = counts.rejected;
+            }).catch(function(err) {
+                debugLog('Failed to load user submission counts: ' + err.message, 'warn');
             });
 
-        sb.from('blitzkrieg_template_submissions')
-            .select('status', { count: 'exact', head: true })
-            .eq('user_id', userId)
-            .eq('status', 'approved')
-            .then(function(res) {
-                var el = document.getElementById('my-submissions-approved-count');
-                if (el) el.textContent = res.count || 0;
-            });
-
-        sb.from('blitzkrieg_template_submissions')
-            .select('status', { count: 'exact', head: true })
-            .eq('user_id', userId)
-            .eq('status', 'rejected')
-            .then(function(res) {
-                var el = document.getElementById('my-submissions-rejected-count');
-                if (el) el.textContent = res.count || 0;
-            });
-
-        // Load admin review queue count
+        // Admin review queue count
         if (isAdmin) {
             sb.from('blitzkrieg_template_submissions')
                 .select('status', { count: 'exact', head: true })
@@ -3420,6 +3469,8 @@
                 .then(function(res) {
                     var el = document.getElementById('review-pending-count');
                     if (el) el.textContent = res.count || 0;
+                }).catch(function(err) {
+                    debugLog('Failed to load review queue count: ' + err.message, 'warn');
                 });
         }
     }
@@ -3558,8 +3609,8 @@
                     html += '</div>';
                 }
 
-                // Admin actions — show on pending submissions if admin AND not own submission
-                if (isAdmin && sub.status === 'pending' && !isOwnSubmission) {
+                // Admin actions — show on pending submissions if admin
+                if (isAdmin && sub.status === 'pending') {
                     html += '<div class="submission-actions">';
                     html += '<button class="button-primary btn-approve" data-action="approve-submission" data-submission-id="' + escapeHTML(sub.id) + '">Approve</button>';
                     html += '<button class="button-danger btn-reject" data-action="reject-submission" data-submission-id="' + escapeHTML(sub.id) + '">Reject</button>';
@@ -3594,6 +3645,10 @@
                     if (placeholder) placeholder.style.display = 'flex';
                 });
             });
+        }).catch(function(err) {
+            hideSpinner();
+            showPlaceholder('Failed to load submissions: ' + (err.message || 'Unknown error'));
+            debugLog('renderSubmissionsGrid error: ' + (err.message || err), 'error');
         });
     }
 
@@ -3704,10 +3759,8 @@
                     html += '<div class="submission-detail-rejection"><strong>Rejection Feedback:</strong> ' + escapeHTML(sub.reviewer_notes) + '</div>';
                 }
 
-                // Admin actions for pending submissions (can't review own)
-                var detailCurrentUserId = window.blitzkriegAuth.getUser().id;
-                var detailIsOwn = sub.user_id === detailCurrentUserId;
-                if (isAdmin && sub.status === 'pending' && !detailIsOwn) {
+                // Admin actions for pending submissions
+                if (isAdmin && sub.status === 'pending') {
                     html += '<div class="submission-detail-actions">';
                     html += '<button class="btn-detail-approve" data-action="approve-submission" data-submission-id="' + escapeHTML(sub.id) + '">Approve</button>';
                     html += '<button class="btn-detail-reject" data-action="reject-submission" data-submission-id="' + escapeHTML(sub.id) + '">Reject</button>';
@@ -3765,6 +3818,9 @@
                         if (action === 'resubmit-submission') resubmitSubmission(sid);
                     });
                 });
+            }).catch(function(err) {
+                detailContent.innerHTML = '<p style="padding:32px;text-align:center;color:var(--error);">Failed to load submission details.</p>';
+                debugLog('openSubmissionDetail error: ' + (err.message || err), 'error');
             });
     }
 
@@ -3790,13 +3846,6 @@
                 }
 
                 var sub = res.data;
-
-                // Prevent self-approval
-                if (sub.user_id === window.blitzkriegAuth.getUser().id) {
-                    hideSpinner();
-                    showToast('You cannot approve your own submission. Another admin must review it.', true);
-                    return;
-                }
 
                 var pendingPath = sub.storage_path;
                 var productionPath = sub.category + '/' + pendingPath.split('/').pop();
@@ -3898,29 +3947,15 @@
         rejectSubmissionModal.style.display = 'none';
         showSpinner();
 
-        // Prevent self-rejection — must not be your own submission
         sb.from('blitzkrieg_template_submissions')
-            .select('user_id')
-            .eq('id', submissionId)
-            .single()
-            .then(function(checkRes) {
-                if (checkRes.data && checkRes.data.user_id === window.blitzkriegAuth.getUser().id) {
-                    hideSpinner();
-                    pendingRejectId = null;
-                    showToast('You cannot reject your own submission.', true);
-                    return;
-                }
-                return sb.from('blitzkrieg_template_submissions')
-                    .update({
-                        status: 'rejected',
-                        reviewer_id: window.blitzkriegAuth.getUser().id,
-                        reviewer_notes: notes || '',
-                        reviewed_at: new Date().toISOString(),
-                    })
-                    .eq('id', submissionId);
+            .update({
+                status: 'rejected',
+                reviewer_id: window.blitzkriegAuth.getUser().id,
+                reviewer_notes: notes || '',
+                reviewed_at: new Date().toISOString(),
             })
+            .eq('id', submissionId)
             .then(function(res) {
-                if (!res) return; // Self-rejection was blocked
                 hideSpinner();
                 pendingRejectId = null;
                 if (res.error) {
@@ -3937,6 +3972,10 @@
                         renderSubmissionsGrid('pending_review');
                     }
                 }
+            }).catch(function(err) {
+                hideSpinner();
+                pendingRejectId = null;
+                showToast('Rejection failed: ' + err.message, true);
             });
     }
 
@@ -4141,8 +4180,16 @@
         opts = opts || {};
         var cls = 'analytics-stat-card' + (opts.clickable ? ' clickable' : '');
         var attrs = opts.action ? ' data-analytics-action="' + opts.action + '"' : '';
+        var trendHtml = '';
+        if (opts.trend && opts.trend.pct !== undefined) {
+            var dir = opts.trend.direction || 'neutral';
+            var arrow = dir === 'up' ? '↑' : dir === 'down' ? '↓' : '–';
+            var pctStr = Math.abs(opts.trend.pct).toFixed(0) + '%';
+            trendHtml = '<div class="stat-trend ' + dir + '">' + arrow + ' ' + pctStr + '</div>';
+        }
         return '<div class="' + cls + '"' + attrs + '>' +
             '<div class="stat-value">' + escapeHTML(String(value)) + '</div>' +
+            trendHtml +
             '<div class="stat-label">' + escapeHTML(label) + '</div>' +
             '</div>';
     }
@@ -4171,18 +4218,20 @@
         }
         var maxVal = 1;
         dailyStats.forEach(function(d) {
-            maxVal = Math.max(maxVal, Number(d.import_count) || 0);
+            maxVal = Math.max(maxVal, Number(d.import_count) || 0, Number(d.session_count) || 0);
         });
         var showLabels = dailyStats.length <= 14;
         var html = '<div class="css-bar-chart-container">';
-        html += '<div class="css-bar-chart-title">Daily Imports</div>';
+        html += '<div class="css-bar-chart-title">Daily Activity</div>';
         html += '<div class="css-bar-chart">';
         dailyStats.forEach(function(d) {
-            var importH = Math.max(((Number(d.import_count) || 0) / maxVal) * 100, 1.5);
+            var importH = Math.max(((Number(d.import_count) || 0) / maxVal) * 100, 3);
+            var sessionH = Math.max(((Number(d.session_count) || 0) / maxVal) * 100, 3);
             var dateLabel = new Date(d.stat_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-            html += '<div class="chart-bar-group" title="' + dateLabel + ': ' + (d.import_count || 0) + ' imports">';
+            html += '<div class="chart-bar-group" title="' + dateLabel + ': ' + (d.import_count || 0) + ' imports, ' + (d.session_count || 0) + ' sessions">';
             html += '<div class="chart-bar-pair">';
             html += '<div class="chart-bar imports" style="height:' + importH + '%"></div>';
+            html += '<div class="chart-bar sessions" style="height:' + sessionH + '%"></div>';
             html += '</div>';
             if (showLabels) html += '<div class="chart-bar-label">' + dateLabel + '</div>';
             html += '</div>';
@@ -4190,6 +4239,7 @@
         html += '</div>';
         html += '<div class="chart-legend">';
         html += '<span class="chart-legend-item"><span class="chart-legend-dot imports"></span>Imports</span>';
+        html += '<span class="chart-legend-item"><span class="chart-legend-dot sessions"></span>Sessions</span>';
         html += '</div>';
         html += '</div>';
         return html;
@@ -4259,10 +4309,15 @@
             return;
         }
 
+        // Dismiss any stuck spinners/modals from previous operations
+        hideSpinner();
+        var stuckModal = document.getElementById('submission-detail-modal');
+        if (stuckModal) stuckModal.style.display = 'none';
+
         if (!analyticsView) analyticsView = 'overview';
 
         // Build shell HTML: header bar with tabs + date range
-        var activeTab = (analyticsView === 'overview' || analyticsView === 'template-detail') ? 'overview' : 'editors';
+        var activeTab = analyticsView === 'team' ? 'team' : analyticsView === 'errors' ? 'errors' : (analyticsView === 'overview' || analyticsView === 'template-detail') ? 'overview' : 'editors';
         var html = '<div class="analytics-dashboard">';
 
         // Header bar
@@ -4270,6 +4325,8 @@
         html += '<div class="analytics-tabs">';
         html += '<button class="analytics-tab' + (activeTab === 'overview' ? ' active' : '') + '" data-analytics-action="goto-overview">Overview</button>';
         html += '<button class="analytics-tab' + (activeTab === 'editors' ? ' active' : '') + '" data-analytics-action="goto-editors">Editors</button>';
+        html += '<button class="analytics-tab' + (activeTab === 'team' ? ' active' : '') + '" data-analytics-action="goto-team">Team</button>';
+        html += '<button class="analytics-tab' + (activeTab === 'errors' ? ' active' : '') + '" data-analytics-action="goto-errors">Errors</button>';
         html += '</div>';
         html += '<div class="analytics-date-range">';
         ['7d', '14d', '30d', '90d'].forEach(function(key) {
@@ -4293,6 +4350,220 @@
             case 'editors': renderAnalyticsEditors(); break;
             case 'editor-detail': renderAnalyticsEditorDetail(); break;
             case 'template-detail': renderAnalyticsTemplateDetail(); break;
+            case 'team': renderAnalyticsTeam(); break;
+            case 'errors': renderAnalyticsErrors(); break;
+        }
+    }
+
+    function computeTrend(current, previous) {
+        var cur = Number(current) || 0;
+        var prev = Number(previous) || 0;
+        if (prev === 0 && cur === 0) return { pct: 0, direction: 'neutral' };
+        if (prev === 0) return { pct: 100, direction: 'up' };
+        var pct = ((cur - prev) / prev) * 100;
+        var direction = pct > 0 ? 'up' : pct < 0 ? 'down' : 'neutral';
+        return { pct: Math.abs(pct), direction: direction };
+    }
+
+    function buildCategoryChart(categoryStats) {
+        if (!categoryStats || categoryStats.length === 0) {
+            return '';
+        }
+        var maxVal = 1;
+        categoryStats.forEach(function(c) { maxVal = Math.max(maxVal, Number(c.import_count) || 0); });
+
+        var html = '<div class="category-chart">';
+        html += '<div class="css-bar-chart-title">Imports by Category</div>';
+        categoryStats.forEach(function(c) {
+            var pct = Math.max(((Number(c.import_count) || 0) / maxVal) * 100, 2);
+            html += '<div class="category-bar-row">';
+            html += '<div class="category-bar-label">' + escapeHTML(c.template_category || 'Unknown') + '</div>';
+            html += '<div class="category-bar-track"><div class="category-bar-fill" style="width:' + pct + '%"></div></div>';
+            html += '<div class="category-bar-value">' + analyticsFormatNumber(c.import_count) + '</div>';
+            html += '</div>';
+        });
+        html += '</div>';
+        return html;
+    }
+
+    // ── SVG World Map Data ──
+    // Continent outlines generated from real geographic coordinates via equirectangular projection
+    // viewBox is 200x100: x = ((lng+180)/360)*200, y = ((90-lat)/180)*100
+    var CONTINENT_PATHS = [
+        // North America (Alaska through Mexico)
+        'M 19.4,18.3 L 20.6,16.7 L 23.3,15.6 L 27.2,14.4 L 30,13.9 L 33.3,14.4 L 36.1,16.1 L 38.3,17.2 L 40,17.8 L 43.3,18.3 L 45.6,19.4 L 47.2,21.1 L 48.3,22.8 L 49.4,24.4 L 50.6,25 L 51.7,26.1 L 52.2,27.2 L 51.1,28.3 L 50,29.4 L 49.4,30.6 L 48.3,31.1 L 47.2,32.2 L 46.1,33.3 L 45,34.4 L 43.9,35.6 L 42.8,36.7 L 42.2,37.8 L 41.7,38.9 L 41.1,40 L 40.6,41.1 L 39.4,41.7 L 38.3,40.6 L 37.2,39.4 L 36.1,38.3 L 35.6,37.2 L 35,36.1 L 33.9,35 L 32.8,33.9 L 31.1,33.3 L 29.4,32.8 L 28.3,31.7 L 26.7,30.6 L 25,29.4 L 23.3,28.3 L 21.7,26.7 L 20,24.4 L 19.4,21.7 Z',
+        // Central America
+        'M 40.6,41.1 L 41.7,42.2 L 42.8,43.3 L 43.3,44.4 L 43.9,45 L 44.4,45.6 L 43.9,46.7 L 43.3,47.2 L 42.8,47.8 L 42.2,47.2 L 41.7,46.7 L 41.1,45.6 L 40.6,44.4 L 40,43.3 L 39.4,42.2 Z',
+        // South America
+        'M 44.4,47.8 L 46.1,47.2 L 47.8,46.7 L 50,47.8 L 52.2,48.9 L 53.9,50 L 55,51.7 L 55.6,53.3 L 55,55 L 54.4,56.7 L 53.9,58.3 L 52.8,60 L 51.7,61.7 L 50.6,63.3 L 49.4,65 L 48.3,66.7 L 47.2,68.3 L 46.1,70 L 45,71.7 L 43.9,73.3 L 42.8,75 L 41.7,76.7 L 40.6,77.8 L 39.4,78.3 L 38.3,77.2 L 37.8,75.6 L 37.2,73.9 L 36.7,72.2 L 36.1,70 L 35.6,67.8 L 35.6,65.6 L 35.6,63.3 L 36.1,61.1 L 36.7,58.9 L 37.2,56.7 L 37.8,54.4 L 38.9,52.2 L 40,50.6 L 41.1,49.4 L 42.2,48.3 Z',
+        // Europe
+        'M 94.4,18.9 L 95.6,17.8 L 97.2,16.7 L 98.9,17.2 L 100,17.8 L 101.1,18.3 L 102.8,18.9 L 103.9,20 L 105.6,20.6 L 107.2,21.1 L 108.3,22.2 L 108.9,23.3 L 109.4,24.4 L 108.9,25.6 L 108.3,26.7 L 107.2,27.8 L 105.6,28.3 L 103.9,28.9 L 102.2,29.4 L 100.6,30 L 98.9,30.6 L 97.2,30 L 95.6,29.4 L 93.9,28.9 L 92.2,28.3 L 91.1,27.2 L 90.6,26.1 L 91.1,25 L 91.7,23.9 L 92.2,22.8 L 92.8,21.7 L 93.3,20.6 Z',
+        // Scandinavian Peninsula
+        'M 101.7,13.9 L 103.3,12.8 L 105,13.3 L 106.1,14.4 L 106.7,15.6 L 106.1,16.7 L 105,17.8 L 103.3,18.3 L 101.7,17.8 L 100.6,16.7 L 100.6,15.6 Z',
+        // Africa
+        'M 95,35 L 96.7,33.9 L 98.3,33.3 L 100,33.9 L 101.7,33.3 L 103.3,33.9 L 105,34.4 L 106.7,35.6 L 108.3,37.2 L 110,38.9 L 111.1,40.6 L 111.7,42.8 L 112.2,45 L 112.2,47.2 L 111.7,49.4 L 111.1,51.1 L 110,53.3 L 108.3,55 L 106.7,56.7 L 105,58.3 L 103.3,59.4 L 101.7,60.6 L 100,61.1 L 98.3,61.7 L 96.7,61.1 L 95,60 L 93.3,58.3 L 91.7,56.7 L 90.6,55 L 89.4,52.8 L 88.9,50.6 L 88.3,48.3 L 88.3,45.6 L 88.9,43.3 L 89.4,41.1 L 90.6,38.9 L 91.7,37.2 L 93.3,35.6 Z',
+        // Asia (Russia + mainland)
+        'M 110,18.3 L 113.3,16.7 L 116.7,15 L 120,13.9 L 123.3,13.3 L 126.7,12.8 L 130,12.2 L 133.3,12.2 L 136.7,12.8 L 140,13.3 L 143.3,13.9 L 146.7,14.4 L 150,15.6 L 153.3,16.7 L 156.7,17.8 L 160,18.9 L 162.8,20 L 165,21.7 L 166.7,23.3 L 167.8,25 L 167.8,26.7 L 166.7,28.3 L 165,30 L 162.8,31.1 L 160.6,32.2 L 158.3,33.3 L 155.6,33.9 L 152.8,34.4 L 150,33.9 L 147.2,33.3 L 144.4,32.8 L 141.7,32.2 L 138.9,31.7 L 136.1,31.1 L 133.3,31.1 L 130.6,31.7 L 127.8,32.2 L 125,32.8 L 122.2,32.8 L 119.4,32.2 L 116.7,31.7 L 113.9,30.6 L 111.7,29.4 L 110,27.8 L 109.4,25.6 L 109.4,23.3 L 109.4,21.1 Z',
+        // Middle East
+        'M 113.9,30.6 L 116.1,32.2 L 117.8,33.3 L 118.9,35 L 119.4,36.7 L 118.9,38.3 L 117.8,39.4 L 116.1,38.9 L 114.4,37.8 L 113.3,36.7 L 112.2,35 L 112.2,33.3 Z',
+        // Indian subcontinent
+        'M 122.2,33.3 L 124.4,34.4 L 126.7,35.6 L 128.3,37.2 L 129.4,38.9 L 130,40.6 L 130,42.2 L 129.4,43.9 L 128.3,45 L 126.7,45.6 L 125,45 L 123.3,43.9 L 121.7,42.2 L 120.6,40.6 L 120,38.9 L 120,37.2 L 120.6,35.6 Z',
+        // Southeast Asia / Indochina
+        'M 140,33.9 L 142.2,35 L 143.9,36.7 L 145,38.3 L 145.6,40 L 146.1,41.7 L 145.6,43.3 L 144.4,44.4 L 142.8,45 L 141.1,44.4 L 139.4,43.3 L 138.3,41.7 L 137.8,40 L 138.3,38.3 L 138.9,36.7 Z',
+        // Indonesia / Philippines
+        'M 147.2,45 L 150,44.4 L 152.8,45 L 155.6,46.1 L 158.3,47.2 L 160,48.3 L 161.1,50 L 160.6,51.7 L 158.9,52.2 L 156.7,51.7 L 154.4,50.6 L 152.2,49.4 L 150,48.3 L 148.3,47.2 L 147.2,46.1 Z',
+        // Japan
+        'M 165.6,22.8 L 167.2,21.7 L 168.3,22.8 L 168.9,24.4 L 168.9,26.1 L 168.3,27.8 L 167.2,28.3 L 165.6,27.2 L 165,25.6 L 165,24.4 Z',
+        // Australia
+        'M 152.2,61.1 L 155.6,60 L 158.9,60 L 162.2,60.6 L 165.6,61.7 L 168.3,63.3 L 170.6,65 L 172.2,66.7 L 173.3,68.9 L 173.3,71.1 L 172.8,73.3 L 171.7,75 L 170,76.1 L 168.3,76.7 L 165.6,76.7 L 162.8,76.1 L 160,75 L 157.8,73.3 L 155.6,71.7 L 153.9,69.4 L 152.8,67.2 L 152.2,65 L 152.2,62.8 Z',
+        // Greenland
+        'M 57.2,7.2 L 60,5.6 L 62.8,5 L 65.6,5.6 L 67.8,7.2 L 68.3,8.9 L 67.8,10.6 L 66.1,11.7 L 63.9,12.2 L 61.7,11.7 L 59.4,10.6 L 58.3,8.9 Z',
+        // UK + Ireland
+        'M 96.1,19.4 L 97.2,18.3 L 98.3,18.9 L 98.3,20 L 97.2,20.6 L 96.1,20 Z'
+    ];
+
+    function geoToSvg(lat, lng, svgWidth, svgHeight) {
+        var x = ((lng + 180) / 360) * svgWidth;
+        var y = ((90 - lat) / 180) * svgHeight;
+        return { x: x, y: y };
+    }
+
+    function buildCommandMap(editorLocations, svgWidth, svgHeight) {
+        svgWidth = svgWidth || 200;
+        svgHeight = svgHeight || 100;
+        var html = '<div class="command-map-container">';
+        html += '<svg viewBox="0 0 200 100" class="command-map-svg" preserveAspectRatio="xMidYMid meet">';
+
+        // Grid lines
+        var gridLngs = [-150, -120, -90, -60, -30, 0, 30, 60, 90, 120, 150];
+        var gridLats = [60, 30, 0, -30, -60];
+        gridLngs.forEach(function(lng) {
+            var x = ((lng + 180) / 360) * 200;
+            html += '<line x1="' + x + '" y1="0" x2="' + x + '" y2="100" class="map-grid-line"/>';
+        });
+        gridLats.forEach(function(lat) {
+            var y = ((90 - lat) / 180) * 100;
+            html += '<line x1="0" y1="' + y + '" x2="200" y2="' + y + '" class="map-grid-line"/>';
+        });
+
+        // Continents
+        html += '<g class="map-continents">';
+        CONTINENT_PATHS.forEach(function(d) {
+            html += '<path d="' + d + '"/>';
+        });
+        html += '</g>';
+
+        // Editor dots
+        if (editorLocations && editorLocations.length > 0) {
+            editorLocations.forEach(function(ed) {
+                if (ed.lat == null || ed.lng == null) return;
+                var pos = geoToSvg(ed.lat, ed.lng, 200, 100);
+                var cls = ed.is_online ? 'map-dot-online' : 'map-dot-offline';
+                var dataAttrs = ' data-name="' + escapeHTML(ed.full_name || '') +
+                    '" data-city="' + escapeHTML(ed.city || '') +
+                    '" data-country="' + escapeHTML(ed.country || '') +
+                    '" data-last="' + escapeHTML(ed.last_active || '') + '"';
+                if (ed.is_online) {
+                    html += '<circle cx="' + pos.x.toFixed(1) + '" cy="' + pos.y.toFixed(1) + '" r="2.5" class="' + cls + '"' + dataAttrs + '>';
+                    html += '<animate attributeName="r" values="2;3.5;2" dur="2s" repeatCount="indefinite"/>';
+                    html += '<animate attributeName="opacity" values="1;0.6;1" dur="2s" repeatCount="indefinite"/>';
+                    html += '</circle>';
+                } else {
+                    html += '<circle cx="' + pos.x.toFixed(1) + '" cy="' + pos.y.toFixed(1) + '" r="2" class="' + cls + '"' + dataAttrs + '/>';
+                }
+            });
+        }
+
+        html += '</svg>';
+        html += '<div class="map-tooltip" style="display:none"></div>';
+
+        if (!editorLocations || editorLocations.length === 0) {
+            html += '<div class="map-empty-state">Editor locations appear as team members open Blitzkrieg</div>';
+        }
+        html += '</div>';
+        return html;
+    }
+
+    function buildEditorsTicker(editorLocations) {
+        if (!editorLocations || editorLocations.length === 0) return '';
+        var online = editorLocations.filter(function(e) { return e.is_online; });
+        if (online.length === 0) return '';
+
+        var html = '<div class="editors-ticker">';
+        online.forEach(function(ed) {
+            var bgColor = analyticsAvatarColor(ed.full_name || '');
+            var initials = analyticsGetInitials(ed.full_name || '?');
+            var city = ed.city ? ed.city : '';
+            var ago = analyticsFormatTimeAgo(ed.last_active);
+            html += '<div class="ticker-editor">';
+            html += '<div class="ticker-avatar" style="background:' + bgColor + '">' + initials + '</div>';
+            html += '<div class="ticker-info">';
+            html += '<span class="ticker-name">' + escapeHTML(ed.full_name || 'Unknown') + '</span>';
+            if (city) html += ' <span class="ticker-city">' + escapeHTML(city) + '</span>';
+            html += ' <span class="ticker-ago">' + ago + '</span>';
+            html += '</div></div>';
+        });
+        html += '</div>';
+        return html;
+    }
+
+    var COMPACT_STAT_ICONS = {
+        imports: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 2v9m0 0L4 7.5M8 11l4-3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 13h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
+        editors: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="5" r="3" stroke="currentColor" stroke-width="1.5"/><path d="M2.5 14c0-3 2.5-5 5.5-5s5.5 2 5.5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
+        avg: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 12l4-5 3 3 5-7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+        sessions: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5.5" stroke="currentColor" stroke-width="1.5"/><path d="M8 5v3.5l2.5 1.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+        templates: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="2" y="2" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="9" y="2" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="2" y="9" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="9" y="9" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.5"/></svg>',
+        submissions: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M4 12V4a1 1 0 011-1h6a1 1 0 011 1v8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M2 12h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M8 7v3m0-3l-1.5 1.5M8 7l1.5 1.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+    };
+
+    function buildCompactStatCard(value, label, opts) {
+        opts = opts || {};
+        var cls = 'analytics-stat-card-compact' + (opts.clickable ? ' clickable' : '');
+        var attrs = opts.action ? ' data-analytics-action="' + opts.action + '"' : '';
+        var iconSvg = opts.icon && COMPACT_STAT_ICONS[opts.icon] ? COMPACT_STAT_ICONS[opts.icon] : '';
+        var iconHtml = iconSvg ? '<div class="compact-stat-icon">' + iconSvg + '</div>' : '';
+        var trendHtml = '';
+        if (opts.trend && opts.trend.pct !== undefined) {
+            var dir = opts.trend.direction || 'neutral';
+            var arrow = dir === 'up' ? '↑' : dir === 'down' ? '↓' : '';
+            var pctStr = Math.abs(opts.trend.pct).toFixed(0) + '%';
+            trendHtml = '<span class="compact-trend ' + dir + '">' + arrow + ' ' + pctStr + '</span>';
+        }
+        return '<div class="' + cls + '"' + attrs + '>' +
+            iconHtml +
+            '<div class="compact-stat-value">' + escapeHTML(String(value)) + '</div>' +
+            trendHtml +
+            '<div class="compact-stat-label">' + escapeHTML(label) + '</div>' +
+            '</div>';
+    }
+
+    function initMapTooltips(container) {
+        var tooltip = container.querySelector('.map-tooltip');
+        if (!tooltip) return;
+        var dots = container.querySelectorAll('.map-dot-online, .map-dot-offline');
+        for (var i = 0; i < dots.length; i++) {
+            (function(dot) {
+                dot.addEventListener('mouseenter', function(e) {
+                    var name = dot.getAttribute('data-name') || 'Unknown';
+                    var city = dot.getAttribute('data-city') || '';
+                    var country = dot.getAttribute('data-country') || '';
+                    var lastActive = dot.getAttribute('data-last') || '';
+                    var loc = city ? (city + (country ? ', ' + country : '')) : (country || '');
+                    var ago = lastActive ? analyticsFormatTimeAgo(lastActive) : '';
+                    tooltip.innerHTML = '<strong>' + escapeHTML(name) + '</strong>' +
+                        (loc ? '<br>' + escapeHTML(loc) : '') +
+                        (ago ? '<br><span style="color:var(--text-muted)">Active ' + ago + '</span>' : '');
+                    tooltip.style.display = 'block';
+                    // Position near the dot
+                    var svgRect = container.querySelector('.command-map-svg').getBoundingClientRect();
+                    var dotRect = dot.getBoundingClientRect();
+                    tooltip.style.left = (dotRect.left - svgRect.left + dotRect.width / 2) + 'px';
+                    tooltip.style.top = (dotRect.top - svgRect.top - 40) + 'px';
+                });
+                dot.addEventListener('mouseleave', function() {
+                    tooltip.style.display = 'none';
+                });
+            })(dots[i]);
         }
     }
 
@@ -4304,21 +4575,42 @@
 
         contentEl.innerHTML = '<div style="text-align:center;padding:40px 0"><div class="analytics-skeleton" style="width:60px;height:60px;margin:0 auto;border-radius:50%"></div></div>';
 
+        var days = ANALYTICS_PERIOD_DAYS[analyticsDateRange] || 30;
         var startDate = analyticsStartDate();
         var endDate = new Date().toISOString();
 
-        Promise.all([
+        // Previous period for trend comparison
+        var prevEndDate = startDate;
+        var prevStartDate = new Date(Date.now() - days * 2 * 24 * 60 * 60 * 1000).toISOString();
+
+        var rpcCalls = [
             sb.rpc('get_blitzkrieg_summary', { p_start_date: startDate, p_end_date: endDate }),
             sb.rpc('get_blitzkrieg_daily_stats', { p_start_date: startDate, p_end_date: endDate }),
             sb.rpc('get_blitzkrieg_top_templates', { p_start_date: startDate, p_limit: 10 }),
             sb.rpc('get_blitzkrieg_user_stats', { p_start_date: startDate }),
-        ]).then(function(results) {
+            sb.rpc('get_blitzkrieg_summary', { p_start_date: prevStartDate, p_end_date: prevEndDate }),
+        ];
+
+        // Category stats (new RPC — graceful fallback if not deployed yet)
+        var categoryPromise = sb.rpc('get_blitzkrieg_category_stats', { p_start_date: startDate, p_end_date: endDate })
+            .then(function(r) { return r; }, function() { return { data: null }; });
+
+        // Editor locations for command map (graceful fallback)
+        var locationsPromise = sb.rpc('get_blitzkrieg_editor_locations')
+            .then(function(r) { return r; }, function() { return { data: null }; });
+
+        Promise.all(rpcCalls.concat([categoryPromise, locationsPromise])).then(function(results) {
             var summary = (results[0].data && results[0].data[0]) ? results[0].data[0] : {
                 total_imports: 0, active_users: 0, avg_imports_per_user: 0, total_sessions: 0, unique_templates: 0, pending_submissions: 0
             };
             var dailyStats = results[1].data || [];
             var topTemplates = results[2].data || [];
             var userStats = results[3].data || [];
+            var prevSummary = (results[4].data && results[4].data[0]) ? results[4].data[0] : {
+                total_imports: 0, active_users: 0, avg_imports_per_user: 0, total_sessions: 0, unique_templates: 0, pending_submissions: 0
+            };
+            var categoryStats = results[5].data || [];
+            var editorLocations = results[6] ? (results[6].data || []) : [];
 
             // Cache for editors tab
             analyticsCache.summary = summary;
@@ -4326,52 +4618,143 @@
             analyticsCache.topTemplates = topTemplates;
             analyticsCache.userStats = userStats;
 
-            var days = ANALYTICS_PERIOD_DAYS[analyticsDateRange] || 30;
+            // Compute trends
+            var trends = {
+                imports: computeTrend(summary.total_imports, prevSummary.total_imports),
+                users: computeTrend(summary.active_users, prevSummary.active_users),
+                avg: computeTrend(summary.avg_imports_per_user, prevSummary.avg_imports_per_user),
+                sessions: computeTrend(summary.total_sessions, prevSummary.total_sessions),
+                templates: computeTrend(summary.unique_templates, prevSummary.unique_templates),
+                submissions: computeTrend(summary.pending_submissions, prevSummary.pending_submissions),
+            };
+
+            var onlineCount = 0;
+            editorLocations.forEach(function(e) { if (e.is_online) onlineCount++; });
 
             var html = '';
 
-            // 6 KPI Cards (3x2 grid)
-            html += '<div class="analytics-stat-cards-3col">';
-            html += buildStatCard(analyticsFormatNumber(summary.total_imports), 'Total Imports');
-            html += buildStatCard(analyticsFormatNumber(summary.active_users), 'Active Editors', { clickable: true, action: 'goto-editors' });
-            html += buildStatCard(analyticsFormatNumber(summary.avg_imports_per_user), 'Avg Imports/Editor');
-            html += buildStatCard(analyticsFormatNumber(summary.total_sessions), 'Total Sessions');
-            html += buildStatCard(analyticsFormatNumber(summary.unique_templates), 'Unique Templates');
-            html += buildStatCard(analyticsFormatNumber(summary.pending_submissions), 'Pending Submissions');
+            // ── Command Center Header ──
+            html += '<div class="command-center-header">';
+            html += '<div class="command-center-title">';
+            html += '<span class="command-title-text">Blitzkrieg Command Center</span>';
+            if (onlineCount > 0) {
+                html += '<span class="live-dot"></span>';
+                html += '<span class="live-label">' + onlineCount + ' online</span>';
+            }
+            html += '</div>';
+            html += '<div class="command-center-timestamp">' + new Date().toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + '</div>';
             html += '</div>';
 
-            // Daily Activity Bar Chart
-            html += buildCSSBarChart(dailyStats);
+            // ── Live SVG World Map ──
+            html += buildCommandMap(editorLocations);
 
-            // Top 10 Templates Table
-            if (topTemplates.length > 0) {
-                html += '<div class="analytics-table-section">';
-                html += '<h3 class="analytics-table-title">Top Templates (' + days + ' days)</h3>';
-                html += '<table class="analytics-table">';
-                html += '<thead><tr><th>#</th><th>Template</th><th>Category</th><th style="text-align:right">Imports</th><th style="text-align:right">Users</th></tr></thead>';
-                html += '<tbody>';
-                topTemplates.forEach(function(t, i) {
-                    html += '<tr class="clickable-row" data-analytics-action="goto-template" data-template-name="' +
-                        escapeHTML(t.template_name || '') + '" data-template-category="' + escapeHTML(t.template_category || '') + '">';
-                    html += '<td style="color:var(--text-faint)">' + (i + 1) + '</td>';
-                    html += '<td class="template-name-link">' + escapeHTML(t.template_name || 'Unknown') + '</td>';
-                    html += '<td>' + escapeHTML(t.template_category || '-') + '</td>';
-                    html += '<td style="text-align:right">' + analyticsFormatNumber(t.import_count) + '</td>';
-                    html += '<td style="text-align:right">' + (t.unique_users || 0) + '</td>';
-                    html += '</tr>';
+            // ── Active Editors Ticker ──
+            html += buildEditorsTicker(editorLocations);
+
+            // ── 6 KPI Cards (compact single row) ──
+            html += '<div class="analytics-stat-cards-6col">';
+            html += buildCompactStatCard(analyticsFormatNumber(summary.total_imports), 'Imports', { icon: 'imports', trend: trends.imports });
+            html += buildCompactStatCard(analyticsFormatNumber(summary.active_users), 'Editors', { icon: 'editors', clickable: true, action: 'goto-editors', trend: trends.users });
+            html += buildCompactStatCard(analyticsFormatNumber(summary.avg_imports_per_user), 'Avg/Editor', { icon: 'avg', trend: trends.avg });
+            html += buildCompactStatCard(analyticsFormatNumber(summary.total_sessions), 'Sessions', { icon: 'sessions', trend: trends.sessions });
+            html += buildCompactStatCard(analyticsFormatNumber(summary.unique_templates), 'Templates', { icon: 'templates', trend: trends.templates });
+            html += buildCompactStatCard(analyticsFormatNumber(summary.pending_submissions), 'Submissions', { icon: 'submissions', trend: trends.submissions });
+            html += '</div>';
+
+            // ── Two-column: Daily Activity + Editor Leaderboard ──
+            html += '<div class="analytics-two-col">';
+
+            // LEFT: Daily Activity + Category Breakdown
+            html += '<div class="analytics-col">';
+            html += buildCSSBarChart(dailyStats);
+            html += buildCategoryChart(categoryStats);
+            html += '</div>';
+
+            // RIGHT: Editor Leaderboard + Recent Submissions
+            html += '<div class="analytics-col">';
+            html += '<div class="analytics-table-section">';
+            html += '<h3 class="analytics-table-title">Editor Leaderboard</h3>';
+            if (userStats.length > 0) {
+                var sorted = userStats.slice().sort(function(a, b) { return (Number(b.import_count) || 0) - (Number(a.import_count) || 0); });
+                html += '<div class="leaderboard-list">';
+                sorted.forEach(function(user, i) {
+                    var bgColor = analyticsAvatarColor(user.full_name || '');
+                    var initials = analyticsGetInitials(user.full_name || 'Unknown');
+                    var rank = i + 1;
+                    var rankCls = rank <= 3 ? 'top-' + rank : '';
+                    html += '<div class="leaderboard-row clickable-row" data-analytics-action="goto-editor" data-editor-id="' +
+                        escapeHTML(user.user_id) + '" data-editor-name="' + escapeHTML(user.full_name || 'Unknown') + '">';
+                    html += '<div class="leaderboard-rank ' + rankCls + '">' + rank + '</div>';
+                    html += '<div class="leaderboard-avatar" style="background:' + bgColor + '">' + initials + '</div>';
+                    html += '<div class="leaderboard-info">';
+                    html += '<div class="leaderboard-name">' + escapeHTML(user.full_name || 'Unknown') + '</div>';
+                    html += '<div class="leaderboard-meta">' + analyticsFormatNumber(user.import_count) + ' imports · ' +
+                        analyticsFormatNumber(user.session_count) + ' sessions · ' +
+                        analyticsFormatNumber(user.active_days) + ' days</div>';
+                    html += '</div>';
+                    html += '<div class="leaderboard-stat">' + analyticsFormatNumber(user.import_count) + '</div>';
+                    html += '</div>';
                 });
-                html += '</tbody></table></div>';
+                html += '</div>';
             } else {
-                html += '<p class="placeholder-text">No template usage data yet.</p>';
+                html += '<p class="placeholder-text">No editor activity.</p>';
             }
+            html += '</div>';
+
+            // Recent Submissions feed (loaded async)
+            html += '<div class="analytics-table-section">';
+            html += '<h3 class="analytics-table-title">Recent Submissions</h3>';
+            html += '<div id="overview-recent-submissions"><div style="text-align:center;padding:16px"><div class="analytics-skeleton" style="width:40px;height:40px;margin:0 auto;border-radius:50%"></div></div></div>';
+            html += '</div>';
+
+            html += '</div>'; // .analytics-col right
+
+            html += '</div>'; // .analytics-two-col
 
             contentEl.innerHTML = html;
+
+            // Init map tooltips
+            var mapContainer = contentEl.querySelector('.command-map-container');
+            if (mapContainer) initMapTooltips(mapContainer);
+
+            // Load recent submissions async
+            sb.from('blitzkrieg_template_submissions')
+                .select('id, template_name, category, status, created_at, reviewed_at, metadata, user_id')
+                .order('created_at', { ascending: false })
+                .limit(10)
+                .then(function(res) {
+                    var el = document.getElementById('overview-recent-submissions');
+                    if (!el) return;
+                    var subs = res.data || [];
+                    if (subs.length === 0) {
+                        el.innerHTML = '<p class="placeholder-text">No submissions yet.</p>';
+                        return;
+                    }
+                    var sHtml = '<div class="submissions-feed">';
+                    subs.forEach(function(sub) {
+                        var statusCls = 'feed-status-' + sub.status;
+                        var statusLabel = sub.status.charAt(0).toUpperCase() + sub.status.slice(1);
+                        var timeAgo = analyticsFormatTimeAgo(sub.created_at);
+                        var submitter = (sub.metadata && sub.metadata.submitterName) ? sub.metadata.submitterName : 'Unknown';
+                        sHtml += '<div class="feed-row">';
+                        sHtml += '<div class="feed-status-dot ' + statusCls + '"></div>';
+                        sHtml += '<div class="feed-content">';
+                        sHtml += '<span class="feed-template">' + escapeHTML(sub.template_name || 'Untitled') + '</span>';
+                        sHtml += ' <span class="feed-category">' + escapeHTML(sub.category || '') + '</span>';
+                        sHtml += '<div class="feed-meta">by ' + escapeHTML(submitter) + ' · ' + timeAgo + ' · <span class="' + statusCls + '">' + statusLabel + '</span></div>';
+                        sHtml += '</div>';
+                        sHtml += '</div>';
+                    });
+                    sHtml += '</div>';
+                    el.innerHTML = sHtml;
+                });
         }).catch(function(err) {
             contentEl.innerHTML = '<p class="placeholder-text">Analytics error: ' + escapeHTML(err.message) + '</p>';
         });
     }
 
     function renderAnalyticsEditors() {
+        var sb = window.blitzkriegSupabase;
         var contentEl = document.getElementById('analytics-content');
         if (!contentEl) return;
 
@@ -4379,7 +4762,6 @@
 
         // If cache is empty, load data first
         if (!userStats || userStats.length === 0) {
-            var sb = window.blitzkriegSupabase;
             if (!sb) return;
             contentEl.innerHTML = '<div style="text-align:center;padding:40px 0"><div class="analytics-skeleton" style="width:60px;height:60px;margin:0 auto;border-radius:50%"></div></div>';
 
@@ -4414,6 +4796,7 @@
             html += '<div class="editor-stat"><span class="editor-stat-value">' + analyticsFormatNumber(user.unique_templates) + '</span><span class="editor-stat-label">Templates</span></div>';
             html += '</div>';
             html += '<div class="editor-activity-bar"><div class="editor-activity-fill" style="width:' + activityPct + '%"></div></div>';
+            html += '<div class="editor-sparkline" data-editor-id="' + escapeHTML(user.user_id) + '"></div>';
             html += '</div>';
         });
         html += '</div>';
@@ -4423,6 +4806,189 @@
         }
 
         contentEl.innerHTML = html;
+
+        // Load sparklines (new RPC — graceful fallback)
+        if (userStats.length > 0) {
+            var userIds = userStats.map(function(u) { return u.user_id; });
+            var sparkStart = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+            sb.rpc('get_blitzkrieg_editor_sparklines', { p_start_date: sparkStart, p_user_ids: userIds })
+                .then(function(res) {
+                    var data = res.data || [];
+                    // Group by user_id
+                    var byUser = {};
+                    data.forEach(function(row) {
+                        if (!byUser[row.user_id]) byUser[row.user_id] = [];
+                        byUser[row.user_id].push(row);
+                    });
+                    // Render sparklines into each card
+                    Object.keys(byUser).forEach(function(uid) {
+                        var el = contentEl.querySelector('.editor-sparkline[data-editor-id="' + uid + '"]');
+                        if (!el) return;
+                        var days = byUser[uid];
+                        var max = 1;
+                        days.forEach(function(d) { max = Math.max(max, Number(d.import_count) || 0); });
+                        var sparkHtml = '';
+                        days.forEach(function(d) {
+                            var h = Math.max(((Number(d.import_count) || 0) / max) * 100, 4);
+                            sparkHtml += '<div class="sparkline-bar" style="height:' + h + '%" title="' + d.stat_date + ': ' + d.import_count + '"></div>';
+                        });
+                        el.innerHTML = sparkHtml;
+                    });
+                }, function() {
+                    // RPC not deployed yet — silently ignore
+                });
+        }
+    }
+
+    function formatHourAmPm(h) {
+        if (h === 0) return '12:00 AM';
+        if (h < 12) return h + ':00 AM';
+        if (h === 12) return '12:00 PM';
+        return (h - 12) + ':00 PM';
+    }
+
+    function formatDuration(minutes) {
+        if (!minutes || minutes <= 0) return '—';
+        var m = Math.round(Number(minutes));
+        if (m < 60) return m + 'm';
+        var hrs = Math.floor(m / 60);
+        var rem = m % 60;
+        return hrs + 'h ' + (rem > 0 ? rem + 'm' : '');
+    }
+
+    function buildActivityCalendar(calendarData) {
+        // GitHub-style 90-day activity grid
+        var dayMap = {};
+        var maxCount = 1;
+        (calendarData || []).forEach(function(row) {
+            dayMap[row.stat_date] = row;
+            maxCount = Math.max(maxCount, Number(row.event_count) || 0);
+        });
+
+        var today = new Date();
+        today.setHours(0,0,0,0);
+        var startDate = new Date(today);
+        startDate.setDate(startDate.getDate() - 89); // 90 days including today
+
+        // Start from the nearest Sunday
+        var dayOfWeek = startDate.getDay();
+        startDate.setDate(startDate.getDate() - dayOfWeek);
+
+        var html = '<div class="activity-calendar">';
+
+        // Day labels
+        html += '<div class="cal-day-labels">';
+        ['', 'Mon', '', 'Wed', '', 'Fri', ''].forEach(function(d) {
+            html += '<div class="cal-day-label">' + d + '</div>';
+        });
+        html += '</div>';
+
+        // Weeks
+        html += '<div class="cal-weeks">';
+        var current = new Date(startDate);
+        var weekHtml = '';
+        var weekCount = 0;
+        while (current <= today || current.getDay() !== 0) {
+            if (current.getDay() === 0) {
+                if (weekHtml) html += '<div class="cal-week">' + weekHtml + '</div>';
+                weekHtml = '';
+                weekCount++;
+            }
+            var dateStr = current.toISOString().split('T')[0];
+            var dayData = dayMap[dateStr];
+            var count = dayData ? Number(dayData.event_count) : 0;
+            var level = 0;
+            if (count > 0) level = count <= 2 ? 1 : count <= 5 ? 2 : count <= 10 ? 3 : 4;
+            var isFuture = current > today;
+            var titleParts = [];
+            if (dayData) {
+                titleParts.push(dateStr);
+                titleParts.push(count + ' events');
+                if (dayData.import_count > 0) titleParts.push(dayData.import_count + ' imports');
+                if (dayData.session_count > 0) titleParts.push(dayData.session_count + ' sessions');
+                if (dayData.first_event_hour !== null && dayData.last_event_hour !== null) {
+                    titleParts.push(formatHourAmPm(dayData.first_event_hour) + ' — ' + formatHourAmPm(dayData.last_event_hour));
+                }
+            } else {
+                titleParts.push(dateStr + ': no activity');
+            }
+            weekHtml += '<div class="cal-cell' + (isFuture ? ' future' : '') + ' level-' + level + '" title="' + escapeHTML(titleParts.join('\n')) + '"></div>';
+            current.setDate(current.getDate() + 1);
+        }
+        if (weekHtml) html += '<div class="cal-week">' + weekHtml + '</div>';
+        html += '</div>';
+
+        // Legend
+        html += '<div class="cal-legend">';
+        html += '<span class="cal-legend-text">Less</span>';
+        for (var l = 0; l <= 4; l++) html += '<div class="cal-cell level-' + l + '" style="cursor:default"></div>';
+        html += '<span class="cal-legend-text">More</span>';
+        html += '</div>';
+
+        html += '</div>';
+        return html;
+    }
+
+    function buildSessionsTable(sessions) {
+        if (!sessions || sessions.length === 0) return '<p class="placeholder-text">No session data available.</p>';
+
+        var html = '<table class="analytics-table sessions-table">';
+        html += '<thead><tr><th>Date</th><th>Started</th><th>Ended</th><th style="text-align:right">Duration</th><th style="text-align:right">Events</th></tr></thead>';
+        html += '<tbody>';
+        sessions.slice(0, 30).forEach(function(s) {
+            var startTime = new Date(s.session_start);
+            var dateStr = startTime.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+            var startStr = startTime.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+            var endStr = s.session_end ? new Date(s.session_end).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : 'In progress';
+            var durStr = formatDuration(s.duration_minutes);
+            html += '<tr>';
+            html += '<td>' + dateStr + '</td>';
+            html += '<td>' + startStr + '</td>';
+            html += '<td>' + endStr + '</td>';
+            html += '<td style="text-align:right;font-weight:600">' + durStr + '</td>';
+            html += '<td style="text-align:right">' + (s.events_during || 0) + '</td>';
+            html += '</tr>';
+        });
+        html += '</tbody></table>';
+        return html;
+    }
+
+    function buildWorkPatternInsights(patterns) {
+        if (!patterns) return '';
+        var html = '<div class="work-pattern-insights">';
+
+        var items = [];
+        if (patterns.avg_start_hour != null) {
+            items.push({ label: 'Typical Start', value: formatHourAmPm(Math.round(patterns.avg_start_hour)) });
+        }
+        if (patterns.avg_end_hour != null) {
+            items.push({ label: 'Typical End', value: formatHourAmPm(Math.round(patterns.avg_end_hour)) });
+        }
+        if (patterns.avg_session_minutes != null) {
+            items.push({ label: 'Avg Session', value: formatDuration(patterns.avg_session_minutes) });
+        }
+        if (patterns.longest_session_minutes != null) {
+            items.push({ label: 'Longest Session', value: formatDuration(patterns.longest_session_minutes) });
+        }
+        if (patterns.total_session_hours != null) {
+            items.push({ label: 'Total Time', value: Number(patterns.total_session_hours).toFixed(1) + 'h' });
+        }
+        if (patterns.first_seen) {
+            items.push({ label: 'First Seen', value: new Date(patterns.first_seen).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) });
+        }
+        if (patterns.last_seen) {
+            items.push({ label: 'Last Active', value: analyticsFormatTimeAgo(patterns.last_seen) });
+        }
+        if (patterns.active_days != null) {
+            items.push({ label: 'Days Active', value: String(patterns.active_days) });
+        }
+
+        items.forEach(function(item) {
+            html += '<div class="pattern-item"><span class="pattern-label">' + item.label + '</span><span class="pattern-value">' + escapeHTML(item.value) + '</span></div>';
+        });
+
+        html += '</div>';
+        return html;
     }
 
     function renderAnalyticsEditorDetail() {
@@ -4447,10 +5013,10 @@
         html += '<div class="editor-detail-avatar" style="background:' + bgColor + '">' + initials + '</div>';
         html += '<div>';
         html += '<div class="editor-detail-name">' + escapeHTML(analyticsEditorName) + '</div>';
-        html += '<div class="editor-detail-meta">' + (editorData ? 'Last active ' + analyticsFormatTimeAgo(editorData.last_active) : 'Loading...') + '</div>';
+        html += '<div class="editor-detail-meta" id="editor-detail-meta-line">' + (editorData ? 'Last active ' + analyticsFormatTimeAgo(editorData.last_active) : 'Loading...') + '</div>';
         html += '</div></div>';
 
-        // KPI Row
+        // KPI Row 1 — Usage
         html += '<div class="analytics-stat-cards-row">';
         html += buildStatCard(analyticsFormatNumber(editorData ? editorData.import_count : 0), 'Imports (' + days + 'd)');
         html += buildStatCard(analyticsFormatNumber(editorData ? editorData.active_days : 0), 'Active Days');
@@ -4458,10 +5024,45 @@
         html += buildStatCard(analyticsFormatNumber(editorData ? editorData.unique_templates : 0), 'Unique Templates');
         html += '</div>';
 
+        // KPI Row 2 — Submissions (placeholder, filled async)
+        html += '<div class="analytics-stat-cards-row" id="editor-submission-kpis">';
+        html += buildStatCard('...', 'Submitted');
+        html += buildStatCard('...', 'Approved');
+        html += buildStatCard('...', 'Rejected');
+        html += buildStatCard('...', 'Approval Rate');
+        html += '</div>';
+
+        // Work pattern insights (placeholder, filled async)
+        html += '<div class="analytics-table-section">';
+        html += '<h3 class="analytics-table-title">Work Patterns</h3>';
+        html += '<div id="editor-work-patterns"><div style="text-align:center;padding:16px"><div class="analytics-skeleton" style="width:40px;height:40px;margin:0 auto;border-radius:50%"></div></div></div>';
+        html += '</div>';
+
+        // Activity Calendar (90 days, placeholder)
+        html += '<div class="analytics-table-section">';
+        html += '<h3 class="analytics-table-title">Activity Calendar (90 Days)</h3>';
+        html += '<div id="editor-calendar"><div style="text-align:center;padding:16px"><div class="analytics-skeleton" style="width:40px;height:40px;margin:0 auto;border-radius:50%"></div></div></div>';
+        html += '</div>';
+
+        // Daily Activity Chart (per-editor imports+sessions bar chart, placeholder)
+        html += '<div id="editor-daily-chart"></div>';
+
+        // Peak hours heatmap placeholder
+        html += '<div class="analytics-table-section">';
+        html += '<h3 class="analytics-table-title">Peak Hours</h3>';
+        html += '<div id="editor-heatmap"><div style="text-align:center;padding:16px"><div class="analytics-skeleton" style="width:40px;height:40px;margin:0 auto;border-radius:50%"></div></div></div>';
+        html += '</div>';
+
+        // Sessions table placeholder
+        html += '<div class="analytics-table-section">';
+        html += '<h3 class="analytics-table-title">Recent Sessions</h3>';
+        html += '<div id="editor-sessions"><div style="text-align:center;padding:16px"><div class="analytics-skeleton" style="width:40px;height:40px;margin:0 auto;border-radius:50%"></div></div></div>';
+        html += '</div>';
+
         // Top Imported Templates placeholder
         html += '<div class="analytics-table-section">';
         html += '<h3 class="analytics-table-title">Top Imported Templates</h3>';
-        html += '<div id="editor-top-templates"><div style="text-align:center;padding:20px"><div class="analytics-skeleton" style="width:40px;height:40px;margin:0 auto;border-radius:50%"></div></div></div>';
+        html += '<div id="editor-top-templates"><div style="text-align:center;padding:16px"><div class="analytics-skeleton" style="width:40px;height:40px;margin:0 auto;border-radius:50%"></div></div></div>';
         html += '</div>';
 
         // Timeline placeholder with filter toggle
@@ -4471,15 +5072,108 @@
         html += '<button class="timeline-filter-toggle' + (analyticsShowAllEvents ? ' active' : '') + '" data-analytics-action="toggle-view-events">' +
             (analyticsShowAllEvents ? '✓ ' : '') + 'Show All Events</button>';
         html += '</div>';
-        html += '<div id="editor-timeline"><div style="text-align:center;padding:20px"><div class="analytics-skeleton" style="width:40px;height:40px;margin:0 auto;border-radius:50%"></div></div></div>';
+        html += '<div id="editor-timeline"><div style="text-align:center;padding:16px"><div class="analytics-skeleton" style="width:40px;height:40px;margin:0 auto;border-radius:50%"></div></div></div>';
         html += '</div>';
 
         contentEl.innerHTML = html;
 
-        // Load top templates
+        var startDate = analyticsStartDate();
+        var calendarStart = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+
+        // ——— LOAD SUBMISSION STATS ———
+        sb.rpc('get_blitzkrieg_editor_submission_stats', {
+            p_user_id: analyticsEditorId,
+        }).then(function(res) {
+            var kpiEl = document.getElementById('editor-submission-kpis');
+            if (!kpiEl) return;
+            var d = (res.data && res.data[0]) ? res.data[0] : { total_submitted: 0, approved: 0, rejected: 0, pending: 0, recent_7d: 0, approval_rate: 0 };
+            var recentBadge = Number(d.recent_7d) > 0 ? ' <span style="color:var(--accent-green-text);font-size:11px">(' + d.recent_7d + ' this week)</span>' : '';
+            kpiEl.innerHTML =
+                buildStatCard(analyticsFormatNumber(d.total_submitted), 'Submitted') +
+                buildStatCard(analyticsFormatNumber(d.approved), 'Approved') +
+                buildStatCard(analyticsFormatNumber(d.rejected), 'Rejected') +
+                buildStatCard(d.approval_rate + '%', 'Approval Rate');
+        }, function() {
+            // RPC not deployed — show basic counts from submissions table
+            sb.from('blitzkrieg_template_submissions').select('status').eq('user_id', analyticsEditorId).then(function(res) {
+                var kpiEl = document.getElementById('editor-submission-kpis');
+                if (!kpiEl) return;
+                var rows = res.data || [];
+                var counts = { total: rows.length, approved: 0, rejected: 0, pending: 0 };
+                rows.forEach(function(r) { if (counts.hasOwnProperty(r.status)) counts[r.status]++; });
+                var rate = (counts.approved + counts.rejected) > 0 ? Math.round(counts.approved / (counts.approved + counts.rejected) * 100) : 0;
+                kpiEl.innerHTML =
+                    buildStatCard(analyticsFormatNumber(counts.total), 'Submitted') +
+                    buildStatCard(analyticsFormatNumber(counts.approved), 'Approved') +
+                    buildStatCard(analyticsFormatNumber(counts.rejected), 'Rejected') +
+                    buildStatCard(rate + '%', 'Approval Rate');
+            });
+        });
+
+        // ——— LOAD WORK PATTERNS ———
+        sb.rpc('get_blitzkrieg_editor_work_patterns', {
+            p_user_id: analyticsEditorId,
+            p_start_date: startDate,
+        }).then(function(res) {
+            var el = document.getElementById('editor-work-patterns');
+            if (!el) return;
+            var data = (res.data && res.data[0]) ? res.data[0] : null;
+            if (!data || !data.total_sessions) {
+                el.innerHTML = '<p class="placeholder-text">Not enough session data yet.</p>';
+                return;
+            }
+            el.innerHTML = buildWorkPatternInsights(data);
+            // Update header meta line with richer info
+            var metaEl = document.getElementById('editor-detail-meta-line');
+            if (metaEl && data.first_seen) {
+                metaEl.innerHTML = 'First seen ' + new Date(data.first_seen).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) +
+                    ' · Last active ' + analyticsFormatTimeAgo(data.last_seen) +
+                    ' · ' + data.active_days + ' days active';
+            }
+        }, function() {
+            var el = document.getElementById('editor-work-patterns');
+            if (el) el.innerHTML = '<p class="placeholder-text">Work pattern analysis requires migration.</p>';
+        });
+
+        // ——— LOAD ACTIVITY CALENDAR (90 days) ———
+        sb.rpc('get_blitzkrieg_editor_daily_calendar', {
+            p_user_id: analyticsEditorId,
+            p_start_date: calendarStart,
+        }).then(function(res) {
+            var calEl = document.getElementById('editor-calendar');
+            if (!calEl) return;
+            var data = res.data || [];
+            calEl.innerHTML = buildActivityCalendar(data);
+
+            // Also build per-editor daily bar chart from calendar data
+            var chartEl = document.getElementById('editor-daily-chart');
+            if (chartEl && data.length > 0) {
+                chartEl.innerHTML = buildCSSBarChart(data.map(function(d) {
+                    return { stat_date: d.stat_date, import_count: d.import_count, session_count: d.session_count };
+                }));
+            }
+        }, function() {
+            var calEl = document.getElementById('editor-calendar');
+            if (calEl) calEl.innerHTML = '<p class="placeholder-text">Activity calendar requires migration.</p>';
+        });
+
+        // ——— LOAD SESSIONS ———
+        sb.rpc('get_blitzkrieg_editor_sessions', {
+            p_user_id: analyticsEditorId,
+            p_start_date: startDate,
+        }).then(function(res) {
+            var el = document.getElementById('editor-sessions');
+            if (!el) return;
+            el.innerHTML = buildSessionsTable(res.data || []);
+        }, function() {
+            var el = document.getElementById('editor-sessions');
+            if (el) el.innerHTML = '<p class="placeholder-text">Session analysis requires migration.</p>';
+        });
+
+        // ——— LOAD TOP TEMPLATES ———
         sb.rpc('get_blitzkrieg_editor_top_templates', {
             p_user_id: analyticsEditorId,
-            p_start_date: analyticsStartDate(),
+            p_start_date: startDate,
             p_limit: 10,
         }).then(function(res) {
             var topEl = document.getElementById('editor-top-templates');
@@ -4508,13 +5202,12 @@
             if (topEl) topEl.innerHTML = '<p class="placeholder-text">Failed to load templates: ' + escapeHTML(err.message) + '</p>';
         });
 
-        // Load timeline
+        // ——— LOAD TIMELINE ———
         sb.rpc('get_blitzkrieg_user_activity', {
             p_user_id: analyticsEditorId,
-            p_start_date: analyticsStartDate(),
+            p_start_date: startDate,
             p_limit: 200,
         }).then(function(res) {
-            // Cache events for toggle
             analyticsCache.editorEvents = res.data || [];
             var timelineEl = document.getElementById('editor-timeline');
             if (timelineEl) {
@@ -4525,6 +5218,52 @@
             if (timelineEl) {
                 timelineEl.innerHTML = '<p class="placeholder-text">Failed to load activity: ' + escapeHTML(err.message) + '</p>';
             }
+        });
+
+        // ——— LOAD PEAK HOURS HEATMAP ———
+        sb.rpc('get_blitzkrieg_user_hourly_activity', {
+            p_user_id: analyticsEditorId,
+            p_start_date: startDate,
+        }).then(function(res) {
+            var heatmapEl = document.getElementById('editor-heatmap');
+            if (!heatmapEl) return;
+            var data = res.data || [];
+            if (data.length === 0) {
+                heatmapEl.innerHTML = '<p class="placeholder-text">No activity data for heatmap.</p>';
+                return;
+            }
+            var maxCount = 1;
+            var grid = {};
+            data.forEach(function(row) {
+                var key = row.day_of_week + '-' + row.hour_of_day;
+                grid[key] = Number(row.event_count) || 0;
+                maxCount = Math.max(maxCount, grid[key]);
+            });
+            var dayLabels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+            var hHtml = '<div class="heatmap-grid">';
+            hHtml += '<div class="heatmap-row"><div class="heatmap-day-label"></div>';
+            for (var h = 0; h < 24; h++) {
+                if (h % 3 === 0) {
+                    hHtml += '<div class="heatmap-hour-label">' + (h === 0 ? '12a' : h < 12 ? h + 'a' : h === 12 ? '12p' : (h - 12) + 'p') + '</div>';
+                } else {
+                    hHtml += '<div class="heatmap-hour-label"></div>';
+                }
+            }
+            hHtml += '</div>';
+            for (var d = 0; d < 7; d++) {
+                hHtml += '<div class="heatmap-row"><div class="heatmap-day-label">' + dayLabels[d] + '</div>';
+                for (var h2 = 0; h2 < 24; h2++) {
+                    var count = grid[d + '-' + h2] || 0;
+                    var opacity = count === 0 ? 0.05 : Math.max(0.15, (count / maxCount));
+                    hHtml += '<div class="heatmap-cell" style="opacity:' + opacity.toFixed(2) + '" title="' + dayLabels[d] + ' ' + h2 + ':00 — ' + count + ' events"></div>';
+                }
+                hHtml += '</div>';
+            }
+            hHtml += '</div>';
+            heatmapEl.innerHTML = hHtml;
+        }, function() {
+            var heatmapEl = document.getElementById('editor-heatmap');
+            if (heatmapEl) heatmapEl.parentElement.style.display = 'none';
         });
     }
 
@@ -4612,6 +5351,125 @@
         });
     }
 
+    /* --------- Analytics: Errors Tab --------- */
+    function renderAnalyticsErrors() {
+        var container = document.getElementById('analytics-content');
+        if (!container) return;
+        container.innerHTML = '<div class="analytics-loading">Loading error logs...</div>';
+
+        var sb = window.blitzkriegSupabase;
+        if (!sb) { container.innerHTML = '<div class="analytics-empty">Supabase not available</div>'; return; }
+
+        sb.rpc('get_blitzkrieg_error_logs', { p_limit: 100, p_offset: 0 }).then(function(res) {
+            if (res.error) { container.innerHTML = '<div class="analytics-empty">Error: ' + escapeHTML(res.error.message) + '</div>'; return; }
+            var logs = res.data || [];
+            if (logs.length === 0) { container.innerHTML = '<div class="analytics-empty">No error logs recorded yet.</div>'; return; }
+
+            var errorCount = logs.filter(function(l) { return l.error_level === 'error'; }).length;
+            var warnCount = logs.filter(function(l) { return l.error_level === 'warn'; }).length;
+
+            var html = '<div class="analytics-summary-row">';
+            html += '<div class="analytics-stat-card-compact"><div class="compact-stat-value" style="color:var(--error)">' + errorCount + '</div><div class="compact-stat-label">Errors</div></div>';
+            html += '<div class="analytics-stat-card-compact"><div class="compact-stat-value" style="color:var(--warning)">' + warnCount + '</div><div class="compact-stat-label">Warnings</div></div>';
+            html += '<div class="analytics-stat-card-compact"><div class="compact-stat-value">' + logs.length + '</div><div class="compact-stat-label">Total Logs</div></div>';
+            html += '</div>';
+
+            html += '<table class="analytics-table" style="margin-top:var(--sp-4)">';
+            html += '<thead><tr><th>Level</th><th>Message</th><th>User</th><th>Time</th></tr></thead>';
+            html += '<tbody>';
+            logs.forEach(function(log) {
+                var levelClass = log.error_level === 'error' ? 'color:var(--error)' : 'color:var(--warning)';
+                var time = new Date(log.created_at);
+                var timeStr = time.toLocaleDateString() + ' ' + ('0' + time.getHours()).slice(-2) + ':' + ('0' + time.getMinutes()).slice(-2);
+                html += '<tr>';
+                html += '<td><span style="' + levelClass + ';font-weight:600;text-transform:uppercase">' + escapeHTML(log.error_level) + '</span></td>';
+                html += '<td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escapeHTML(log.message) + '">' + escapeHTML(log.message) + '</td>';
+                html += '<td>' + escapeHTML(log.full_name || 'Unknown') + '</td>';
+                html += '<td style="white-space:nowrap">' + timeStr + '</td>';
+                html += '</tr>';
+            });
+            html += '</tbody></table>';
+
+            container.innerHTML = html;
+        }).catch(function(err) {
+            container.innerHTML = '<div class="analytics-empty">Failed to load error logs: ' + escapeHTML(err.message) + '</div>';
+        });
+    }
+
+    /* --------- Analytics: Team Tab --------- */
+    function renderAnalyticsTeam() {
+        var container = document.getElementById('analytics-content');
+        if (!container) return;
+        container.innerHTML = '<div class="analytics-loading">Loading team members...</div>';
+
+        var sb = window.blitzkriegSupabase;
+        if (!sb) { container.innerHTML = '<div class="analytics-empty">Supabase not available</div>'; return; }
+
+        sb.rpc('get_blitzkrieg_team_members').then(function(res) {
+            if (res.error) { container.innerHTML = '<div class="analytics-empty">Error: ' + escapeHTML(res.error.message) + '</div>'; return; }
+            var members = res.data || [];
+
+            var activeCount = members.filter(function(m) { return m.blitzkrieg_access; }).length;
+            var adminCount = members.filter(function(m) { return m.blitzkrieg_admin; }).length;
+
+            var html = '<div class="analytics-summary-row">';
+            html += '<div class="analytics-stat-card-compact"><div class="compact-stat-value">' + activeCount + '</div><div class="compact-stat-label">Active Users</div></div>';
+            html += '<div class="analytics-stat-card-compact"><div class="compact-stat-value">' + adminCount + '</div><div class="compact-stat-label">Admins</div></div>';
+            html += '<div class="analytics-stat-card-compact"><div class="compact-stat-value">' + members.length + '</div><div class="compact-stat-label">Total Members</div></div>';
+            html += '</div>';
+
+            html += '<table class="analytics-table" style="margin-top:var(--sp-4)">';
+            html += '<thead><tr><th>Name</th><th>Email</th><th>Access</th><th>Admin</th><th>Last Active</th></tr></thead>';
+            html += '<tbody>';
+            members.forEach(function(m) {
+                var lastActive = m.last_active ? new Date(m.last_active).toLocaleDateString() : 'Never';
+                html += '<tr>';
+                html += '<td>' + escapeHTML(m.full_name || 'Unknown') + '</td>';
+                html += '<td>' + escapeHTML(m.slack_email || '') + '</td>';
+                html += '<td><label class="blitz-toggle"><input type="checkbox"' + (m.blitzkrieg_access ? ' checked' : '') + ' data-analytics-action="toggle-access" data-member-id="' + m.id + '" data-member-name="' + escapeHTML(m.full_name || '') + '" data-field="blitzkrieg_access"><span class="blitz-toggle-slider"></span></label></td>';
+                html += '<td><label class="blitz-toggle"><input type="checkbox"' + (m.blitzkrieg_admin ? ' checked' : '') + ' data-analytics-action="toggle-admin" data-member-id="' + m.id + '" data-member-name="' + escapeHTML(m.full_name || '') + '" data-field="blitzkrieg_admin"><span class="blitz-toggle-slider"></span></label></td>';
+                html += '<td>' + lastActive + '</td>';
+                html += '</tr>';
+            });
+            html += '</tbody></table>';
+
+            container.innerHTML = html;
+        }).catch(function(err) {
+            container.innerHTML = '<div class="analytics-empty">Failed to load team: ' + escapeHTML(err.message) + '</div>';
+        });
+    }
+
+    /* --------- Toggle Access Handler --------- */
+    function handleToggleAccess(memberId, field, memberName, checkbox) {
+        var sb = window.blitzkriegSupabase;
+        if (!sb) return;
+
+        var newValue = checkbox.checked;
+        var eventType = field === 'blitzkrieg_access'
+            ? (newValue ? 'access_granted' : 'access_revoked')
+            : (newValue ? 'admin_granted' : 'admin_revoked');
+
+        sb.rpc('set_blitzkrieg_access', {
+            p_team_member_id: memberId,
+            p_field: field,
+            p_value: newValue
+        }).then(function(res) {
+            if (res.error) {
+                // Revert checkbox on failure
+                checkbox.checked = !newValue;
+                debugLog('Failed to update access: ' + res.error.message, 'error');
+                return;
+            }
+            debugLog((memberName || 'Member') + ' — ' + eventType.replace(/_/g, ' '), 'success');
+            if (window.blitzkriegAnalytics) {
+                window.blitzkriegAnalytics.trackAccessChange(memberId, eventType, memberName);
+            }
+        }).catch(function(err) {
+            checkbox.checked = !newValue;
+            debugLog('Access update error: ' + err.message, 'error');
+        });
+    }
+
     /**
      * Event delegation for all analytics dashboard clicks
      */
@@ -4634,6 +5492,16 @@
                 analyticsView = 'editors';
                 analyticsEditorId = null;
                 analyticsEditorName = '';
+                renderAnalyticsDashboard();
+                break;
+
+            case 'goto-team':
+                analyticsView = 'team';
+                renderAnalyticsDashboard();
+                break;
+
+            case 'goto-errors':
+                analyticsView = 'errors';
                 renderAnalyticsDashboard();
                 break;
 
@@ -4676,17 +5544,192 @@
         }
     }
 
+    /* --------- OTA Live Update System --------- */
+
+    function isNewerVersion(remote, local) {
+        var rParts = String(remote).split('.').map(Number);
+        var lParts = String(local).split('.').map(Number);
+        for (var i = 0; i < 3; i++) {
+            var r = rParts[i] || 0;
+            var l = lParts[i] || 0;
+            if (r > l) return true;
+            if (r < l) return false;
+        }
+        return false;
+    }
+
+    function checkForUpdates() {
+        var sb = window.blitzkriegSupabase;
+        if (!sb) return;
+
+        sb.rpc('get_blitzkrieg_update_manifest').then(function(res) {
+            if (res.error || !res.data) return;
+            var manifest = res.data;
+            var remoteVersion = manifest.current_version;
+            if (!remoteVersion || !isNewerVersion(remoteVersion, BLITZKRIEG_LOCAL_VERSION)) return;
+
+            var files = manifest.files || [];
+            debugLog('Update available: v' + remoteVersion + ' (current: v' + BLITZKRIEG_LOCAL_VERSION + ')', 'info');
+
+            // Track update check
+            if (window.blitzkriegAnalytics) {
+                window.blitzkriegAnalytics.trackAccessChange(null, 'update_check', null);
+            }
+
+            // Show update banner
+            var app = document.getElementById('app');
+            if (!app || document.getElementById('blitz-update-banner')) return;
+            var banner = document.createElement('div');
+            banner.id = 'blitz-update-banner';
+            banner.className = 'update-banner';
+            banner.innerHTML = '<div class="update-banner-info">' +
+                '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="flex-shrink:0"><path d="M8 1L1 15h14L8 1z" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M8 6v4M8 12h.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>' +
+                '<span>Update available: <strong>v' + escapeHTML(remoteVersion) + '</strong> (you have v' + BLITZKRIEG_LOCAL_VERSION + ')</span>' +
+                '</div>' +
+                '<div class="update-banner-actions">' +
+                '<button class="update-banner-btn" onclick="window.__blitzInstallUpdate(\'' + escapeHTML(remoteVersion) + '\', ' + JSON.stringify(files).replace(/'/g, "\\'") + ')">Install &amp; Reload</button>' +
+                '<button class="update-banner-dismiss" onclick="this.closest(\'.update-banner\').remove()">&times;</button>' +
+                '</div>';
+            app.insertBefore(banner, app.firstChild);
+        }).catch(function(err) {
+            debugLog('Update check failed: ' + err.message, 'warn');
+        });
+    }
+
+    /**
+     * Write a text file to the extension directory via cep.fs (preferred) or ExtendScript fallback.
+     * For JS/CSS text files — no base64 needed.
+     */
+    function writeFileViaCep(filePath, content, callback) {
+        // Try cep.fs first (text mode — UTF8)
+        try {
+            if (typeof cep !== 'undefined' && cep.fs && cep.fs.writeFile) {
+                var res = cep.fs.writeFile(filePath, content);
+                if (res && res.err === 0) {
+                    callback(null);
+                    return;
+                }
+            }
+        } catch (e) {
+            // Fall through to ExtendScript
+        }
+
+        // ExtendScript fallback
+        var safeContent = escapeForExtendScript(content);
+        var safePath = escapeForExtendScript(filePath);
+        safeEvalScript('writeUpdateFile("' + safePath + '", "' + safeContent + '")', function(r) {
+            if (r && r.indexOf('error') === -1) {
+                callback(null);
+            } else {
+                callback(new Error('ExtendScript write failed: ' + r));
+            }
+        });
+    }
+
+    function installUpdate(version, fileList) {
+        if (!fileList || fileList.length === 0) {
+            debugLog('No files in update manifest', 'warn');
+            return;
+        }
+
+        var sb = window.blitzkriegSupabase;
+        if (!sb) return;
+
+        debugLog('Starting update to v' + version + ' (' + fileList.length + ' files)', 'info');
+        if (window.blitzkriegAnalytics) {
+            window.blitzkriegAnalytics.trackAccessChange(null, 'update_started', null);
+        }
+
+        // Get extension root path from ExtendScript
+        safeEvalScript('getExtensionRootPath()', function(rootPath) {
+            if (!rootPath || rootPath === 'EvalScript error.' || rootPath === 'undefined') {
+                debugLog('Cannot determine extension root path', 'error');
+                if (window.blitzkriegAnalytics) {
+                    window.blitzkriegAnalytics.trackAccessChange(null, 'update_failed', null);
+                }
+                return;
+            }
+
+            var separator = rootPath.indexOf('\\') >= 0 ? '\\' : '/';
+            var completed = 0;
+            var failed = 0;
+
+            function processFile(idx) {
+                if (idx >= fileList.length) {
+                    if (failed > 0) {
+                        debugLog('Update partially failed: ' + failed + '/' + fileList.length + ' files failed', 'error');
+                        if (window.blitzkriegAnalytics) {
+                            window.blitzkriegAnalytics.trackAccessChange(null, 'update_failed', null);
+                        }
+                    } else {
+                        debugLog('Update to v' + version + ' complete! Reloading panel...', 'success');
+                        if (window.blitzkriegAnalytics) {
+                            window.blitzkriegAnalytics.trackAccessChange(null, 'update_completed', null);
+                        }
+                        setTimeout(function() { location.reload(); }, 500);
+                    }
+                    return;
+                }
+
+                var fileName = fileList[idx];
+                var storagePath = version + '/' + fileName;
+
+                // Download from Supabase Storage
+                sb.storage.from('blitzkrieg-updates').download(storagePath).then(function(res) {
+                    if (res.error) {
+                        debugLog('Download failed: ' + fileName + ' — ' + res.error.message, 'error');
+                        failed++;
+                        processFile(idx + 1);
+                        return;
+                    }
+
+                    // Read blob as text
+                    var reader = new FileReader();
+                    reader.onload = function() {
+                        var localPath = rootPath + separator + fileName.replace(/\//g, separator);
+                        writeFileViaCep(localPath, reader.result, function(err) {
+                            if (err) {
+                                debugLog('Write failed: ' + fileName + ' — ' + err.message, 'error');
+                                failed++;
+                            } else {
+                                completed++;
+                                debugLog('Updated: ' + fileName + ' (' + completed + '/' + fileList.length + ')', 'info');
+                            }
+                            processFile(idx + 1);
+                        });
+                    };
+                    reader.onerror = function() {
+                        debugLog('Read failed: ' + fileName, 'error');
+                        failed++;
+                        processFile(idx + 1);
+                    };
+                    reader.readAsText(res.data);
+                }).catch(function(err) {
+                    debugLog('Download error: ' + fileName + ' — ' + err.message, 'error');
+                    failed++;
+                    processFile(idx + 1);
+                });
+            }
+
+            processFile(0);
+        });
+    }
+
+    // Expose for banner button
+    window.__blitzInstallUpdate = installUpdate;
+
     /* --------- Cloud Thumbnail + Preview Generation --------- */
 
     // Disk I/O: tested at runtime — cep.fs if it works, else evalScript (guaranteed)
     var _diskIo = null;
     var _cachedTempDir = null;
 
-    /** Get temp dir from ExtendScript (cached). */
+    /** Get temp dir from ExtendScript (cached). Uses /tmp on macOS to avoid
+     *  TemporaryItems permission issues with AE's rendering engine. */
     function getTempDir() {
         return new Promise(function(resolve, reject) {
             if (_cachedTempDir) { resolve(_cachedTempDir); return; }
-            safeEvalScript('Folder.temp.fsName', function(r) {
+            safeEvalScript('getSafeTempFolder().fsName', function(r) {
                 if (!r || r === 'EvalScript error.') { reject(new Error('Cannot get temp dir')); return; }
                 _cachedTempDir = r;
                 resolve(r);
@@ -4901,7 +5944,10 @@
                             try {
                                 var parsed = JSON.parse(result);
                                 if (parsed.error) { reject(new Error(parsed.error)); return; }
-                                if (parsed.thumbnailOnly) {
+                                if (parsed.skipped) {
+                                    debugLog('GEN: skipped — ' + (parsed.skipReason || 'unrenderable'), 'warn');
+                                    resolve(parsed);
+                                } else if (parsed.thumbnailOnly) {
                                     debugLog('GEN: thumbnail only (missing footage, skipped preview frames)');
                                 } else {
                                     debugLog('GEN: rendered ' + parsed.frameCount + ' frames');
@@ -4915,6 +5961,12 @@
                 });
             });
         }).then(function(renderResult) {
+            // If generation was skipped (e.g. missing footage), clean up and return early
+            if (renderResult.skipped) {
+                debugLog('GEN: skipped upload (no rendered files)');
+                _cleanupTempDir(tempDir);
+                return Promise.resolve({ skipped: true, reason: renderResult.skipReason });
+            }
             debugLog('GEN: reading rendered files and uploading...');
             var thumbPath = outputDir + '/comp.png';
             return readFileAsBlobAsync(thumbPath, 'image/png').then(function(thumbBlob) {
@@ -5124,10 +6176,16 @@
     // The auth module (auth.js) handles login/access and calls onBlitzkriegAuthReady when access is granted
     window.onBlitzkriegAuthReady = function () {
         masterInit();
+        // Check for OTA updates (non-blocking)
+        checkForUpdates();
         // Track session start
         if (window.blitzkriegAnalytics) {
             window.blitzkriegAnalytics.trackSessionStart();
         }
+        // Track session end on panel close
+        window.addEventListener('beforeunload', function() {
+            if (window.blitzkriegAnalytics) window.blitzkriegAnalytics.trackSessionEnd();
+        });
     };
 
     // Start auth check on load

@@ -21,6 +21,11 @@
         } else {
             console.log('[cloud-library] ' + msg);
         }
+
+        // Auto-report errors and warnings to server
+        if ((level === 'error' || level === 'warn') && window.blitzkriegAnalytics && window.blitzkriegAnalytics.reportError) {
+            window.blitzkriegAnalytics.reportError('[cloud] ' + msg, level, { source: 'cloud-library' });
+        }
     }
 
     // In-memory signed URL cache — avoids re-signing on every loadLibrary call

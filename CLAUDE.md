@@ -49,6 +49,59 @@ Data flow:
 5. User actions call `cloudLibrary.*` then `csInterface.evalScript()` via `safeEvalScript()`
 6. ExtendScript in `hostscript.jsx` executes inside After Effects
 
+### CSS Design Tokens (`CSS/style.css`)
+
+All styles use CSS custom properties from `:root` — never hardcode values:
+
+| Token | Value | Purpose |
+|-------|-------|---------|
+| `--brand-green` | `#024227` | Primary brand color |
+| `--brand-green-hover` | `#035E3C` | Hover state |
+| `--bg-page` | `#09090B` | Page background |
+| `--bg-sidebar` | `#0C0C0E` | Sidebar background |
+| `--bg-card` | `#131316` | Card background |
+| `--bg-card-hover` | `#18181B` | Card hover |
+| `--bg-input` | `#18181B` | Input background |
+| `--bg-elevated` | `#1C1C1F` | Elevated surfaces |
+| `--border-subtle` | `#1F1F23` | Subtle borders |
+| `--border-default` | `#27272A` | Default borders |
+| `--border-strong` | `#3F3F46` | Strong borders |
+| `--text-primary` | `#FAFAFA` | Primary text |
+| `--text-secondary` | `#D4D4D8` | Secondary text |
+| `--text-tertiary` | `#A1A1AA` | Tertiary text |
+| `--text-muted` | `#71717A` | Muted text |
+| `--text-faint` | `#52525B` | Faint text |
+| `--icon-default` | `#52525B` | Default icon color |
+| `--icon-muted` | `#3F3F46` | Muted icon color |
+| `--icon-active` | `#4ADE80` | Active icon color |
+| `--accent-green` | `#22C55E` | Green accent |
+| `--accent-green-text` | `#4ADE80` | Green accent text |
+| `--accent-green-subtle` | `rgba(34,197,94,0.08)` | Subtle green tint |
+| `--success` | `#4ADE80` | Success state |
+| `--warning` | `#FACC15` | Warning state |
+| `--error` | `#F87171` | Error state |
+| `--danger` | `#DC2626` | Danger action |
+| `--danger-hover` | `#EF4444` | Danger hover |
+| `--sidebar-width` | `240px` | Expanded sidebar |
+| `--sidebar-collapsed` | `60px` | Collapsed sidebar |
+| `--transition-fast` | `0.15s ease` | Fast transition |
+| `--transition-normal` | `0.25s ease` | Normal transition |
+
+Spacing: `--sp-1` (4px) through `--sp-8` (32px). Radius: `--radius-sm` (4px), `--radius-md` (6px), `--radius-lg` (8px), `--radius-xl` (12px). Font: Inter.
+
+### Modal Inventory (`index.html`)
+
+All modals: `.modal-overlay > .modal-box`, start `display:none`, toggled by JS.
+
+- `#delete-confirm-modal` — single comp deletion
+- `#add-comp-modal` — add comp with existing-category select or new-category input
+- `#rename-comp-modal` — rename a composition
+- `#rename-category-modal` — rename a category
+- `#delete-category-modal` — delete category; radio choice: `transfer` (to another category via `#transfer-to-category-select`) or `delete-all` (delete category + all templates)
+- `#bulk-move-modal` — move selected templates to a category
+- `#bulk-delete-modal` — delete selected templates
+- `#move-comp-modal` — move single comp to category or new category
+
 <!-- END AUTO-MANAGED -->
 
 <!-- AUTO-MANAGED: conventions -->
@@ -62,10 +115,10 @@ Data flow:
 - **Naming**: kebab-case for CSS classes and IDs; camelCase for JS variables and functions
 - **Logging**: Use `window._blitzLog(msg, level)` in `cloud-library.js`; use `debugLog(msg, level)` in `main.js`. Valid levels: `info`, `warn`, `error`, `success`
 - **Cache invalidation**: Call `invalidateCache()` after every mutation in `cloud-library.js`
-- **localStorage keys**: `blitzkrieg_meta_cache`, `blitzkrieg_sort_order`, `blitzkrieg_grid_size`, `ae_asset_stash_path`
+- **localStorage keys**: `blitzkrieg_meta_cache`, `blitzkrieg_sort_order`, `blitzkrieg_grid_size`, `ae_asset_stash_path`, `blitzkrieg_thumb_blacklist` (JSON object mapping storagePath → 1 for templates needing forced thumbnail re-generation)
 - **Performance utilities**: `debounce(func, wait)` and `throttle(func, limit)` defined in `main.js`; search input uses `debouncedRenderComps` (150ms delay)
 - **Input escaping**: Use `escapeForExtendScript(str)` before embedding strings in `evalScript` calls; use `escapeHTML(str)` before injecting into DOM innerHTML — never skip these
-- **Name validation**: Use `validateName(name)` for user-provided category/comp names; mirrors ExtendScript `isValidName()` — rejects path separators, `..`, leading/trailing dots and spaces
+- **Name validation**: Use `validateName(name)` for user-provided category/comp names; mirrors ExtendScript `isValidName()` — rejects path separators (`/`, `\`), URL-encoded path separators (`%2F`, `%5C`), `..`, leading/trailing dots and spaces
 - **Persistent settings**: Use `loadPersistentSettings(cb)` / `savePersistentSettings(settings, cb)` for library path; file-based via `loadBlitzkriegSettings()` hostscript with `ae_asset_stash_path` localStorage fallback
 - **Grid size classes**: Apply `grid-compact`, `grid-normal`, or `grid-large` to `#stash-grid`; persisted to `blitzkrieg_grid_size` localStorage key; never hardcode grid layout inline
 - **Sort order values**: Valid values are `name-asc`, `name-desc`, `date-desc`, `date-asc`, `duration-desc`, `duration-asc`; default is `name-asc`; persisted to `blitzkrieg_sort_order`
@@ -100,13 +153,15 @@ Data flow:
 - **Generation metadata**: `updateMetadataAfterGeneration()` sets `cloudThumbnailGenerated: true` + frame count on every successful generation (including thumbnail-only cases)
 - **CEP compatibility**: Do NOT use `Promise.prototype.finally()` — unavailable in CEP 8/9 (AE 2018-2019, Chromium 57/61). Use `.then(successFn, errorFn)` pattern instead
 - **Two-stage download**: `downloadTemplate()` tries `storagePath/template.aep` directly first; falls back to listing the folder and finding any `.aep` file
-- **Cross-platform file URL**: `pathToFileUrl(path)` normalises macOS (`/path`) → `file:///path` and Windows (`C:\path`) → `file:///C:/path` with URL-safe encoding
+- **Cross-platform file URL**: `pathToFileUrl(path)` normalises macOS (`/path`) → `file:///path` and Windows (`C:\path`) → `file:///C:/path`; encodes `%`→`%25` first (prevents double-encoding), then space, `#`, `?`, `"`
 - **Virtual nav categories**: Sidebar `data-category` values drive view switching — real categories are strings from storage; virtual views use reserved values: `All`, `Favorites`, `Recent`, `__submissions_pending`, `__submissions_approved`, `__submissions_rejected`, `__review_pending`, `__analytics`
 - **Admin-only sidebar sections**: `#review-section` and `#analytics-section` have class `nav-section-admin-only` and start `display:none`; shown via `querySelectorAll('.nav-section-admin-only')` when user is admin. `#new-category-inline` is hidden separately (inline `display:none`, no admin class) and shown by `initNewCategoryForm()` for admins
 - **ExtendScript JSON polyfill**: `hostscript.jsx` unconditionally replaces `JSON = {}` with a Crockford JSON2 polyfill — never conditional — because AE 2024/2025 on macOS ships a native `JSON.stringify` that drops all keys/values (producing `[{: ,: }]`). A self-test verifies `JSON.stringify({"a":"b"})` contains `"a"` on every load.
 - **AE version detection**: `AE_VERSION_INFO` global object set at startup via `app.version`; fields: `majorVersion`, `minorVersion`, `isAE2024` (majorVersion===24), `isAE2025` (majorVersion===25), `isAE2025OrLater` (majorVersion>=25); exposed via `getAEVersionInfo()` returning JSON string
 - **robustGetFolders pattern**: `robustGetFolders(parentFolder)` tries 4 strategies for macOS `getFiles()` reliability — function filter, unfiltered + instanceof check, recreate Folder from `fsName`, then URI-encode spaces in path; always returns array (never throws)
 - **robustFindAep pattern**: `robustFindAep(compFolder)` tries 4 strategies — glob `"*.aep"`, all files + manual extension check (skips `._` macOS resource forks), recreate from `fsName`, URI-encode spaces; returns first matching `File` or `null`
+- **Thumbnail blacklist**: `thumbBlacklist` object (in `main.js`) persisted to `blitzkrieg_thumb_blacklist` localStorage; forces thumbnail re-generation for blacklisted storagePaths even when `thumbnailVerified=true`; cleared per-entry on successful generation; bulk-cleared when triggering a full generation run
+- **signPaths API**: `window.cloudLibrary.signPaths(paths)` signs arbitrary storage paths in batches of 100; returns `{path: signedUrl}` map; used by submissions and review queue UIs to get thumbnail URLs for pending items not yet in the main library
 
 <!-- END AUTO-MANAGED -->
 
