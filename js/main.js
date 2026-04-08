@@ -3671,6 +3671,31 @@
     }
 
     /**
+     * Diagnostic helper — call from browser console via window.__blitzDiagnoseAdmin()
+     * to verify the current user's admin status and see why the Pending Review queue
+     * might be empty. Returns the full RPC result.
+     */
+    window.__blitzDiagnoseAdmin = function() {
+        var sb = window.blitzkriegSupabase;
+        if (!sb) { console.error('No Supabase client'); return; }
+        return sb.rpc('debug_blitzkrieg_admin_status').then(function(res) {
+            if (res.error) {
+                console.error('debug_blitzkrieg_admin_status failed:', res.error);
+                return res.error;
+            }
+            console.log('%c=== Blitzkrieg Admin Status ===', 'font-weight:bold;color:#4ADE80');
+            console.log(res.data);
+            if (res.data && res.data.is_admin === false) {
+                console.warn('⚠ User is NOT admin according to the database. Check team_members.blitzkrieg_admin.');
+            }
+            if (res.data && res.data.pending_submission_count === 0) {
+                console.warn('⚠ No pending submissions exist at all — the review queue is genuinely empty.');
+            }
+            return res.data;
+        });
+    };
+
+    /**
      * Load and render submissions grid with visual thumbnails + preview frames
      * @param {string} statusFilter - 'pending', 'approved', 'rejected', or 'pending_review' (admin view)
      */
