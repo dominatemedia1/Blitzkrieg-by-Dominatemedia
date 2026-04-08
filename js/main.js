@@ -109,6 +109,32 @@
 
     var toastTimeout;
     var allComps = [];
+    // Cached unique category list — invalidated on every allComps reassignment
+    // via `_invalidateCategoryCache()` which `loadLibrary` calls. Six call-sites
+    // used to recompute `Array.from(new Set(allComps.map(c=>c.category))).sort()`
+    // on every keystroke / modal open / keyboard shortcut; caching eliminates
+    // that O(n) work from the hot path.
+    var _cachedCategoryList = null;
+    function getUniqueCategories() {
+        if (_cachedCategoryList) return _cachedCategoryList;
+        var seen = {};
+        var out = [];
+        for (var cci = 0; cci < allComps.length; cci++) {
+            var c = allComps[cci].category;
+            if (c && !seen[c]) { seen[c] = 1; out.push(c); }
+        }
+        out.sort();
+        _cachedCategoryList = out;
+        return out;
+    }
+    function _invalidateCategoryCache() { _cachedCategoryList = null; }
+    // Per-session view tracking dedupe — see stash-item mouseenter handler.
+    var _trackedViewsThisSession = {};
+    // Concurrency budget for hover-triggered auto-generation (see on-hover handler).
+    var _autoGenInFlight = 0;
+    // Per-submission-id in-flight set — prevents double-click from firing two
+    // parallel approve/withdraw/resubmit/reject pipelines against the same row.
+    var _submissionInFlight = {};
     var activeCategory = 'All';
     var currentDeleteInfo = null;
     var currentRenameInfo = null;
@@ -160,8 +186,13 @@
         debugLogEntries.push(entry);
         if (debugLogEntries.length > MAX_LOG_ENTRIES) debugLogEntries.shift();
 
-        // Append to panel if visible
-        if (debugLogContent) {
+        // Append to panel — but ONLY when the debug panel is actually visible.
+        // Unconditionally appending DOM + setting scrollTop forces a layout recalc
+        // per log call, which during batch generation (hundreds of logs/second)
+        // becomes the single biggest source of jank. When the panel is hidden the
+        // log is still captured in debugLogEntries above, so opening the panel later
+        // would re-render from the in-memory buffer.
+        if (debugLogContent && debugLogPanel && debugLogPanel.style.display !== 'none') {
             var div = document.createElement('div');
             div.className = 'log-entry';
             div.innerHTML = '<span class="log-time">' + timeStr + '</span><span class="log-' + level + '">' + escapeHTML(String(message)) + '</span>';
@@ -181,9 +212,21 @@
     }
 
     function toggleDebugLog() {
+        if (!debugLogPanel) return; // defensive — #debug-log-panel missing from DOM
         if (debugLogPanel.style.display === 'none') {
             debugLogPanel.style.display = 'flex';
             document.body.classList.add('debug-panel-open');
+            // Rehydrate panel from the in-memory buffer — debugLog skips DOM work
+            // when the panel is hidden for perf, so we need to catch up here.
+            if (debugLogContent) {
+                var html = '';
+                for (var di = 0; di < debugLogEntries.length; di++) {
+                    var de = debugLogEntries[di];
+                    html += '<div class="log-entry"><span class="log-time">' + de.time + '</span><span class="log-' + de.level + '">' + escapeHTML(String(de.message)) + '</span></div>';
+                }
+                debugLogContent.innerHTML = html;
+                debugLogContent.scrollTop = debugLogContent.scrollHeight;
+            }
         } else {
             debugLogPanel.style.display = 'none';
             document.body.classList.remove('debug-panel-open');
@@ -613,6 +656,23 @@
             }
         };
 
+        // Unhandled promise rejection safety net. Without this, any .then() chain
+        // missing a .catch (we audited and fixed several, but future regressions
+        // are possible) silently disappears. This at least logs them to the debug
+        // log + analytics so they're visible instead of invisible.
+        window.addEventListener('unhandledrejection', function(e) {
+            var reason = e && e.reason;
+            var msg = (reason && reason.message) || String(reason);
+            try { debugLog('Unhandled promise rejection: ' + msg, 'error'); } catch (logErr) {}
+            if (window.blitzkriegAnalytics && window.blitzkriegAnalytics.reportError) {
+                window.blitzkriegAnalytics.reportError(
+                    msg,
+                    'error',
+                    { source: 'unhandledrejection', stack: (reason && reason.stack) || '' }
+                );
+            }
+        });
+
         // Show logged-in user info in sidebar
         var userInfo = document.getElementById('sidebar-user-info');
         var userName = document.getElementById('sidebar-user-name');
@@ -637,8 +697,13 @@
                     inviteUrl += '?utm_source=blitzkrieg&utm_medium=referral&utm_campaign=invite-a-friend&utm_content=' + encodeURIComponent(refName);
                 }
                 try {
+                    // The sync try/catch only catches synchronous throws. The
+                    // .writeText() promise rejection (permission denied, etc.)
+                    // needs its own .catch or it becomes an unhandled rejection.
                     navigator.clipboard.writeText(inviteUrl).then(function() {
                         showToast('Invite link copied to clipboard!');
+                    }, function() {
+                        showToast('Invite link: ' + inviteUrl);
                     });
                 } catch (e) {
                     // Fallback for CEP environments without clipboard API
@@ -1003,6 +1068,10 @@
         });
 
         function createCategory() {
+            // Double-click guard — prevents a fast second Enter/click from firing
+            // two parallel placeholder uploads back-to-back (upsert makes storage
+            // idempotent but the analytics trackAccessChange still fires twice).
+            if (createCategory._running) return;
             var name = input.value.trim();
             if (!name) {
                 showToast('Category name cannot be empty.', true);
@@ -1013,6 +1082,8 @@
                 showToast(nameErr, true);
                 return;
             }
+            createCategory._running = true;
+            if (saveBtn) saveBtn.disabled = true;
             // Check if category already exists
             var existing = allComps.some(function(c) { return c.category.toLowerCase() === name.toLowerCase(); });
             if (existing) {
@@ -1029,10 +1100,15 @@
             showToast('Creating category "' + name + '"...');
             // Upload a placeholder file to create the folder in Supabase storage
             var placeholder = new Blob([''], { type: 'text/plain' });
+            function _createDone() {
+                createCategory._running = false;
+                if (saveBtn) saveBtn.disabled = false;
+            }
             sb.storage.from('blitzkrieg').upload(name + '/.emptyFolderPlaceholder', placeholder, {
                 contentType: 'text/plain',
                 upsert: true,
             }).then(function(result) {
+                _createDone();
                 if (result.error) {
                     showToast('Failed to create category: ' + result.error.message, true);
                     return;
@@ -1042,6 +1118,11 @@
                 showToast('Category "' + name + '" created!');
                 window.cloudLibrary.invalidateCache();
                 loadLibrary();
+            }).catch(function(err) {
+                // Network failure / RLS rejection — without this catch the user
+                // would see "Creating category..." stuck forever with no feedback.
+                _createDone();
+                showToast('Failed to create category: ' + (err && err.message || err), true);
             });
         }
 
@@ -1068,6 +1149,7 @@
             var elapsed = Date.now() - loadStart;
             debugLog('loadLibrary: Loaded ' + comps.length + ' templates from cloud in ' + elapsed + 'ms', comps.length > 0 ? 'success' : 'warn');
             allComps = comps;
+            _invalidateCategoryCache();
             // Only render template grid if we're on a template view.
             // Do NOT overwrite analytics, submissions, or review views.
             if (activeCategory === '__analytics') {
@@ -1099,6 +1181,14 @@
             showToast('Failed to load templates: ' + err.message, true);
             hideSpinner();
             isLoading = false;
+            // Honour any reload that was queued during the failed load — but with a
+            // 2-second backoff to prevent an infinite retry storm when the network
+            // is persistently down (the previous version hammered Supabase in a
+            // tight loop and drowned the user in error toasts).
+            if (pendingLibraryReload) {
+                pendingLibraryReload = false;
+                setTimeout(function() { loadLibrary(); }, 2000);
+            }
         });
     }
 
@@ -1175,8 +1265,8 @@
     function renderUI() { updateNavActiveState(); renderCategories(); renderCompsGrid(); }
 
     function renderCategories() {
-        // Get unique categories from loaded comps
-        var categories = Array.from(new Set(allComps.map(function(comp) { return comp.category; }))).sort();
+        // Get unique categories from loaded comps (cached)
+        var categories = getUniqueCategories();
 
         // Update the "All Templates" nav item in sidebar
         var allTemplatesItem = document.querySelector('.nav-item[data-category="All"]');
@@ -1198,11 +1288,18 @@
             }
         }
 
-        // Render categories in the sidebar — only admins see rename/delete buttons
+        // Render categories in the sidebar — only admins see rename/delete buttons.
+        // Pre-compute category counts in a single O(n) pass instead of O(categories × allComps)
+        // (the previous nested filter was the dominant cost when re-rendering 248 comps).
         var sidebarIsAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
+        var _categoryCounts = {};
+        for (var _cci = 0; _cci < allComps.length; _cci++) {
+            var _ccCat = allComps[_cci].category;
+            _categoryCounts[_ccCat] = (_categoryCounts[_ccCat] || 0) + 1;
+        }
         categoryFiltersContainer.innerHTML = categories.map(function(cat) {
             var safeCat = escapeHTML(cat);
-            var count = allComps.filter(function(c) { return c.category === cat; }).length;
+            var count = _categoryCounts[cat] || 0;
             var isActive = cat === activeCategory;
             var actionBtns = sidebarIsAdmin ? (
                 '<div class="nav-item-actions">' +
@@ -1435,9 +1532,14 @@
         }
         indicator.classList.add('playing');
 
-        // Animation loop using requestAnimationFrame with DYNAMIC frame interval
+        // Animation loop using requestAnimationFrame with DYNAMIC frame interval.
+        // We also bail if the previewAnimations entry has been deleted (e.g. card
+        // was removed from DOM during a renderUI() before stopPreviewAnimation
+        // had a chance to run) — without this, the rAF chains forever and the
+        // closure leaks the previewFrames array + image element.
         function animate(timestamp) {
             if (!isRunning) return;
+            if (!previewAnimations[uniqueId]) return;
 
             if (timestamp - lastFrameTime >= frameInterval) {
                 img.src = frameSrcs[frameIndex];
@@ -1495,9 +1597,19 @@
         if (bl) thumbBlacklist = JSON.parse(bl);
     } catch(e) {}
 
+    // Debounced localStorage write — during a cold load with many missing thumbs,
+    // every broken image used to fire a full JSON.stringify+setItem (O(n²) growth
+    // in serialization cost). Now we batch writes within a 250ms window so a flurry
+    // of broken-image events results in one localStorage write.
+    var _blacklistFlushTimer = null;
+    function _flushBlacklist() {
+        _blacklistFlushTimer = null;
+        try { localStorage.setItem('blitzkrieg_thumb_blacklist', JSON.stringify(thumbBlacklist)); } catch(e) {}
+    }
     function blacklistThumb(storagePath) {
         thumbBlacklist[storagePath] = 1;
-        try { localStorage.setItem('blitzkrieg_thumb_blacklist', JSON.stringify(thumbBlacklist)); } catch(e) {}
+        if (_blacklistFlushTimer) clearTimeout(_blacklistFlushTimer);
+        _blacklistFlushTimer = setTimeout(_flushBlacklist, 250);
     }
 
     function updateAdminBarLabel() {
@@ -1696,8 +1808,8 @@
                                   (activeCategory === 'Favorites' && isFavorite(comp.uniqueId)) ||
                                   (activeCategory === 'Recent' && isRecent(comp.uniqueId)) ||
                                   (comp.category === activeCategory);
-            // Filter by search
-            var matchesSearch = comp.name.toLowerCase().includes(searchTerm);
+            // Filter by search — indexOf instead of ES6 .includes() for CEP 8/9 compat
+            var matchesSearch = !searchTerm || comp.name.toLowerCase().indexOf(searchTerm) !== -1;
             return matchesCategory && matchesSearch;
         }));
         if (filteredComps.length === 0) {
@@ -1793,10 +1905,14 @@
             });
         }
 
-        // Preview animation hover (supports both pre-signed URLs and lazy signing)
-        var stashItems = container.querySelectorAll('.stash-item.has-preview:not([data-events-bound])');
+        // Preview animation hover (supports both pre-signed URLs and lazy signing).
+        // CRITICAL: we use `data-preview-bound` here (NOT data-events-bound) — the
+        // drag/drop + view tracking loop below uses `:not([data-events-bound])` as
+        // its sentinel, so if we set data-events-bound here we'd silently strip
+        // drag-drop and analytics from every preview-capable card.
+        var stashItems = container.querySelectorAll('.stash-item.has-preview:not([data-preview-bound])');
         stashItems.forEach(function(item) {
-            item.setAttribute('data-events-bound', '1');
+            item.setAttribute('data-preview-bound', '1');
             var thumbnailContainer = item.querySelector('.thumbnail');
             var uniqueId = item.dataset.uniqueId;
             var storagePath = item.dataset.storagePath;
@@ -1844,7 +1960,14 @@
             }
         });
 
-        // On-hover auto-generate preview for cloud templates without preview frames
+        // On-hover auto-generate preview for cloud templates without preview frames.
+        // We throttle with a small global budget (_autoGenBudget): a user scrolling
+        // past 20 no-preview cards in rapid succession would otherwise enqueue 20
+        // simultaneous AEP downloads + renders via _genQueue, holding 20 blobs in
+        // memory. Cap the number of outstanding auto-generations so only the first
+        // few trigger — if the user actually wants a later card, their hover will
+        // clear the cap once earlier ones finish.
+        var AUTO_GEN_MAX = 3;
         var noPreviewItems = container.querySelectorAll('.stash-item[data-storage-path]:not(.has-preview):not([data-hover-bound])');
         noPreviewItems.forEach(function(item) {
             item.setAttribute('data-hover-bound', '1');
@@ -1860,8 +1983,10 @@
                 if (generated || generating) return;
                 if (!_hasCepBridge) return;
                 if (!window.blitzkriegSupabase) return;
+                if (_autoGenInFlight >= AUTO_GEN_MAX) return;
 
                 generating = true;
+                _autoGenInFlight++;
                 // Show subtle generating indicator
                 var thumb = item.querySelector('.thumbnail');
                 if (thumb) {
@@ -1881,6 +2006,7 @@
                 generateCloudThumbnail(comp).then(function(result) {
                     generated = true;
                     generating = false;
+                    _autoGenInFlight = Math.max(0, _autoGenInFlight - 1);
                     var gi = item.querySelector('.generating-indicator');
                     if (gi) gi.remove();
                     if (result && result.skipped) {
@@ -1892,6 +2018,7 @@
                 }).catch(function(err) {
                     generating = false;
                     generated = true;
+                    _autoGenInFlight = Math.max(0, _autoGenInFlight - 1);
                     var gi = item.querySelector('.generating-indicator');
                     if (gi) gi.remove();
                     debugLog('Auto-generate failed for ' + compName + ': ' + err.message, 'warn');
@@ -1899,19 +2026,26 @@
             });
         });
 
-        // View tracking + drag/drop for all unbound stash items
+        // View tracking + drag/drop for all unbound stash items.
+        // Per-session dedupe: a user scrolling through 40 cards fires 40 trackView
+        // calls, which hit Supabase if analytics reports synchronously. Track each
+        // uniqueId at most once per session so casual mouse movement doesn't thrash
+        // the analytics endpoint.
         var allItems = container.querySelectorAll('.stash-item:not([data-events-bound])');
         allItems.forEach(function(item) {
             item.setAttribute('data-events-bound', '1');
             item.addEventListener('mouseenter', function() {
-                if (window.blitzkriegAnalytics) {
-                    window.blitzkriegAnalytics.trackView(
-                        item.dataset.name,
-                        item.dataset.category,
-                        item.dataset.storagePath,
-                        item.dataset.uniqueId
-                    );
-                }
+                if (!window.blitzkriegAnalytics) return;
+                var uid = item.dataset.uniqueId;
+                if (!uid) return;
+                if (_trackedViewsThisSession[uid]) return;
+                _trackedViewsThisSession[uid] = 1;
+                window.blitzkriegAnalytics.trackView(
+                    item.dataset.name,
+                    item.dataset.category,
+                    item.dataset.storagePath,
+                    uid
+                );
             });
 
             item.addEventListener('dragstart', function(e) {
@@ -2154,14 +2288,17 @@
             }
             if (result.indexOf('Success') === 0 || result.indexOf('Warning') === 0) {
                 showToast(result.replace(/^(Success:|Warning:)\s*/, ''));
-                // Reload library to show the new preview
+                // Reload library once to show the new preview. The previous version
+                // fired three reloads (immediate + 1s + 3s) "for macOS AE 25.1 file
+                // system settling" — that triggered ~744 redundant metadata downloads
+                // for one operation. The pendingLibraryReload flag in loadLibrary
+                // already handles the case where a reload arrives while one is in flight.
                 var libraryPath = getLibraryPath();
                 if (libraryPath) {
-                    // Immediate reload attempt
-                    loadLibrary(libraryPath);
-                    // Progressive retries for macOS AE 25.1 file system and engine settling
-                    setTimeout(function() { loadLibrary(libraryPath); }, 1000);
-                    setTimeout(function() { loadLibrary(libraryPath); }, 3000);
+                    // Single delayed reload — gives AE 800ms to settle the new file
+                    // (cloud-mode loadLibrary takes no args; legacy local-mode loaded
+                    // by libraryPath, which is now ignored).
+                    setTimeout(function() { loadLibrary(); }, 800);
                 }
             } else {
                 showToast(result, true);
@@ -2210,7 +2347,7 @@
             showToast('Adding comps requires After Effects.', true);
             return;
         }
-        var categories = Array.from(new Set(allComps.map(function(c) { return c.category; }))).sort();
+        var categories = getUniqueCategories();
         existingCategorySelect.innerHTML = categories.map(function (cat) { return '<option value="' + escapeHTML(cat) + '">' + escapeHTML(cat) + '</option>'; }).join('');
         existingCategorySelect.disabled = categories.length === 0;
         if (categories.length === 0) { existingCategorySelect.innerHTML = '<option value="">No categories yet</option>'; }
@@ -2255,6 +2392,15 @@
                         stashInProgress = false;
                         hideSpinner();
                         return;
+                    }
+                    // Missing-footage warning from stashSelectedComp. The .aep still
+                    // saved and we still upload, but the user needs to know the bundle
+                    // is incomplete so they can relink footage and re-stash. Strip the
+                    // "Warning:" prefix to match the local-stash UX at line 2156.
+                    if (parsed.result && parsed.result.indexOf('Warning') === 0) {
+                        var stripped = parsed.result.replace(/^Warning:\s*/, '');
+                        showToast(stripped);
+                        debugLog(parsed.result, 'warn');
                     }
 
                     var tempPath = parsed.tempPath;
@@ -2323,7 +2469,11 @@
                         });
                         if (insertResult.error) throw new Error('Submission record failed: ' + insertResult.error.message);
 
-                        safeEvalScript('cleanupTempStash("' + escapeForExtendScript(tempPath) + '")');
+                        safeEvalScript('cleanupTempStash("' + escapeForExtendScript(tempPath) + '")', function(cuRes) {
+                            if (cuRes && cuRes.indexOf('ERROR') === 0) {
+                                debugLog('Temp stash cleanup failed: ' + cuRes, 'warn');
+                            }
+                        });
                         showToast('Template submitted for review!');
                         stashInProgress = false;
                         hideSpinner();
@@ -2344,6 +2494,15 @@
                     showToast('Failed to submit template: ' + err.message, true);
                     stashInProgress = false;
                     hideSpinner();
+                    // Clean up the temp stash dir we created — without this, every
+                    // failed upload leaks a full comp bundle (AEP + frames + metadata)
+                    // in /tmp permanently. The try/catch in cleanupTempStash guards
+                    // against permissions / missing-path errors.
+                    if (typeof tempPath === 'string' && tempPath) {
+                        try {
+                            safeEvalScript('cleanupTempStash("' + escapeForExtendScript(tempPath) + '")');
+                        } catch (ctErr) {}
+                    }
                 }
             })();
         });
@@ -2376,13 +2535,19 @@
     async function readTempFiles(tempPath, categoryName) {
         var categoryDir = tempPath + '/' + categoryName;
 
-        // List category dir to find the comp subfolder
+        // List category dir to find the comp subfolder.
+        // ES5-safe suffix checks throughout — no String.prototype.endsWith.
         var entries = await listDirAsync(categoryDir);
         var folderName = null;
         for (var i = 0; i < entries.length; i++) {
-            var eName = entries[i].replace(/\/$/, '');
+            var entryRaw = entries[i];
+            var eName = entryRaw.replace(/\/$/, '');
             if (eName === '.' || eName === '..' || eName === '.DS_Store') continue;
-            if (entries[i].endsWith('/')) { folderName = eName; break; }
+            // Trailing slash means it's a directory
+            if (entryRaw.length > 0 && entryRaw.charAt(entryRaw.length - 1) === '/') {
+                folderName = eName;
+                break;
+            }
         }
         if (!folderName) throw new Error('No comp folder found in ' + categoryDir);
 
@@ -2393,7 +2558,11 @@
         var aepName = null;
         for (var j = 0; j < compEntries.length; j++) {
             var ce = compEntries[j].replace(/\/$/, '');
-            if (ce.toLowerCase().endsWith('.aep')) { aepName = ce; break; }
+            var ceLower = ce.toLowerCase();
+            if (ceLower.length >= 4 && ceLower.indexOf('.aep', ceLower.length - 4) !== -1) {
+                aepName = ce;
+                break;
+            }
         }
         if (!aepName) throw new Error('No .aep file found');
 
@@ -2624,8 +2793,10 @@
      */
     function toggleFavorite(uniqueId) {
         var index = favoriteComps.indexOf(uniqueId);
+        var nowFavorited = false;
         if (index === -1) {
             favoriteComps.push(uniqueId);
+            nowFavorited = true;
             showToast('Added to favorites');
             // Track favorite add
             if (window.blitzkriegAnalytics) {
@@ -2642,7 +2813,30 @@
             showToast('Removed from favorites');
         }
         saveFavoritesAndRecent();
-        renderUI(); // Re-render to update star icon
+        // Targeted DOM update — flipping a star icon does NOT need a full grid
+        // re-render. The previous renderUI() rebuilt the entire 248-card innerHTML
+        // and re-bound every event listener for a single class change. Just toggle
+        // the class on the relevant card. If we're currently viewing the Favorites
+        // virtual category, the unfavorited card needs to disappear, so fall back
+        // to a re-render in that one case.
+        if (activeCategory === 'Favorites') {
+            renderUI();
+        } else {
+            var card = document.querySelector('.stash-item[data-unique-id="' + uniqueId + '"]');
+            if (card) {
+                if (nowFavorited) card.classList.add('is-favorite');
+                else card.classList.remove('is-favorite');
+                // Also update any star icon's visual state via class on the button
+                var starBtn = card.querySelector('.favorite-btn');
+                if (starBtn) {
+                    if (nowFavorited) starBtn.classList.add('favorited');
+                    else starBtn.classList.remove('favorited');
+                }
+            } else {
+                // Card not in current view — fall back to re-render to be safe
+                renderUI();
+            }
+        }
     }
 
     /**
@@ -2884,7 +3078,7 @@
         if (categoryToDeleteCount) categoryToDeleteCount.textContent = compCount;
 
         // Populate transfer category dropdown (exclude current category)
-        var categories = Array.from(new Set(allComps.map(function(c) { return c.category; }))).sort();
+        var categories = getUniqueCategories();
         var otherCategories = categories.filter(function(cat) { return cat !== categoryName; });
         if (transferToCategorySelect) {
             transferToCategorySelect.innerHTML = otherCategories.map(function(cat) {
@@ -2976,6 +3170,7 @@
                 // Remove deleted category comps from local state immediately
                 // so modals (add comp, move, etc.) don't show stale categories
                 allComps = allComps.filter(function(c) { return c.category !== info.category; });
+                _invalidateCategoryCache();
                 renderUI();
                 loadLibrary();
             }).catch(function(err) {
@@ -3026,7 +3221,7 @@
         if (compToMoveName) compToMoveName.textContent = name;
 
         // Populate category dropdown excluding current category
-        var categories = Array.from(new Set(allComps.map(function(c) { return c.category; }))).sort();
+        var categories = getUniqueCategories();
         var otherCategories = categories.filter(function(cat) { return cat !== category; });
 
         if (moveToCategorySelect) {
@@ -3205,7 +3400,7 @@
         if (selected.length === 0) return;
         if (bulkMoveCount) bulkMoveCount.textContent = selected.length;
 
-        var categories = Array.from(new Set(allComps.map(function(c) { return c.category; }))).sort();
+        var categories = getUniqueCategories();
         if (bulkMoveCategorySelect) {
             bulkMoveCategorySelect.innerHTML = categories.map(function(cat) {
                 return '<option value="' + escapeHTML(cat) + '">' + escapeHTML(cat) + '</option>';
@@ -3342,7 +3537,7 @@
 
             // 1-9 - switch to category by number
             if (e.key >= '1' && e.key <= '9' && !e.ctrlKey && !e.metaKey && !e.altKey) {
-                var categories = Array.from(new Set(allComps.map(function(c) { return c.category; }))).sort();
+                var categories = getUniqueCategories();
                 var index = parseInt(e.key) - 1;
                 if (index < categories.length) {
                     activeCategory = categories[index];
@@ -3679,6 +3874,8 @@
                 var sub = res.data;
                 var meta = sub.metadata || {};
                 var isAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
+                var detailCurrentUser = window.blitzkriegAuth && window.blitzkriegAuth.getUser();
+                var detailIsOwn = !!(detailCurrentUser && sub.user_id === detailCurrentUser.id);
 
                 // Sign thumbnail + preview frames
                 var pathsToSign = [];
@@ -3695,7 +3892,11 @@
 
                 var signedMap = {};
                 if (pathsToSign.length > 0 && window.cloudLibrary && window.cloudLibrary.signPaths) {
-                    try { signedMap = await window.cloudLibrary.signPaths(pathsToSign); } catch(e) {}
+                    try {
+                        signedMap = await window.cloudLibrary.signPaths(pathsToSign);
+                    } catch(e) {
+                        debugLog('openSubmissionDetail: signPaths failed: ' + (e && e.message || e), 'warn');
+                    }
                 }
 
                 var thumbUrl = sub.storage_path ? (signedMap[sub.storage_path + '/comp.png'] || '') : '';
@@ -3830,9 +4031,19 @@
     function approveSubmission(submissionId) {
         var sb = window.blitzkriegSupabase;
         if (!sb || !window.blitzkriegAuth || !window.blitzkriegAuth.isAdmin()) return;
+        // Prevent double-submit: if this submission is already being processed,
+        // a second click would fire a parallel copy-delete pipeline and corrupt state.
+        if (_submissionInFlight[submissionId]) {
+            showToast('Already processing this submission...');
+            return;
+        }
+        _submissionInFlight[submissionId] = 1;
 
         showSpinner();
         showToast('Approving submission...');
+
+        // Clear the in-flight flag on every exit path
+        function _approveDone() { delete _submissionInFlight[submissionId]; }
 
         sb.from('blitzkrieg_template_submissions')
             .select('*')
@@ -3842,12 +4053,25 @@
                 if (res.error || !res.data) {
                     hideSpinner();
                     showToast('Submission not found.', true);
+                    _approveDone();
                     return;
                 }
 
                 var sub = res.data;
 
                 var pendingPath = sub.storage_path;
+                if (!pendingPath || typeof pendingPath !== 'string') {
+                    hideSpinner();
+                    showToast('Submission has no storage path — cannot approve.', true);
+                    _approveDone();
+                    return;
+                }
+                if (!sub.category || typeof sub.category !== 'string') {
+                    hideSpinner();
+                    showToast('Submission has no category — cannot approve.', true);
+                    _approveDone();
+                    return;
+                }
                 var productionPath = sub.category + '/' + pendingPath.split('/').pop();
 
                 // List files in the pending path (including preview subfolder)
@@ -3855,6 +4079,7 @@
                     if (listRes.error || !listRes.data || listRes.data.length === 0) {
                         hideSpinner();
                         showToast('No files found in pending path.', true);
+                        _approveDone();
                         return;
                     }
 
@@ -3917,11 +4142,23 @@
                                 renderSubmissionsGrid('pending_review');
                             }
                         }
+                        _approveDone();
                     }).catch(function(err) {
                         hideSpinner();
                         showToast('Approve failed: ' + err.message, true);
+                        _approveDone();
                     });
+                }).catch(function(listErr) {
+                    // inner list().then() rejection — network failure during pending listing
+                    hideSpinner();
+                    showToast('Approve failed to list files: ' + (listErr && listErr.message || listErr), true);
+                    _approveDone();
                 });
+            }).catch(function(outerErr) {
+                // outer select().single() rejection — network failure fetching the submission
+                hideSpinner();
+                showToast('Approve failed: ' + (outerErr && outerErr.message || outerErr), true);
+                _approveDone();
             });
     }
 
@@ -3943,6 +4180,8 @@
             showToast('You do not have permission to reject submissions.', true);
             return;
         }
+        if (_submissionInFlight[submissionId]) { showToast('Already processing this submission...'); return; }
+        _submissionInFlight[submissionId] = 1;
 
         rejectSubmissionModal.style.display = 'none';
         showSpinner();
@@ -3958,6 +4197,7 @@
             .then(function(res) {
                 hideSpinner();
                 pendingRejectId = null;
+                delete _submissionInFlight[submissionId];
                 if (res.error) {
                     showToast('Rejection failed: ' + res.error.message, true);
                 } else {
@@ -3975,6 +4215,7 @@
             }).catch(function(err) {
                 hideSpinner();
                 pendingRejectId = null;
+                delete _submissionInFlight[submissionId];
                 showToast('Rejection failed: ' + err.message, true);
             });
     }
@@ -3987,6 +4228,8 @@
     function withdrawSubmission(submissionId) {
         var sb = window.blitzkriegSupabase;
         if (!sb || !window.blitzkriegAuth) return;
+        if (_submissionInFlight[submissionId]) { showToast('Already processing this submission...'); return; }
+        _submissionInFlight[submissionId] = 1;
 
         var userId = window.blitzkriegAuth.getUser().id;
 
@@ -4007,27 +4250,26 @@
                 showToast('Withdrawing submission...');
 
                 var sub = res.data;
-                // Delete files from pending storage
+                // Delete files from pending storage. The old code referenced a
+                // non-existent `window.cloudLibrary.collectAllFilesForPath` via a
+                // ternary that always fell through — fixed to a single straightforward
+                // list-and-recurse flow.
                 if (sub.storage_path) {
                     try {
-                        var allFiles = await window.cloudLibrary.collectAllFilesForPath ?
-                            window.cloudLibrary.collectAllFilesForPath(sub.storage_path) : [];
-                        // Fallback: list and delete manually
-                        if (!allFiles || allFiles.length === 0) {
-                            var listRes = await sb.storage.from('blitzkrieg').list(sub.storage_path);
-                            if (listRes.data) {
-                                allFiles = listRes.data
-                                    .filter(function(f) { return f.id !== null; })
-                                    .map(function(f) { return sub.storage_path + '/' + f.name; });
-                                // Check subfolders
-                                var subFolders = listRes.data.filter(function(f) { return f.id === null; });
-                                for (var sf = 0; sf < subFolders.length; sf++) {
-                                    var subList = await sb.storage.from('blitzkrieg').list(sub.storage_path + '/' + subFolders[sf].name);
-                                    if (subList.data) {
-                                        subList.data.filter(function(f) { return f.id !== null; }).forEach(function(f) {
-                                            allFiles.push(sub.storage_path + '/' + subFolders[sf].name + '/' + f.name);
-                                        });
-                                    }
+                        var allFiles = [];
+                        var listRes = await sb.storage.from('blitzkrieg').list(sub.storage_path);
+                        if (listRes.data) {
+                            allFiles = listRes.data
+                                .filter(function(f) { return f.id !== null; })
+                                .map(function(f) { return sub.storage_path + '/' + f.name; });
+                            // Check subfolders (e.g. preview/)
+                            var subFolders = listRes.data.filter(function(f) { return f.id === null; });
+                            for (var sf = 0; sf < subFolders.length; sf++) {
+                                var subList = await sb.storage.from('blitzkrieg').list(sub.storage_path + '/' + subFolders[sf].name);
+                                if (subList.data) {
+                                    subList.data.filter(function(f) { return f.id !== null; }).forEach(function(f) {
+                                        allFiles.push(sub.storage_path + '/' + subFolders[sf].name + '/' + f.name);
+                                    });
                                 }
                             }
                         }
@@ -4046,6 +4288,7 @@
                     .eq('user_id', userId);
 
                 hideSpinner();
+                delete _submissionInFlight[submissionId];
                 if (delRes.error) {
                     showToast('Withdraw failed: ' + delRes.error.message, true);
                 } else {
@@ -4058,6 +4301,10 @@
                         renderSubmissionsGrid(activeCategory.replace('__submissions_', ''));
                     }
                 }
+            }).catch(function(err) {
+                hideSpinner();
+                delete _submissionInFlight[submissionId];
+                showToast('Withdraw failed: ' + (err && err.message || err), true);
             });
     }
 
@@ -4067,6 +4314,8 @@
     function resubmitSubmission(submissionId) {
         var sb = window.blitzkriegSupabase;
         if (!sb || !window.blitzkriegAuth) return;
+        if (_submissionInFlight[submissionId]) { showToast('Already processing this submission...'); return; }
+        _submissionInFlight[submissionId] = 1;
 
         var userId = window.blitzkriegAuth.getUser().id;
 
@@ -4085,6 +4334,7 @@
             .eq('status', 'rejected')
             .then(function(res) {
                 hideSpinner();
+                delete _submissionInFlight[submissionId];
                 if (res.error) {
                     showToast('Resubmit failed: ' + res.error.message, true);
                 } else {
@@ -4095,6 +4345,10 @@
                     updateNavActiveState();
                     renderSubmissionsGrid('pending');
                 }
+            }).catch(function(err) {
+                hideSpinner();
+                delete _submissionInFlight[submissionId];
+                showToast('Resubmit failed: ' + (err && err.message || err), true);
             });
     }
 
@@ -5576,20 +5830,54 @@
                 window.blitzkriegAnalytics.trackAccessChange(null, 'update_check', null);
             }
 
-            // Show update banner
+            // Show update banner. We deliberately use textContent + addEventListener
+            // (NOT inline `onclick="..."` with JSON.stringify(files)) because the
+            // remoteVersion and files come from a Supabase RPC; injecting them into an
+            // HTML attribute string is an XSS-to-RCE vector — a backslash or unescaped
+            // quote in the manifest would let an attacker break out of the JS string
+            // literal context inside the onclick. Using DOM APIs keeps the data out of
+            // the parser entirely.
             var app = document.getElementById('app');
             if (!app || document.getElementById('blitz-update-banner')) return;
             var banner = document.createElement('div');
             banner.id = 'blitz-update-banner';
             banner.className = 'update-banner';
-            banner.innerHTML = '<div class="update-banner-info">' +
-                '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="flex-shrink:0"><path d="M8 1L1 15h14L8 1z" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M8 6v4M8 12h.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>' +
-                '<span>Update available: <strong>v' + escapeHTML(remoteVersion) + '</strong> (you have v' + BLITZKRIEG_LOCAL_VERSION + ')</span>' +
-                '</div>' +
-                '<div class="update-banner-actions">' +
-                '<button class="update-banner-btn" onclick="window.__blitzInstallUpdate(\'' + escapeHTML(remoteVersion) + '\', ' + JSON.stringify(files).replace(/'/g, "\\'") + ')">Install &amp; Reload</button>' +
-                '<button class="update-banner-dismiss" onclick="this.closest(\'.update-banner\').remove()">&times;</button>' +
-                '</div>';
+
+            var infoDiv = document.createElement('div');
+            infoDiv.className = 'update-banner-info';
+            infoDiv.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="flex-shrink:0"><path d="M8 1L1 15h14L8 1z" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M8 6v4M8 12h.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+            var infoSpan = document.createElement('span');
+            // Build with textContent for the dynamic version string. The static prefix
+            // and the local version (a build constant) can stay as innerHTML for the
+            // <strong> wrapper. Use a fragment to keep the markup clean.
+            var localVersion = BLITZKRIEG_LOCAL_VERSION;
+            infoSpan.appendChild(document.createTextNode('Update available: '));
+            var strongVer = document.createElement('strong');
+            strongVer.textContent = 'v' + remoteVersion;
+            infoSpan.appendChild(strongVer);
+            infoSpan.appendChild(document.createTextNode(' (you have v' + localVersion + ')'));
+            infoDiv.appendChild(infoSpan);
+            banner.appendChild(infoDiv);
+
+            var actionsDiv = document.createElement('div');
+            actionsDiv.className = 'update-banner-actions';
+            var installBtn = document.createElement('button');
+            installBtn.className = 'update-banner-btn';
+            installBtn.textContent = 'Install & Reload';
+            installBtn.addEventListener('click', function() {
+                installUpdate(remoteVersion, files);
+            });
+            actionsDiv.appendChild(installBtn);
+
+            var dismissBtn = document.createElement('button');
+            dismissBtn.className = 'update-banner-dismiss';
+            dismissBtn.innerHTML = '&times;';
+            dismissBtn.addEventListener('click', function() {
+                banner.remove();
+            });
+            actionsDiv.appendChild(dismissBtn);
+            banner.appendChild(actionsDiv);
+
             app.insertBefore(banner, app.firstChild);
         }).catch(function(err) {
             debugLog('Update check failed: ' + err.message, 'warn');
@@ -5635,6 +5923,31 @@
         var sb = window.blitzkriegSupabase;
         if (!sb) return;
 
+        // SECURITY: client-side validation of update file paths. Reject anything
+        // containing parent-directory traversal, absolute paths, or weird leading
+        // chars. The hostscript writeUpdateFile() also enforces this server-side
+        // (defense in depth) but failing fast in JS gives a clearer error.
+        var ALLOWED_UPDATE_EXT = /\.(js|css|html|htm|jsx|json|svg|xml)$/i;
+        var validFiles = [];
+        for (var vfi = 0; vfi < fileList.length; vfi++) {
+            var fname = fileList[vfi];
+            if (typeof fname !== 'string' || !fname) continue;
+            // No traversal, no absolute paths, no UNC, no Windows drive letters
+            if (fname.indexOf('..') !== -1 || fname.charAt(0) === '/' || fname.charAt(0) === '\\') continue;
+            if (/^[a-zA-Z]:[\\\/]/.test(fname)) continue;
+            // Allow-list extensions only
+            if (!ALLOWED_UPDATE_EXT.test(fname)) continue;
+            validFiles.push(fname);
+        }
+        if (validFiles.length !== fileList.length) {
+            debugLog('Update rejected ' + (fileList.length - validFiles.length) + ' file(s) with invalid paths/extensions', 'warn');
+        }
+        if (validFiles.length === 0) {
+            debugLog('No valid files in update manifest after path validation', 'error');
+            return;
+        }
+        fileList = validFiles;
+
         debugLog('Starting update to v' + version + ' (' + fileList.length + ' files)', 'info');
         if (window.blitzkriegAnalytics) {
             window.blitzkriegAnalytics.trackAccessChange(null, 'update_started', null);
@@ -5642,8 +5955,9 @@
 
         // Get extension root path from ExtendScript
         safeEvalScript('getExtensionRootPath()', function(rootPath) {
-            if (!rootPath || rootPath === 'EvalScript error.' || rootPath === 'undefined') {
-                debugLog('Cannot determine extension root path', 'error');
+            if (!rootPath || rootPath === 'EvalScript error.' || rootPath === 'undefined' ||
+                rootPath.indexOf('ERROR:') === 0) {
+                debugLog('Cannot determine extension root path: ' + (rootPath || 'empty'), 'error');
                 if (window.blitzkriegAnalytics) {
                     window.blitzkriegAnalytics.trackAccessChange(null, 'update_failed', null);
                 }
@@ -5730,7 +6044,13 @@
         return new Promise(function(resolve, reject) {
             if (_cachedTempDir) { resolve(_cachedTempDir); return; }
             safeEvalScript('getSafeTempFolder().fsName', function(r) {
-                if (!r || r === 'EvalScript error.') { reject(new Error('Cannot get temp dir')); return; }
+                // Reject the literal "undefined" string (ExtendScript stringifies undefined
+                // to the literal word when evaluating non-existent symbols). Also reject
+                // EvalScript bridge failures and empty responses.
+                if (!r || r === 'EvalScript error.' || r === 'undefined' || r === 'null') {
+                    reject(new Error('Cannot get temp dir (got: ' + (r || 'empty') + ')'));
+                    return;
+                }
                 _cachedTempDir = r;
                 resolve(r);
             });
@@ -5868,14 +6188,29 @@
      * Sequential generation queue — ExtendScript is single-threaded so concurrent
      * generatePreviewsToDisk calls interfere with each other. This serializes all
      * generation work with a delay between items to let AE recover RAM.
+     *
+     * Memory bookkeeping: we track how many items are still in flight. When the
+     * count drops to zero we reset `_genQueue` to a fresh resolved promise so the
+     * chain doesn't accumulate N wrapped results in closures across long sessions
+     * (e.g. an admin running "Generate All" 10 times in a row used to leave 2480
+     * nested .then() chains in memory).
      */
     var _genQueue = Promise.resolve();
+    var _genQueuePending = 0;
     var GEN_DELAY_MS = 800; // breathing room between generations to prevent AE crashes
     function _enqueueGeneration(fn) {
+        _genQueuePending++;
         // Wrap fn result so the queue always resolves (never stays rejected).
         // This prevents one failure from killing all subsequent generations.
-        _genQueue = _genQueue.then(function() {
-            return fn().then(function(result) {
+        //
+        // CRITICAL: wrap fn() inside a Promise.resolve().then chain so that a
+        // SYNCHRONOUS throw from fn (before it returns a promise) is converted
+        // to a rejection instead of escaping the queue. Without this, a sync
+        // throw would escape _genQueue.then → the chain becomes permanently
+        // rejected → _genQueuePending never decrements → every subsequent
+        // generation short-circuits to the catch path.
+        var thisRun = _genQueue.then(function() {
+            return Promise.resolve().then(fn).then(function(result) {
                 return { ok: true, value: result };
             }, function(err) {
                 return { ok: false, error: err };
@@ -5885,9 +6220,15 @@
                 setTimeout(function() { resolve(wrapped); }, GEN_DELAY_MS);
             });
         });
+        _genQueue = thisRun;
         // Return a promise that rejects if this specific generation failed,
         // so the caller can distinguish success from failure.
-        return _genQueue.then(function(wrapped) {
+        return thisRun.then(function(wrapped) {
+            _genQueuePending--;
+            if (_genQueuePending <= 0) {
+                _genQueuePending = 0;
+                _genQueue = Promise.resolve(); // drop chain, let GC reclaim
+            }
             if (wrapped.ok) return wrapped.value;
             throw wrapped.error;
         });
@@ -5914,7 +6255,11 @@
         debugLog('GEN START: ' + comp.name + ' (' + comp.storagePath + ')');
 
         return getTempDir().then(function(sysTempDir) {
-            tempDir = sysTempDir + '/blitzkrieg_gen_' + Date.now();
+            // Date.now() alone can collide when two generations fire within the
+            // same millisecond (rare but reachable on fast machines after batch delays).
+            // Append a high-entropy random suffix so each tempDir is unique.
+            var unique = Date.now() + '_' + Math.floor(Math.random() * 0x7fffffff).toString(36);
+            tempDir = sysTempDir + '/blitzkrieg_gen_' + unique;
             outputDir = tempDir + '/output';
 
             return new Promise(function(resolve, reject) {
@@ -5940,15 +6285,40 @@
                     safeEvalScript(
                         'generatePreviewsToDisk("' + escapeForExtendScript(aepPath) + '", "' + escapeForExtendScript(outputDir) + '")',
                         function(result) {
-                            debugLog('GEN: ExtendScript result: ' + (result || '').substring(0, 200));
+                            debugLog('GEN: ExtendScript result: ' + (result || '').substring(0, 300));
+                            // Detect the literal ExtendScript-bridge failure string BEFORE JSON.parse.
+                            // safeEvalScript returns "EvalScript error." (and sometimes "undefined" /
+                            // empty string) when the JSX host throws outside the function's try block.
+                            if (!result || result === 'EvalScript error.' || result === 'undefined') {
+                                reject(new Error('ExtendScript bridge failure: ' + (result || 'empty response') + ' — reload the AE panel and try again.'));
+                                return;
+                            }
                             try {
                                 var parsed = JSON.parse(result);
-                                if (parsed.error) { reject(new Error(parsed.error)); return; }
+                                if (parsed.error) {
+                                    var errMsg = parsed.error;
+                                    if (parsed.step) errMsg += ' [step: ' + parsed.step + ']';
+                                    if (parsed.aepSize !== undefined) errMsg += ' (size: ' + parsed.aepSize + 'B)';
+                                    reject(new Error(errMsg));
+                                    return;
+                                }
                                 if (parsed.skipped) {
-                                    debugLog('GEN: skipped — ' + (parsed.skipReason || 'unrenderable'), 'warn');
+                                    var skipDetail = parsed.skipReason || 'unrenderable';
+                                    if (parsed.missingFootage && parsed.missingFootage.length) {
+                                        skipDetail += ' — missing: ' + parsed.missingFootage.join(', ');
+                                    }
+                                    debugLog('GEN: skipped — ' + skipDetail, 'warn');
                                     resolve(parsed);
                                 } else if (parsed.thumbnailOnly) {
-                                    debugLog('GEN: thumbnail only (missing footage, skipped preview frames)');
+                                    var tOnlyDetail = 'thumbnail only (missing footage, skipped preview frames)';
+                                    if (parsed.missingFootage && parsed.missingFootage.length) {
+                                        tOnlyDetail += ' — missing: ' + parsed.missingFootage.join(', ');
+                                    }
+                                    debugLog('GEN: ' + tOnlyDetail, 'warn');
+                                } else if (parsed.incompleteFrames) {
+                                    debugLog('GEN: ' + parsed.frameCount + '/' + parsed.plannedFrameCount + ' frames (rendering bailed early after consecutive failures)', 'warn');
+                                } else if (parsed.tooShort) {
+                                    debugLog('GEN: comp too short for preview animation (frameCount=' + parsed.frameCount + ')', 'warn');
                                 } else {
                                     debugLog('GEN: rendered ' + parsed.frameCount + ' frames');
                                 }
@@ -5976,21 +6346,37 @@
                         { contentType: 'image/png', upsert: true }
                     )
                 ];
+                var skippedFrames = 0;
+                // Renumber frames during upload so the cloud copy is contiguous
+                // (frame_0, frame_1, ..., frame_N) even if some local frames are
+                // missing. The hover preview animation expects contiguous indices —
+                // a gap (e.g. frame_2 missing) would break loop playback.
+                var uploadFrameIdx = 0;
 
                 var frameCount = renderResult.frameCount || 0;
                 var frameChain = Promise.resolve();
                 for (var i = 0; i < frameCount; i++) {
-                    (function(idx) {
+                    (function(srcIdx) {
                         frameChain = frameChain.then(function() {
-                            var framePath = outputDir + '/preview/frame_' + idx + '.png';
+                            var framePath = outputDir + '/preview/frame_' + srcIdx + '.png';
                             return readFileAsBlobAsync(framePath, 'image/png').then(function(frameBlob) {
+                                var destIdx = uploadFrameIdx++;
                                 uploads.push(
                                     sb.storage.from('blitzkrieg').upload(
-                                        comp.storagePath + '/preview/frame_' + idx + '.png', frameBlob,
+                                        comp.storagePath + '/preview/frame_' + destIdx + '.png', frameBlob,
                                         { contentType: 'image/png', upsert: true }
                                     )
                                 );
-                            }).catch(function() { /* skip missing frame */ });
+                            }).catch(function(readErr) {
+                                // Only swallow file-missing errors (the frame file wasn't
+                                // produced by ExtendScript). Log everything else so silent
+                                // disk-IO failures aren't masked as success.
+                                var msg = readErr && readErr.message ? readErr.message : String(readErr);
+                                if (msg.indexOf('Failed to read') === -1) {
+                                    debugLog('GEN: frame ' + srcIdx + ' read error (' + msg + ')', 'warn');
+                                }
+                                skippedFrames++;
+                            });
                         });
                     })(i);
                 }
@@ -5998,16 +6384,34 @@
                 return frameChain.then(function() {
                     return Promise.all(uploads);
                 }).then(function(results) {
-                    var errs = results.filter(function(r) { return r.error; });
-                    if (errs.length > 0) debugLog('Upload errors: ' + errs.map(function(r) { return r.error.message; }).join(', '), 'warn');
-                    else debugLog('GEN: uploaded thumbnail + ' + frameCount + ' frames for ' + comp.name, 'success');
+                    // Distinguish thumbnail upload (index 0) from frame uploads.
+                    var thumbResult = results[0];
+                    var thumbFailed = !!(thumbResult && thumbResult.error);
+                    var frameErrs = [];
+                    for (var ri = 1; ri < results.length; ri++) {
+                        if (results[ri] && results[ri].error) frameErrs.push(results[ri].error.message || 'unknown');
+                    }
+                    if (thumbFailed) {
+                        // Thumbnail upload failure is fatal — without it the template
+                        // shows a placeholder forever. Throw so the caller can mark
+                        // this generation as failed instead of incrementing succeeded.
+                        throw new Error('Thumbnail upload failed: ' + (thumbResult.error.message || 'unknown'));
+                    }
+                    if (frameErrs.length > 0) {
+                        debugLog('GEN: ' + frameErrs.length + '/' + (results.length - 1) + ' frame uploads failed: ' + frameErrs.slice(0, 3).join(', '), 'warn');
+                    }
+                    if (skippedFrames > 0) {
+                        debugLog('GEN: ' + skippedFrames + ' frame(s) missing on disk before upload', 'warn');
+                    }
+                    var actualFramesUploaded = (results.length - 1) - frameErrs.length;
+                    debugLog('GEN: uploaded thumbnail + ' + actualFramesUploaded + '/' + frameCount + ' frames for ' + comp.name, 'success');
 
                     if (comp.storagePath && thumbBlacklist[comp.storagePath]) {
                         delete thumbBlacklist[comp.storagePath];
                         try { localStorage.setItem('blitzkrieg_thumb_blacklist', JSON.stringify(thumbBlacklist)); } catch(e) {}
                     }
 
-                    return updateMetadataAfterGeneration(comp.storagePath, frameCount).then(function() { return true; }).catch(function() { return true; });
+                    return updateMetadataAfterGeneration(comp.storagePath, actualFramesUploaded).then(function() { return true; }).catch(function() { return true; });
                 });
             });
         }).then(function(result) {
@@ -6085,29 +6489,49 @@
             showToast('Requires After Effects.', true);
             return;
         }
+        // Re-entrance guard — a double-click on the "Generate Missing" button would
+        // otherwise spawn two concurrent processing loops, both calling generateCloudThumbnail
+        // against overlapping comps and flipping the progress bar between them chaotically.
+        if (generateAllMissingThumbnails._running) {
+            showToast('Generation already in progress.');
+            return;
+        }
+        generateAllMissingThumbnails._running = true;
 
+        // Wrap the entire setup in a try/catch so a synchronous failure (e.g.
+        // localStorage.setItem throwing QuotaExceededError in private mode at the
+        // blacklist clear below) can't leave `_running = true` permanently and
+        // brick the button until panel reload.
         var compsToProcess;
-        if (forceAll) {
-            // Force regenerate all cloud templates
-            compsToProcess = allComps.filter(function(c) { return !!c.storagePath; });
-        } else {
-            // Templates missing thumbnails, blacklisted, or missing preview frames.
-            // NOTE: thumbUrl is NOT a reliable signal — Supabase createSignedUrls
-            // generates signed URLs even for non-existent files. Use thumbnailVerified
-            // (metadata-based) instead.
-            compsToProcess = allComps.filter(function(c) {
-                if (!c.storagePath) return false;
-                if (!c.thumbnailVerified) return true;
-                if (thumbBlacklist[c.storagePath]) return true;
-                if (!c.previewFrameCount) return true;
-                return false;
-            });
+        try {
+            if (forceAll) {
+                // Force regenerate all cloud templates
+                compsToProcess = allComps.filter(function(c) { return !!c.storagePath; });
+            } else {
+                // Templates missing thumbnails, blacklisted, or missing preview frames.
+                // NOTE: thumbUrl is NOT a reliable signal — Supabase createSignedUrls
+                // generates signed URLs even for non-existent files. Use thumbnailVerified
+                // (metadata-based) instead.
+                compsToProcess = allComps.filter(function(c) {
+                    if (!c.storagePath) return false;
+                    if (!c.thumbnailVerified) return true;
+                    if (thumbBlacklist[c.storagePath]) return true;
+                    if (!c.previewFrameCount) return true;
+                    return false;
+                });
+            }
+        } catch (setupErr) {
+            generateAllMissingThumbnails._running = false;
+            debugLog('generateAllMissingThumbnails setup failed: ' + (setupErr && setupErr.message || setupErr), 'error');
+            showToast('Generation setup failed: ' + (setupErr && setupErr.message || setupErr), true);
+            return;
         }
 
         if (compsToProcess.length === 0) {
             showToast('All templates already have thumbnails!');
             var emptyBar = document.getElementById('admin-bar-progress');
             if (emptyBar) emptyBar.style.display = 'none';
+            generateAllMissingThumbnails._running = false;
             return;
         }
 
@@ -6128,23 +6552,29 @@
 
         // Update progress bar
         function updateProgress() {
-            var pct = Math.round((processed / total) * 100);
+            // Guard against division by zero AND clamp the "current item" counter
+            // to total so the last iteration doesn't read "Generating 11/10".
+            var safeTotal = total || 1;
+            var pct = Math.round((processed / safeTotal) * 100);
+            var currentItem = Math.min(processed + 1, total);
             var bar = document.getElementById('generate-progress-bar');
             var text = document.getElementById('generate-progress-text');
             if (bar) bar.style.width = pct + '%';
             if (text) text.textContent = processed + '/' + total + ' — ' + succeeded + ' done, ' + failed + ' failed';
-            showToast('Generating ' + (processed + 1) + '/' + total + ': ' + (compsToProcess[processed] ? compsToProcess[processed].name : ''));
+            showToast('Generating ' + currentItem + '/' + total + ': ' + (compsToProcess[processed] ? compsToProcess[processed].name : ''));
         }
 
         function processNext() {
             if (processed >= total) {
                 stashInProgress = false;
+                generateAllMissingThumbnails._running = false;
                 hideSpinner();
                 var bar = document.getElementById('generate-progress-bar');
                 var text = document.getElementById('generate-progress-text');
                 if (bar) bar.style.width = '100%';
                 if (text) text.textContent = 'Done! ' + succeeded + ' generated, ' + failed + ' failed.';
-                showToast('Generation complete: ' + succeeded + ' thumbnails, ' + failed + ' failed.');
+                var thumbNoun = succeeded === 1 ? 'thumbnail' : 'thumbnails';
+                showToast('Generation complete: ' + succeeded + ' ' + thumbNoun + ', ' + failed + ' failed.');
                 // Invalidate cache and reload to show new thumbnails + previews
                 window.cloudLibrary.invalidateCache();
                 loadLibrary();

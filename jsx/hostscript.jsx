@@ -296,6 +296,11 @@ function isValidPath(path) {
     if (path.indexOf('\0') !== -1) return false;
     // Reasonable length check
     if (path.length > 1000) return false;
+    // Block parent-directory traversal. We match '..' only as a path segment
+    // (surrounded by separators or at start/end), so names like "my..file" are still OK.
+    if (/(^|[\\\/])\.\.([\\\/]|$)/.test(path)) return false;
+    // Block URL-encoded traversal
+    if (/(%2e%2e|%2E%2E)/.test(path)) return false;
     return true;
 }
 
@@ -411,6 +416,29 @@ function getSafeTempFolder() {
     }
     // Absolute last resort
     return Folder.temp;
+}
+
+/**
+ * Preview frame generation constants — shared across stashSelectedComp,
+ * generatePreviewFrames, and generatePreviewsToDisk so bumping any of these
+ * values only requires one edit instead of three.
+ */
+var PREVIEW_TARGET_FPS = 6;
+var PREVIEW_MIN_FRAMES = 12;
+var PREVIEW_MAX_FRAMES = 72;
+
+/**
+ * Compute the number of preview frames to render for a given comp duration.
+ * Mirrors the "~6 FPS preview, min 12, max 72, bounded by totalFrames" logic
+ * duplicated in three places before this refactor. Defends against NaN/negative
+ * inputs (e.g. comps with workAreaDuration = 0 or a broken frame-rate query).
+ */
+function computePreviewFrameCount(compDuration, totalFrames) {
+    if (!compDuration || compDuration <= 0 || !isFinite(compDuration)) return 0;
+    if (!totalFrames || totalFrames <= 0 || !isFinite(totalFrames)) return 0;
+    var dynamic = Math.ceil(compDuration * PREVIEW_TARGET_FPS);
+    var actual = Math.max(PREVIEW_MIN_FRAMES, Math.min(PREVIEW_MAX_FRAMES, dynamic));
+    return Math.min(actual, totalFrames);
 }
 
 /**
@@ -930,7 +958,11 @@ function stashSelectedComp(libraryPath, categoryName) {
 
         var compToSave = selectedItems[0];
         var compToSaveName = compToSave.name;
-        var safeCompName = compToSaveName.replace(/[^a-z0-9]/gi, '_').replace(/_{2,}/g, '_');
+        // Sanitize for filesystem: keep [a-z0-9], collapse runs, trim underscores.
+        // Fall back to "comp" if the name is all non-ASCII (emoji/CJK) so we don't end
+        // up with "_.aep" which collides on rename and makes cloud downloads fail.
+        var safeCompName = compToSaveName.replace(/[^a-z0-9]/gi, '_').replace(/_{2,}/g, '_').replace(/^_|_$/g, '');
+        if (!safeCompName) safeCompName = 'comp';
 
         // --- Create folder structure (use normalizeFsPath for macOS compatibility) ---
         var categoryFolder = folderFromPath(libraryPath + "/" + categoryName);
@@ -967,16 +999,8 @@ function stashSelectedComp(libraryPath, categoryName) {
                 var previewFolder = new Folder(buildPath(compFolder, "preview"));
                 previewFolder.create();
 
-                // DYNAMIC frame count: ~6 FPS preview, min 12, max 72 frames
-                // This ensures the full animation is captured at reasonable quality
-                var targetPreviewFPS = 6;
-                var minFrames = 12;
-                var maxFrames = 72;
-                var dynamicFrameCount = Math.ceil(compDuration * targetPreviewFPS);
-                var actualFrameCount = Math.max(minFrames, Math.min(maxFrames, dynamicFrameCount));
-
-                // Ensure we don't exceed actual composition frames
-                actualFrameCount = Math.min(actualFrameCount, totalFrames);
+                // Shared dynamic-frame-count logic (see computePreviewFrameCount)
+                var actualFrameCount = computePreviewFrameCount(compDuration, totalFrames);
 
                 for (var pf = 0; pf < actualFrameCount; pf++) {
                     try {
@@ -1015,14 +1039,28 @@ function stashSelectedComp(libraryPath, categoryName) {
         metadataFile.close();
 
         // --- Save the project first if it hasn't been saved ---
+        // On macOS, app.project.save() can fail silently. Wrap each call in try/catch
+        // AND verify the file exists after, matching the same safety pattern we use
+        // for the final library AEP save below.
         if (!originalProjectFile) {
             // Project hasn't been saved yet - we need to save it first
             var tempProjectFile = new File(buildPath(getSafeTempFolder(), "blitzkrieg_temp_" + timestamp + ".aep"));
-            app.project.save(tempProjectFile);
+            try { app.project.save(tempProjectFile); } catch (preSaveErr1) {
+                $.writeln("Blitzkrieg: save() threw saving pre-stash temp project: " + preSaveErr1.toString());
+            }
+            if (!tempProjectFile.exists) {
+                return "Error: Could not save the project to a temp file before stashing. Please save your project manually and try again.";
+            }
             originalProjectFile = tempProjectFile;
         } else if (projectWasDirty) {
-            // Save current changes
-            app.project.save(originalProjectFile);
+            // Save current changes so our reduceProject + restore sequence is safe
+            try { app.project.save(originalProjectFile); } catch (preSaveErr2) {
+                $.writeln("Blitzkrieg: save() threw saving dirty project: " + preSaveErr2.toString());
+            }
+            // Note: we can't verify .exists here because the file was already on disk;
+            // a silent save failure would mean the file still exists with OLD contents.
+            // We proceed anyway since stashing reduceProject+save is non-destructive to
+            // the on-disk original (we re-open it at the end).
         }
 
         // --- Create a duplicate project for the library ---
@@ -1038,6 +1076,8 @@ function stashSelectedComp(libraryPath, categoryName) {
         // because AE's engine can no longer recognise the stale reference as a CompItem.
         // Searching by ID gives us a fresh, valid reference every time.
         var freshComp = null;
+        // Pass 1: flat iteration over all project items. On modern AE, this includes
+        // items nested in FolderItems (project.item(i) is globally indexed).
         for (var ri = 1; ri <= app.project.numItems; ri++) {
             try {
                 var riItem = app.project.item(ri);
@@ -1047,7 +1087,25 @@ function stashSelectedComp(libraryPath, categoryName) {
                 }
             } catch (riErr) { /* skip any inaccessible items */ }
         }
-        if (!freshComp) freshComp = compToSave; // safe fallback
+        // Pass 2: defensive fallback — recurse into project.rootFolder in case the
+        // flat scan missed it on older AE builds where numItems behaves differently.
+        if (!freshComp) {
+            var _findInFolder = function(folder) {
+                for (var fi = 1; fi <= folder.numItems; fi++) {
+                    try {
+                        var it = folder.item(fi);
+                        if ((it instanceof CompItem) && it.id === compId) return it;
+                        if (it instanceof FolderItem) {
+                            var nested = _findInFolder(it);
+                            if (nested) return nested;
+                        }
+                    } catch (fiErr) {}
+                }
+                return null;
+            };
+            try { freshComp = _findInFolder(app.project.rootFolder); } catch (rfErr) {}
+        }
+        if (!freshComp) freshComp = compToSave; // safe fallback to original reference
 
         // Reduce project to only include selected comp and its dependencies.
         // Wrapped in try-catch because on macOS, reduceProject can fail with a "Folder" type
@@ -1064,48 +1122,178 @@ function stashSelectedComp(libraryPath, categoryName) {
         var footageFolder = new Folder(buildPath(compFolder, "(Footage)"));
         footageFolder.create();
 
-        // Collect all footage items.
-        // Cache numItems before the loop so it stays stable even if AE updates the count.
+        // --- Comprehensive footage collection ---
+        // We track EVERY skip reason so nothing silently disappears into the bundle:
+        //   - footageMissing=true             (AE lost the file reference)
+        //   - sourceFile.exists === false     (file gone from disk)
+        //   - copy() returned false           (disk full / permission denied / network drop)
+        //   - replace() threw                 (AE rejected the replacement)
+        //   - mainSource.file is null         (solids, placeholders, or plugin-injected refs)
+        //   - item is an image sequence       (mainSource.file only points to first frame)
+        //   - neither mainSource.file nor item.file resolves (pre-CC 2019 fallback attempted)
+        //
+        // Each skip is added to `missingFootageItems` so the user sees a warning
+        // rather than getting a silently-broken bundle (the "ImporterJP" symptom).
         var collectedFiles = {};
+        var missingFootageItems = [];
+        var missingTotalCount = 0;         // total count incl. overflow past the cap
+        var collectedCount = 0;
+        var sequenceItems = [];            // tracked separately for a specific warning
         var totalItems = app.project.numItems;
+        var MISSING_DETAIL_CAP = 30;
+
+        function _recordMissing(name, reason) {
+            missingTotalCount++;
+            if (missingFootageItems.length >= MISSING_DETAIL_CAP) return;
+            missingFootageItems.push(name + ' (' + reason + ')');
+        }
+
         for (var i = 1; i <= totalItems; i++) {
+            var itemName = '';
             try {
                 var item = app.project.item(i);
                 if (!(item instanceof FootageItem)) continue;
-                if (!item.mainSource || !item.mainSource.file) continue;
+                try { itemName = item.name || ('item ' + i); } catch (nmIt) { itemName = 'item ' + i; }
 
-                var sourceFile = item.mainSource.file;
-                // Skip system files and already collected files
-                if (sourceFile.exists && !collectedFiles[sourceFile.fsName]) {
-                    // Skip Adobe system files
-                    var pathLower = sourceFile.fsName.toLowerCase();
-                    if (pathLower.indexOf("adobe") === -1 &&
-                        pathLower.indexOf("plug-ins") === -1 &&
-                        pathLower.indexOf("plugins") === -1) {
+                // Step 1: explicit footageMissing flag
+                var isMissing = false;
+                try { isMissing = !!item.footageMissing; } catch (fmChk) {}
+                if (isMissing) {
+                    _recordMissing(itemName, 'file link broken in project');
+                    $.writeln("Blitzkrieg: SKIP (footageMissing): " + itemName);
+                    continue;
+                }
 
-                        var destFile = new File(buildPath(footageFolder, sourceFile.name));
-                        // Handle duplicate filenames
-                        var counter = 1;
-                        while (destFile.exists) {
-                            var nameParts = sourceFile.name.split('.');
-                            var ext = nameParts.pop();
-                            var baseName = nameParts.join('.');
-                            destFile = new File(buildPath(footageFolder, baseName + "_" + counter + "." + ext));
-                            counter++;
-                        }
-
-                        if (sourceFile.copy(destFile)) {
-                            try {
-                                item.replace(destFile);
-                                collectedFiles[sourceFile.fsName] = true;
-                            } catch (replaceErr) {
-                                $.writeln("Blitzkrieg: Warning - Could not replace footage: " + replaceErr.toString());
+                // Step 2: resolve a File reference from multiple possible sources.
+                // mainSource.file is the modern path, but older AE versions / certain
+                // import types populate item.file instead. Try both before giving up.
+                var sourceFile = null;
+                var isSequence = false;
+                try {
+                    if (item.mainSource && item.mainSource.file) {
+                        sourceFile = item.mainSource.file;
+                        // Detect image sequences — mainSource.file only points to the FIRST
+                        // frame, so collecting just this one file loses the rest of the sequence.
+                        try {
+                            if (item.mainSource.isStill === false && item.duration > 0.1) {
+                                // Non-still file footage with >1 frame that ISN'T video could be
+                                // an image sequence. Exclude all known video container/codec
+                                // extensions (consumer + pro formats + animated raster formats)
+                                // to avoid false-positives on files like `Reel_001.mxf`, `B_001.r3d`,
+                                // `Camera_001.braw`, `Take_001.prores`, animated `.gif`, etc.
+                                var srcName = sourceFile.name || '';
+                                var videoExtRegex = /\.(mp4|mov|avi|mkv|webm|m4v|wmv|mxf|mts|m2ts|r3d|braw|dnxhd|dnxhr|prores|gif|mpg|mpeg|ts|vob|flv|ogv|3gp|asf|rm|rmvb|f4v|m2v|mpe)$/i;
+                                if (/\d+\.[a-z0-9]+$/i.test(srcName) && !videoExtRegex.test(srcName)) {
+                                    isSequence = true;
+                                }
                             }
-                        }
+                        } catch (seqChk) {}
                     }
+                } catch (msChk) {}
+                if (!sourceFile) {
+                    try { if (item.file) sourceFile = item.file; } catch (ifChk) {}
+                }
+
+                // Solids, placeholders, text, adjustment layers → no file, legitimately skip
+                if (!sourceFile) {
+                    // Only record if it looks like it SHOULD have a file (has a non-empty name
+                    // and is flagged as having video/audio). Pure solids don't need tracking.
+                    try {
+                        var looksLikeFootage = false;
+                        if (item.mainSource) {
+                            if (item.mainSource.hasVideo || item.mainSource.hasAudio) looksLikeFootage = true;
+                        }
+                        if (looksLikeFootage) {
+                            _recordMissing(itemName, 'no file reference (plugin-injected or corrupt)');
+                            $.writeln("Blitzkrieg: SKIP (no file ref): " + itemName);
+                        }
+                    } catch (lfChk) {}
+                    continue;
+                }
+
+                // Step 3: verify the file still exists on disk
+                if (!sourceFile.exists) {
+                    _recordMissing(itemName, 'file missing on disk');
+                    $.writeln("Blitzkrieg: SKIP (file gone): " + itemName + " → " + sourceFile.fsName);
+                    continue;
+                }
+
+                // Step 4: skip already-collected duplicates (dedupe by absolute path)
+                if (collectedFiles[sourceFile.fsName]) continue;
+
+                // Step 5: skip Adobe install + plugin paths (avoid copying bundled assets).
+                // Matches specific directories only — the old substring-based match
+                // falsely rejected user paths containing "adobe" anywhere.
+                var pathLower = sourceFile.fsName.toLowerCase().replace(/\\/g, '/');
+                var isSystemPath = (
+                    pathLower.indexOf('/applications/adobe') !== -1 ||
+                    pathLower.indexOf('/program files/adobe') !== -1 ||
+                    pathLower.indexOf('/program files (x86)/adobe') !== -1 ||
+                    pathLower.indexOf('/plug-ins/') !== -1 ||
+                    pathLower.indexOf('/plugins/') !== -1
+                );
+                if (isSystemPath) continue;
+
+                // Step 6: compute a unique destination filename inside (Footage)
+                var destFile = new File(buildPath(footageFolder, sourceFile.name));
+                var counter = 1;
+                while (destFile.exists) {
+                    var nameParts = sourceFile.name.split('.');
+                    var destExt = nameParts.length > 1 ? nameParts.pop() : '';
+                    var destBase = nameParts.join('.') || sourceFile.name;
+                    destFile = new File(buildPath(
+                        footageFolder,
+                        destExt ? (destBase + "_" + counter + "." + destExt) : (destBase + "_" + counter)
+                    ));
+                    counter++;
+                }
+
+                // Step 7: copy the source file into the (Footage) folder
+                var copied = false;
+                try { copied = sourceFile.copy(destFile); } catch (copyThrowErr) {
+                    $.writeln("Blitzkrieg: copy() threw for " + sourceFile.fsName + ": " + copyThrowErr.toString());
+                }
+                if (!copied || !destFile.exists) {
+                    _recordMissing(itemName, 'copy failed (permission/disk/network)');
+                    $.writeln("Blitzkrieg: SKIP (copy failed): " + sourceFile.fsName);
+                    // Best-effort cleanup of any partial bytes that may have been
+                    // written to disk before the copy aborted.
+                    try { if (destFile.exists) destFile.remove(); } catch (cpRmErr) {}
+                    continue;
+                }
+
+                // Step 8: swap the project's reference to point at the collected copy.
+                // If this throws, we leave the collected file in place (not a regression —
+                // the bundle will still have the file, it just won't be auto-relinked).
+                try {
+                    item.replace(destFile);
+                    collectedFiles[sourceFile.fsName] = true;
+                    collectedCount++;
+
+                    // Step 9: if this was a sequence, the replace above collapsed it to a
+                    // single frame. Record this so the user knows the bundle is incomplete.
+                    if (isSequence) {
+                        sequenceItems.push(itemName);
+                        $.writeln("Blitzkrieg: WARN (sequence collapsed to first frame): " + itemName);
+                    }
+                } catch (replaceErr) {
+                    _recordMissing(itemName, 'replace() threw: ' + replaceErr.toString());
+                    $.writeln("Blitzkrieg: SKIP (replace failed): " + itemName + " — " + replaceErr.toString());
+                    // Best-effort cleanup: remove the now-orphaned collected file
+                    try { destFile.remove(); } catch (rmRepErr) {}
                 }
             } catch (itemErr) {
-                $.writeln("Blitzkrieg: Warning - Could not process item " + i + ": " + itemErr.toString());
+                _recordMissing(itemName || ('item ' + i), 'unexpected error: ' + itemErr.toString());
+                $.writeln("Blitzkrieg: SKIP (item error): " + itemName + " — " + itemErr.toString());
+            }
+        }
+        $.writeln("Blitzkrieg: Footage collection complete — " + collectedCount + " collected, " + missingTotalCount + " missing/skipped, " + sequenceItems.length + " sequences collapsed.");
+
+        // Merge sequence warnings into the missing list so the user sees them
+        for (var sqi = 0; sqi < sequenceItems.length; sqi++) {
+            missingTotalCount++;
+            if (missingFootageItems.length < MISSING_DETAIL_CAP) {
+                missingFootageItems.push(sequenceItems[sqi] + ' (image sequence — only first frame collected)');
             }
         }
 
@@ -1113,7 +1301,9 @@ function stashSelectedComp(libraryPath, categoryName) {
         // Try the primary path first, then fallback strategies for macOS
         var finalAEPFile = new File(buildPath(compFolder, safeCompName + ".aep"));
         $.writeln("Blitzkrieg: Saving AEP to: " + finalAEPFile.fsName);
-        app.project.save(finalAEPFile);
+        try { app.project.save(finalAEPFile); } catch (saveErr1) {
+            $.writeln("Blitzkrieg: save() threw at primary path: " + saveErr1.toString());
+        }
 
         // MACFIX: Verify the AEP was actually saved - app.project.save() can fail silently on macOS
         if (!finalAEPFile.exists) {
@@ -1121,29 +1311,52 @@ function stashSelectedComp(libraryPath, categoryName) {
             // Fallback: try saving with raw fsName path (no URI encoding)
             var rawAEPPath = compFolder.fsName + "/" + safeCompName + ".aep";
             var rawAEPFile = new File(rawAEPPath);
-            app.project.save(rawAEPFile);
+            try { app.project.save(rawAEPFile); } catch (saveErr2) {
+                $.writeln("Blitzkrieg: save() threw at raw path: " + saveErr2.toString());
+            }
 
             if (!rawAEPFile.exists) {
                 $.writeln("Blitzkrieg: WARNING - AEP save failed at raw path too, trying comp.aep...");
                 // Last resort: save as comp.aep using a simple filename
                 var simpleAEPFile = new File(buildPath(compFolder, "comp.aep"));
-                app.project.save(simpleAEPFile);
+                try { app.project.save(simpleAEPFile); } catch (saveErr3) {
+                    $.writeln("Blitzkrieg: save() threw at simple path: " + saveErr3.toString());
+                }
 
                 if (!simpleAEPFile.exists) {
                     // Try one more time with raw path
                     var simpleRawFile = new File(compFolder.fsName + "/comp.aep");
-                    app.project.save(simpleRawFile);
+                    try { app.project.save(simpleRawFile); } catch (saveErr4) {
+                        $.writeln("Blitzkrieg: save() threw at simple raw path: " + saveErr4.toString());
+                    }
                 }
             }
         }
 
-        // Log final verification
+        // CRITICAL: Verify the AEP was actually saved somewhere. If NONE of the
+        // fallback paths produced an .aep file, we must abort the stash — otherwise
+        // the caller gets a "Success!" message but the comp folder contains only a
+        // thumbnail and metadata, causing broken templates in the library and
+        // "MISSING .aep" errors during downstream auto-generation.
         var savedAEP = robustFindAep(compFolder);
-        if (savedAEP) {
-            $.writeln("Blitzkrieg: AEP verified at: " + savedAEP.fsName);
-        } else {
+        if (!savedAEP) {
             $.writeln("Blitzkrieg: CRITICAL - No AEP file found after save attempts in: " + compFolder.fsName);
+            // Attempt to clean up the half-written comp folder so it doesn't pollute the library.
+            // Use removeFolderRecursive directly on compFolder which handles the null-getFiles
+            // case on macOS internally by calling getFiles() inside its own scope.
+            try {
+                removeFolderRecursive(compFolder);
+            } catch (cleanupErr) {
+                $.writeln("Blitzkrieg: Could not clean up orphan comp folder " + compFolder.fsName + ": " + cleanupErr.toString());
+            }
+            app.endUndoGroup();
+            // Restore original project before returning error
+            if (originalProjectFile && originalProjectFile.exists) {
+                try { app.open(originalProjectFile); } catch (rErr) {}
+            }
+            return "Error: Failed to save .aep file after all fallback attempts. Composition was not added to the library. Check that the library path is writable and that the project is not locked.";
         }
+        $.writeln("Blitzkrieg: AEP verified at: " + savedAEP.fsName);
 
         app.endUndoGroup();
 
@@ -1152,9 +1365,32 @@ function stashSelectedComp(libraryPath, categoryName) {
             app.open(originalProjectFile);
         }
 
-        // Clean up temp file if we created one
+        // Clean up the temp project file we created on behalf of an unsaved user
+        // project. The user's work is still in-memory in the restored project, so
+        // the temp file is safe to delete — leaving it on disk would accumulate
+        // one AEP per stash forever.
         if (originalProjectFile && originalProjectFile.fsName.indexOf("blitzkrieg_temp_") !== -1) {
-            // Don't delete - user might need it
+            try { originalProjectFile.remove(); } catch (tmpRmErr) {
+                $.writeln("Blitzkrieg: Could not remove temp project file: " + tmpRmErr.toString());
+            }
+        }
+
+        // Warn about missing / skipped footage so users know their bundle is
+        // incomplete. This is non-fatal (the AEP still saved), but the template will
+        // render with "ImporterJP"/"missing footage" placeholders when re-imported
+        // elsewhere. Each entry now includes the SKIP REASON so users know whether
+        // to relink, re-save, check permissions, or re-import their sequences.
+        // `missingTotalCount` tracks overflow beyond the detail cap so the user
+        // sees the TRUE number even when we can only list the first 30 by name.
+        if (missingTotalCount > 0) {
+            var missingList = missingFootageItems.slice(0, 5).join('; ');
+            if (missingFootageItems.length > 5) missingList += ' (+' + (missingFootageItems.length - 5) + ' more shown)';
+            var countSuffix = (missingTotalCount > missingFootageItems.length)
+                ? (missingTotalCount + ' footage file(s) (showing first ' + missingFootageItems.length + ')')
+                : (missingTotalCount + ' footage file(s)');
+            return "Warning: '" + compToSaveName + "' was added but " + countSuffix +
+                   " were not fully collected: " + missingList +
+                   ". Open the bundle in AE, relink the missing files, and re-stash to fix.";
         }
 
         return "Success! '" + compToSaveName + "' was added to your library.";
@@ -1223,14 +1459,19 @@ function importComp(aepPath, displayName) {
             return "Error: Import returned no items.";
         }
 
-        // Recursive comp discovery — imported AEPs can have nested folders
+        // Recursive comp discovery — imported AEPs can have nested folders.
+        // We use EXACT name match only for the override; the previous substring
+        // match would falsely override the first comp with any other CompItem
+        // whose name happened to contain the target as a substring (e.g.
+        // compName="Logo" was overridden by "Logo Reveal" or "My Logo Big"),
+        // randomly opening the wrong composition.
         var mainComp = null;
         function findCompInFolder(folder) {
             for (var j = 1; j <= folder.numItems; j++) {
                 var child = folder.item(j);
                 if (child instanceof CompItem) {
                     if (!mainComp) mainComp = child;
-                    if (child.name === compName || child.name.indexOf(compName) !== -1) {
+                    if (child.name === compName) {
                         mainComp = child;
                         return true; // exact match found
                     }
@@ -1316,9 +1557,14 @@ function renameStashedComp(libraryPath, category, uniqueId, newName) {
         var metadataFile = new File(buildPath(aepFolder, "metadata.json"));
         var metadata = {};
         if (metadataFile.exists) {
-            metadataFile.open('r');
-            metadata = JSON.parse(metadataFile.read());
-            metadataFile.close();
+            try {
+                metadataFile.open('r');
+                metadata = JSON.parse(metadataFile.read());
+            } catch (metaReadErr) {
+                $.writeln("Blitzkrieg: renameStashedComp - metadata parse failed: " + metaReadErr.toString());
+                metadata = {};
+            }
+            try { metadataFile.close(); } catch (mcErr) {}
         }
         metadata.displayName = newName;
         metadataFile.open('w');
@@ -1326,12 +1572,15 @@ function renameStashedComp(libraryPath, category, uniqueId, newName) {
         metadataFile.write(JSON.stringify(metadata));
         metadataFile.close();
 
-        // Also rename the .aep file itself for consistency
-        var aepFiles = aepFolder.getFiles("*.aep");
-        if (aepFiles.length > 0) {
-            var oldAEP = aepFiles[0];
-            var safeNewName = newName.replace(/[^a-z0-9]/gi, '_').replace(/_{2,}/g, '_');
-            oldAEP.rename(safeNewName + ".aep");
+        // Also rename the .aep file itself for consistency — use robustFindAep to avoid
+        // the bare "*.aep" glob which can return null on macOS with URI-encoded paths.
+        var oldAEP = robustFindAep(aepFolder);
+        if (oldAEP) {
+            var safeNewName = newName.replace(/[^a-z0-9]/gi, '_').replace(/_{2,}/g, '_').replace(/^_|_$/g, '');
+            if (!safeNewName) safeNewName = 'comp';
+            try { oldAEP.rename(safeNewName + ".aep"); } catch (renErr) {
+                $.writeln("Blitzkrieg: renameStashedComp - AEP rename failed: " + renErr.toString());
+            }
         }
 
         return "Success";
@@ -1353,17 +1602,6 @@ function deleteStashedComp(libraryPath, category, uniqueId) {
         var compFolderPath = libraryPath + "/" + category + "/" + uniqueId;
         var compFolder = folderFromPath(compFolderPath);
         if (compFolder.exists) {
-            function removeFolderRecursive(folder) {
-                var items = folder.getFiles();
-                for (var i = 0; i < items.length; i++) {
-                    if (items[i] instanceof File) {
-                        items[i].remove();
-                    } else if (items[i] instanceof Folder) {
-                        removeFolderRecursive(items[i]);
-                    }
-                }
-                folder.remove();
-            }
             removeFolderRecursive(compFolder);
             return "Success";
         }
@@ -1406,9 +1644,12 @@ function renameCategory(libraryPath, oldName, newName) {
 
         // Rename the folder
         if (oldFolder.rename(newName)) {
-            // Update metadata.json in each comp folder to reflect new category
+            // Update metadata.json in each comp folder to reflect new category.
+            // Use robustGetFolders so the macOS URI-encoding bugs that getFiles()
+            // hits with literal-filter callbacks don't silently skip the metadata
+            // refresh and leave every comp's `metadata.category` field stale.
             var renamedFolder = folderFromPath(libraryPath + "/" + newName);
-            var compFolders = renamedFolder.getFiles(function(f) { return f instanceof Folder; });
+            var compFolders = robustGetFolders(renamedFolder);
             for (var i = 0; i < compFolders.length; i++) {
                 var metadataFile = new File(buildPath(compFolders[i], "metadata.json"));
                 if (metadataFile.exists) {
@@ -1457,18 +1698,6 @@ function deleteCategory(libraryPath, categoryName) {
         var categoryFolder = folderFromPath(libraryPath + "/" + categoryName);
         if (!categoryFolder.exists) {
             return "Error: Category folder not found.";
-        }
-
-        function removeFolderRecursive(folder) {
-            var items = folder.getFiles();
-            for (var i = 0; i < items.length; i++) {
-                if (items[i] instanceof File) {
-                    items[i].remove();
-                } else if (items[i] instanceof Folder) {
-                    removeFolderRecursive(items[i]);
-                }
-            }
-            folder.remove();
         }
 
         removeFolderRecursive(categoryFolder);
@@ -1521,14 +1750,20 @@ function moveCompToCategory(libraryPath, uniqueId, oldCategory, newCategory) {
         // First try direct rename
         var targetPath = libraryPath + "/" + newCategory + "/" + uniqueId;
 
-        // Copy all files recursively - use Folder objects (not fsName) for macOS compatibility
+        // Copy all files recursively. Throws on the first failed copy() so we
+        // never silently delete the source after a partial copy — that was the
+        // previous data-loss bug.
         function copyFolderRecursive(source, target) {
             if (!target.exists) target.create();
+            if (!target.exists) throw new Error('Could not create target folder: ' + target.fsName);
             var items = source.getFiles();
+            if (!items) return; // empty / inaccessible folder
             for (var i = 0; i < items.length; i++) {
                 if (items[i] instanceof File) {
                     var destFile = new File(buildPath(target, items[i].name));
-                    items[i].copy(destFile);
+                    if (!items[i].copy(destFile) || !destFile.exists) {
+                        throw new Error('Copy failed for ' + items[i].name);
+                    }
                 } else if (items[i] instanceof Folder) {
                     var destFolder = new Folder(buildPath(target, items[i].name));
                     copyFolderRecursive(items[i], destFolder);
@@ -1536,20 +1771,14 @@ function moveCompToCategory(libraryPath, uniqueId, oldCategory, newCategory) {
             }
         }
 
-        function removeFolderRecursive(folder) {
-            var items = folder.getFiles();
-            for (var i = 0; i < items.length; i++) {
-                if (items[i] instanceof File) {
-                    items[i].remove();
-                } else if (items[i] instanceof Folder) {
-                    removeFolderRecursive(items[i]);
-                }
-            }
-            folder.remove();
+        // Copy to new location. If anything fails, abort the move and roll back
+        // the partial copy so the user's source folder is preserved.
+        try {
+            copyFolderRecursive(sourceFolder, targetFolder);
+        } catch (copyErr) {
+            try { removeFolderRecursive(targetFolder); } catch (rbErr) {}
+            return "Error: Move aborted — copy failed: " + copyErr.toString();
         }
-
-        // Copy to new location
-        copyFolderRecursive(sourceFolder, targetFolder);
 
         // Update metadata.json with new category
         var metadataFile = new File(buildPath(targetFolder, "metadata.json"));
@@ -1571,7 +1800,7 @@ function moveCompToCategory(libraryPath, uniqueId, oldCategory, newCategory) {
             }
         }
 
-        // Remove original folder
+        // Remove original folder ONLY after we know the copy succeeded.
         removeFolderRecursive(sourceFolder);
 
         return "Success: Comp moved to '" + newCategory + "'.";
@@ -1643,12 +1872,16 @@ function generatePreviewFrames(aepPath) {
         var compFolder = aepFile.parent;
         var previewFolder = new Folder(buildPath(compFolder, "preview"));
 
-        // Remove existing preview folder if it exists
+        // Remove existing preview folder contents if it exists
         if (previewFolder.exists) {
+            // getFiles() can return null on macOS with URI-encoded paths — guard it
+            // or the .length access below throws.
             var existingFiles = previewFolder.getFiles();
-            for (var ef = 0; ef < existingFiles.length; ef++) {
-                if (existingFiles[ef] instanceof File) {
-                    existingFiles[ef].remove();
+            if (existingFiles) {
+                for (var ef = 0; ef < existingFiles.length; ef++) {
+                    if (existingFiles[ef] instanceof File) {
+                        try { existingFiles[ef].remove(); } catch (efErr) {}
+                    }
                 }
             }
         } else {
@@ -1661,19 +1894,31 @@ function generatePreviewFrames(aepPath) {
         var importedItem = app.project.importFile(importOptions);
 
         if (!importedItem) {
+            // Restore the original project before returning so we don't leak the
+            // user's current context into the blitzkrieg temp AEP.
+            if (originalProjectFile && originalProjectFile.exists) {
+                try { app.open(originalProjectFile); } catch (restImpErr) {}
+            }
             return "Error: Could not import composition for preview generation.";
         }
 
-        // Find the main composition
+        // Find the main composition — recurse into nested folders so AEPs with
+        // folder-organized comps don't fail with "No composition found".
         var mainComp = null;
         if (importedItem instanceof FolderItem) {
-            for (var i = 1; i <= importedItem.numItems; i++) {
-                var item = importedItem.item(i);
-                if (item instanceof CompItem) {
-                    mainComp = item;
-                    break;
+            var _searchForComp = function(folder) {
+                for (var i = 1; i <= folder.numItems; i++) {
+                    if (folder.item(i) instanceof CompItem) return folder.item(i);
                 }
-            }
+                for (var j = 1; j <= folder.numItems; j++) {
+                    if (folder.item(j) instanceof FolderItem) {
+                        var found = _searchForComp(folder.item(j));
+                        if (found) return found;
+                    }
+                }
+                return null;
+            };
+            mainComp = _searchForComp(importedItem);
         } else if (importedItem instanceof CompItem) {
             mainComp = importedItem;
         }
@@ -1691,16 +1936,8 @@ function generatePreviewFrames(aepPath) {
         var totalFrames = Math.floor(compDuration * frameRate);
 
         if (totalFrames > 1) {
-            // DYNAMIC frame count: ~6 FPS preview, min 12, max 72 frames
-            // This ensures the full animation is captured at reasonable quality
-            var targetPreviewFPS = 6;
-            var minFrames = 12;
-            var maxFrames = 72;
-            var dynamicFrameCount = Math.ceil(compDuration * targetPreviewFPS);
-            var actualFrameCount = Math.max(minFrames, Math.min(maxFrames, dynamicFrameCount));
-
-            // Ensure we don't exceed actual composition frames
-            actualFrameCount = Math.min(actualFrameCount, totalFrames);
+            // Shared dynamic-frame-count logic (see computePreviewFrameCount)
+            var actualFrameCount = computePreviewFrameCount(compDuration, totalFrames);
 
             for (var pf = 0; pf < actualFrameCount; pf++) {
                 try {
@@ -1868,68 +2105,6 @@ function stashSelectedCompToTemp(categoryName) {
 }
 
 /**
- * Read stashed files from a comp folder as base64 for upload.
- */
-function readStashedFilesAsBase64(compFolderPath) {
-    try {
-        var folder = new Folder(compFolderPath);
-        if (!folder.exists) return JSON.stringify({error: 'Temp folder not found'});
-
-        // Find the comp subfolder (first subfolder)
-        var subFolders = folder.getFiles(function(f) { return f instanceof Folder; });
-        if (subFolders.length === 0) return JSON.stringify({error: 'No comp folder found'});
-
-        var compFolder = subFolders[0];
-        var folderName = compFolder.name;
-
-        // Read .aep file
-        var aepFiles = compFolder.getFiles('*.aep');
-        if (aepFiles.length === 0) return JSON.stringify({error: 'No .aep file found'});
-
-        var aepBase64 = readFileAsBase64(aepFiles[0]);
-
-        // Read thumbnail (stashSelectedComp saves as comp.png)
-        var thumbFiles = compFolder.getFiles('comp.png');
-        if (thumbFiles.length === 0) thumbFiles = compFolder.getFiles('thumbnail.jpg');
-        if (thumbFiles.length === 0) thumbFiles = compFolder.getFiles('thumbnail.png');
-        var thumbnailBase64 = thumbFiles.length > 0 ? readFileAsBase64(thumbFiles[0]) : null;
-
-        // Read metadata
-        var metaFiles = compFolder.getFiles('metadata.json');
-        var metadata = {};
-        if (metaFiles.length > 0) {
-            metaFiles[0].open('r');
-            var metaContent = metaFiles[0].read();
-            metaFiles[0].close();
-            metadata = JSON.parse(metaContent);
-        }
-
-        // Read preview frames if they exist
-        var previewFramesBase64 = [];
-        var previewFolder = new Folder(compFolder.fsName + '/preview');
-        if (previewFolder.exists) {
-            var frameCount = metadata.previewFrames || 0;
-            for (var fi = 0; fi < frameCount; fi++) {
-                var frameFile = new File(previewFolder.fsName + '/frame_' + fi + '.png');
-                if (frameFile.exists) {
-                    previewFramesBase64.push(readFileAsBase64(frameFile));
-                }
-            }
-        }
-
-        return JSON.stringify({
-            folderName: folderName,
-            aepBase64: aepBase64,
-            thumbnailBase64: thumbnailBase64,
-            metadata: metadata,
-            previewFramesBase64: previewFramesBase64
-        });
-    } catch (e) {
-        return JSON.stringify({error: e.toString()});
-    }
-}
-
-/**
  * Read a file and return its contents as base64.
  */
 function readFileAsBase64(file) {
@@ -1940,20 +2115,32 @@ function readFileAsBase64(file) {
 
     // ExtendScript base64 encoding
     var base64chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-    var result = '';
+    // ExtendScript string append is O(n²) — for a 5MB AEP (~6.6M base64 chars) the
+    // naive loop takes ~minutes. Build into a chunked array and join at the end.
+    // Each chunk holds ~32KB of base64 text so we get O(n) total work.
+    var CHUNK_SIZE = 32768;
+    var parts = [];
+    var chunk = '';
     var i = 0;
-    while (i < content.length) {
+    var len = content.length;
+    while (i < len) {
         var b1 = content.charCodeAt(i++) & 0xFF;
-        var b2 = i < content.length ? content.charCodeAt(i++) & 0xFF : 0;
-        var b3 = i < content.length ? content.charCodeAt(i++) & 0xFF : 0;
-        var padding = (i > content.length + 1) ? 2 : (i > content.length) ? 1 : 0;
+        var b2 = i < len ? content.charCodeAt(i++) & 0xFF : 0;
+        var b3 = i < len ? content.charCodeAt(i++) & 0xFF : 0;
+        var padding = (i > len + 1) ? 2 : (i > len) ? 1 : 0;
 
-        result += base64chars.charAt(b1 >> 2);
-        result += base64chars.charAt(((b1 & 3) << 4) | (b2 >> 4));
-        result += padding >= 1 ? '=' : base64chars.charAt(((b2 & 15) << 2) | (b3 >> 6));
-        result += padding >= 2 ? '=' : base64chars.charAt(b3 & 63);
+        chunk += base64chars.charAt(b1 >> 2);
+        chunk += base64chars.charAt(((b1 & 3) << 4) | (b2 >> 4));
+        chunk += padding >= 1 ? '=' : base64chars.charAt(((b2 & 15) << 2) | (b3 >> 6));
+        chunk += padding >= 2 ? '=' : base64chars.charAt(b3 & 63);
+
+        if (chunk.length >= CHUNK_SIZE) {
+            parts.push(chunk);
+            chunk = '';
+        }
     }
-    return result;
+    if (chunk.length) parts.push(chunk);
+    return parts.join('');
 }
 
 /**
@@ -2041,235 +2228,52 @@ function decodeBase64FileToBinary(base64FilePath, outputPath) {
 }
 
 /**
- * Write a base64-encoded file to a temp location.
- * Returns the temp file path on success, or "ERROR: ..." on failure.
- */
-function writeTempFileFromBase64(base64Data, fileName) {
-    try {
-        var tempFolder = getSafeTempFolder();
-        var tempFile = new File(tempFolder.fsName + '/blitzkrieg_import_' + fileName);
-
-        // Decode base64
-        var base64chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-        var binary = '';
-        var i = 0;
-        var cleanBase64 = base64Data.replace(/[^A-Za-z0-9+\/]/g, '');
-        while (i < cleanBase64.length) {
-            var b1 = base64chars.indexOf(cleanBase64.charAt(i++));
-            var b2 = base64chars.indexOf(cleanBase64.charAt(i++));
-            var b3 = base64chars.indexOf(cleanBase64.charAt(i++));
-            var b4 = base64chars.indexOf(cleanBase64.charAt(i++));
-
-            binary += String.fromCharCode((b1 << 2) | (b2 >> 4));
-            if (b3 !== -1) binary += String.fromCharCode(((b2 & 15) << 4) | (b3 >> 2));
-            if (b4 !== -1) binary += String.fromCharCode(((b3 & 3) << 6) | b4);
-        }
-
-        tempFile.encoding = 'BINARY';
-        tempFile.open('w');
-        tempFile.write(binary);
-        tempFile.close();
-
-        return tempFile.fsName;
-    } catch (e) {
-        return 'ERROR: ' + e.toString();
-    }
-}
-
-/**
  * Clean up temp stash directory after cloud upload.
+ *
+ * SECURITY: refuses to recursively delete anything outside the OS temp folder.
+ * A forged `tempPath` (e.g. '/Users/victim/Documents') would otherwise wipe the
+ * user's home directory. We compare against getSafeTempFolder() as the allow-list.
  */
 function cleanupTempStash(tempPath) {
     try {
+        if (!isValidPath(tempPath)) {
+            return 'ERROR: Invalid temp path';
+        }
+        var safeTemp;
+        try { safeTemp = getSafeTempFolder().fsName; } catch (stErr) {
+            return 'ERROR: Could not resolve temp folder';
+        }
+        // Normalize paths for prefix comparison. On case-insensitive filesystems
+        // (NTFS on Windows, APFS/HFS+ default on macOS) we lowercase both sides so
+        // legitimate case variations don't get incorrectly rejected.
+        var normTarget = tempPath.replace(/\\/g, '/');
+        var normSafe = safeTemp.replace(/\\/g, '/');
+        var caseInsensitiveFS = ($.os.indexOf('Windows') !== -1) || ($.os.indexOf('Mac') !== -1);
+        if (caseInsensitiveFS) {
+            normTarget = normTarget.toLowerCase();
+            normSafe = normSafe.toLowerCase();
+        }
+        // Strip trailing slashes so comparison is stable
+        while (normSafe.length > 1 && normSafe.charAt(normSafe.length - 1) === '/') {
+            normSafe = normSafe.substring(0, normSafe.length - 1);
+        }
+        // Enforce that the target is EXACTLY the safe folder OR strictly under it.
+        // The old `indexOf === 0` check matched `/tmp_evil/...` when safeTemp was
+        // `/tmp`, allowing recursive deletion of unrelated directories.
+        var isExactMatch = normTarget === normSafe;
+        var isUnder = normTarget.length > normSafe.length &&
+                      normTarget.substring(0, normSafe.length) === normSafe &&
+                      normTarget.charAt(normSafe.length) === '/';
+        if (!isExactMatch && !isUnder) {
+            return 'ERROR: cleanupTempStash target is outside the temp folder';
+        }
         var folder = new Folder(tempPath);
         if (folder.exists) {
-            var files = folder.getFiles();
-            for (var i = 0; i < files.length; i++) {
-                if (files[i] instanceof Folder) {
-                    removeFolderRecursive(files[i]);
-                } else {
-                    files[i].remove();
-                }
-            }
-            folder.remove();
+            removeFolderRecursive(folder);
         }
         return 'OK';
     } catch (e) {
         return 'ERROR: ' + e.toString();
-    }
-}
-
-/**
- * Generate a thumbnail from a temp AEP file and return as base64 PNG.
- * Used for generating thumbnails for cloud templates.
- * @param {string} tempAepPath - Path to the temp AEP file on disk
- * @returns {string} - JSON with base64 thumbnail data or error
- */
-function generateThumbnailFromAep(tempAepPath) {
-    try {
-        var aepFile = new File(tempAepPath);
-        if (!aepFile.exists) {
-            return JSON.stringify({error: 'AEP file not found: ' + tempAepPath});
-        }
-
-        // Import the AEP
-        var importOptions = new ImportOptions(aepFile);
-        importOptions.importAs = ImportAsType.PROJECT;
-        var importedItem = app.project.importFile(importOptions);
-
-        if (!importedItem) {
-            return JSON.stringify({error: 'Could not import AEP'});
-        }
-
-        // Find the main composition
-        var mainComp = null;
-        if (importedItem instanceof FolderItem) {
-            for (var gi = 1; gi <= importedItem.numItems; gi++) {
-                if (importedItem.item(gi) instanceof CompItem) {
-                    mainComp = importedItem.item(gi);
-                    break;
-                }
-            }
-        } else if (importedItem instanceof CompItem) {
-            mainComp = importedItem;
-        }
-
-        if (!mainComp) {
-            if (importedItem) importedItem.remove();
-            return JSON.stringify({error: 'No composition found in AEP'});
-        }
-
-        // Render thumbnail — try multiple timestamps as fallback
-        var thumbTimes = [
-            mainComp.workAreaStart + (mainComp.workAreaDuration / 2),
-            mainComp.workAreaStart,
-            mainComp.workAreaStart + (mainComp.workAreaDuration * 0.25)
-        ];
-        var tempThumb = new File(getSafeTempFolder().fsName + '/blitzkrieg_thumb_' + (new Date()).getTime() + '.png');
-        for (var tti = 0; tti < thumbTimes.length; tti++) {
-            try {
-                mainComp.saveFrameToPng(thumbTimes[tti], tempThumb);
-                if (tempThumb.exists) break;
-            } catch (thumbErr) { /* try next */ }
-        }
-
-        // Read as base64
-        var thumbBase64 = '';
-        if (tempThumb.exists) {
-            thumbBase64 = readFileAsBase64(tempThumb);
-            tempThumb.remove();
-        }
-
-        // Clean up imported project item
-        if (importedItem) importedItem.remove();
-
-        if (!thumbBase64) {
-            return JSON.stringify({error: 'Failed to render thumbnail frame'});
-        }
-
-        return JSON.stringify({thumbnailBase64: thumbBase64});
-    } catch (e) {
-        return JSON.stringify({error: e.toString()});
-    }
-}
-
-/**
- * Generate a thumbnail AND preview frames from a temp AEP file.
- * Returns JSON: {thumbnailBase64: "...", previewFrames: ["base64_0", "base64_1", ...]}
- * @param {string} tempAepPath - Path to the temporary AEP file
- * @param {number} maxFrames - Maximum preview frames to generate (default 8)
- */
-function generateThumbnailAndPreviewFromAep(tempAepPath, maxFrames) {
-    if (!maxFrames || maxFrames < 1) maxFrames = 8;
-    try {
-        var aepFile = new File(tempAepPath);
-        if (!aepFile.exists) {
-            return JSON.stringify({error: 'AEP file not found: ' + tempAepPath});
-        }
-
-        var importOptions = new ImportOptions(aepFile);
-        importOptions.importAs = ImportAsType.PROJECT;
-        var importedItem = app.project.importFile(importOptions);
-
-        if (!importedItem) {
-            return JSON.stringify({error: 'Could not import AEP'});
-        }
-
-        // Find the main composition
-        var mainComp = null;
-        if (importedItem instanceof FolderItem) {
-            for (var gi = 1; gi <= importedItem.numItems; gi++) {
-                if (importedItem.item(gi) instanceof CompItem) {
-                    mainComp = importedItem.item(gi);
-                    break;
-                }
-            }
-        } else if (importedItem instanceof CompItem) {
-            mainComp = importedItem;
-        }
-
-        if (!mainComp) {
-            if (importedItem) importedItem.remove();
-            return JSON.stringify({error: 'No composition found in AEP'});
-        }
-
-        // Render thumbnail — try multiple timestamps as fallback
-        var thumbTimesTP = [
-            mainComp.workAreaStart + (mainComp.workAreaDuration / 2),
-            mainComp.workAreaStart,
-            mainComp.workAreaStart + (mainComp.workAreaDuration * 0.25)
-        ];
-        var tempThumb = new File(getSafeTempFolder().fsName + '/blitzkrieg_thumb_' + (new Date()).getTime() + '.png');
-        for (var tpi = 0; tpi < thumbTimesTP.length; tpi++) {
-            try {
-                mainComp.saveFrameToPng(thumbTimesTP[tpi], tempThumb);
-                if (tempThumb.exists) break;
-            } catch (thumbErrTP) { /* try next */ }
-        }
-
-        var thumbBase64 = '';
-        if (tempThumb.exists) {
-            thumbBase64 = readFileAsBase64(tempThumb);
-            tempThumb.remove();
-        }
-
-        // Render preview frames evenly distributed across duration
-        var frames = [];
-        var compDuration = mainComp.workAreaDuration;
-        var frameRate = mainComp.frameRate || 30;
-        var totalFrames = Math.floor(compDuration * frameRate);
-
-        if (totalFrames > 1) {
-            var actualFrameCount = Math.min(maxFrames, totalFrames);
-            for (var pf = 0; pf < actualFrameCount; pf++) {
-                try {
-                    var progress = (actualFrameCount > 1) ? (pf / (actualFrameCount - 1)) : 0;
-                    var previewTime = mainComp.workAreaStart + (progress * compDuration);
-                    var frameFile = new File(getSafeTempFolder().fsName + '/blitzkrieg_frame_' + pf + '_' + (new Date()).getTime() + '.png');
-                    mainComp.saveFrameToPng(previewTime, frameFile);
-                    if (frameFile.exists) {
-                        frames.push(readFileAsBase64(frameFile));
-                        frameFile.remove();
-                    }
-                } catch (frameErr) {
-                    // Skip failed frames
-                }
-            }
-        }
-
-        // Clean up imported project item
-        if (importedItem) importedItem.remove();
-
-        if (!thumbBase64) {
-            return JSON.stringify({error: 'Failed to render thumbnail frame'});
-        }
-
-        return JSON.stringify({
-            thumbnailBase64: thumbBase64,
-            previewFrames: frames
-        });
-    } catch (e) {
-        return JSON.stringify({error: e.toString()});
     }
 }
 
@@ -2283,38 +2287,129 @@ function generateThumbnailAndPreviewFromAep(tempAepPath, maxFrames) {
  * @returns {string} JSON: {frameCount: N} or {error: "..."}
  */
 function generatePreviewsToDisk(aepPath, outputDir) {
-    // Suppress all AE dialogs during batch generation — on Windows,
-    // saveFrameToPng shows modal "Could not create file" dialogs instead
-    // of throwing catchable errors, blocking the entire script.
+    // NOTE: Dialog suppression is deliberately deferred until AFTER the import.
+    // On AE 2024/2025, beginSuppressDialogs() before app.project.importFile() can
+    // cause the importer to throw "ReferenceError: Object is invalid" when the AEP
+    // triggers a version-compatibility or missing-footage dialog that AE then
+    // cannot show. Suppressing dialogs only around saveFrameToPng() (the operation
+    // that actually spams modal "Could not create file" dialogs on Windows) avoids
+    // the import-time crash while still protecting batch rendering.
     var _dialogsSuppressed = false;
-    try { app.beginSuppressDialogs(); _dialogsSuppressed = true; } catch (sdErr) { /* AE < 13.8 */ }
+    var importedItem = null;  // declared outside try so catch block can clean up
+    var aepFile = null;
+    var _currentStep = 'init';
+
+    // Helper: normalize path for Windows (convert forward slashes to backslashes).
+    // AE's importFile() on Windows can fail with "Object is invalid" when given a
+    // mixed-slash path like "C:\Users\x/blitzkrieg_gen_123/_9.aep". This also covers
+    // UNC paths (\\server\share\...) which are common in production studios with NAS.
+    function _normalizeForPlatform(p) {
+        if (!p || typeof p !== 'string') return p;
+        if ($.os.indexOf('Windows') === -1) return p;
+        var isDriveLetter = p.length > 2 && p.charAt(1) === ':';
+        var isUNC = p.length > 2 && (p.substr(0, 2) === '\\\\' || p.substr(0, 2) === '//');
+        if (isDriveLetter || isUNC) {
+            var normalized = p.replace(/\//g, '\\');
+            // For UNC paths that started with // the replace above leaves the leading
+            // double-slash, which is correct (\\server\share), but we must not end up
+            // with more than 2 backslashes at the start.
+            return normalized;
+        }
+        return p;
+    }
+
+    // Helper: ensure every exit path cleans up thoroughly.
+    function _cleanup() {
+        if (importedItem) {
+            try { importedItem.remove(); } catch (cuErr) {}
+            importedItem = null;
+        }
+        try { app.purge(PurgeTarget.ALL_CACHES); } catch (purgeErr) {}
+        if (_dialogsSuppressed) {
+            try { app.endSuppressDialogs(false); } catch(edErr) {}
+            _dialogsSuppressed = false;
+        }
+    }
 
     try {
-        var aepFile = new File(aepPath);
+        _currentStep = 'validate_aep_path';
+        var normalizedAepPath = _normalizeForPlatform(aepPath);
+        aepFile = new File(normalizedAepPath);
         if (!aepFile.exists) {
-            if (_dialogsSuppressed) try { app.endSuppressDialogs(false); } catch(e) {}
+            // Fallback: try the raw path in case normalization broke it
+            aepFile = new File(aepPath);
+        }
+        if (!aepFile.exists) {
+            _cleanup();
             return JSON.stringify({error: 'AEP file not found: ' + aepPath});
         }
 
-        // Ensure output directory exists — use fsName for Windows-native paths
-        var outFolder = new Folder(outputDir);
+        // Sanity-check the AEP is readable and non-empty. A 0-byte file will cause
+        // importFile() to throw "Object is invalid" on some AE versions. `File.length`
+        // returns -1 on some macOS network mounts when the size cannot be determined,
+        // which we treat as "unknown" and allow through.
+        _currentStep = 'validate_aep_size';
+        if (aepFile.length === 0) {
+            _cleanup();
+            return JSON.stringify({error: 'AEP file is empty (0 bytes): ' + aepFile.fsName});
+        }
+
+        _currentStep = 'create_output_dir';
+        var normalizedOutDir = _normalizeForPlatform(outputDir);
+        var outFolder = new Folder(normalizedOutDir);
         if (!outFolder.exists) outFolder.create();
-        // Double-check: if the folder still doesn't exist, bail
         if (!outFolder.exists) {
-            if (_dialogsSuppressed) try { app.endSuppressDialogs(false); } catch(e) {}
+            outFolder = new Folder(outputDir);
+            if (!outFolder.exists) outFolder.create();
+        }
+        if (!outFolder.exists) {
+            _cleanup();
             return JSON.stringify({error: 'Cannot create output dir: ' + outFolder.fsName});
         }
 
-        var importOptions = new ImportOptions(aepFile);
-        importOptions.importAs = ImportAsType.PROJECT;
-        var importedItem = app.project.importFile(importOptions);
-
-        if (!importedItem) {
-            if (_dialogsSuppressed) try { app.endSuppressDialogs(false); } catch(e) {}
-            return JSON.stringify({error: 'Could not import AEP'});
+        // --- Import the AEP (WITHOUT dialog suppression to avoid AE 2024/2025 crash) ---
+        _currentStep = 'import_file';
+        var importError = null;
+        try {
+            var importOptions = new ImportOptions(aepFile);
+            importOptions.importAs = ImportAsType.PROJECT;
+            importedItem = app.project.importFile(importOptions);
+        } catch (impErr1) {
+            importError = impErr1;
         }
 
-        // Find the main composition — search recursively through nested folders
+        // Retry once on failure: purge caches and try again. Transient state in
+        // AE's importer (especially after a prior failed run left stale items)
+        // can be cleared by app.purge().
+        //
+        // NOTE: we deliberately do NOT use $.sleep() here — it's a synchronous halt
+        // that freezes the entire CEP↔ExtendScript bridge and the AE UI. On a long
+        // batch with 240 retries that's minutes of frozen UI. The JS caller handles
+        // OneDrive/Dropbox flush timing via _cleanupTempDir delays between items.
+        if (!importedItem) {
+            try { app.purge(PurgeTarget.ALL_CACHES); } catch (purgeErr) {}
+            try {
+                var retryOptions = new ImportOptions(aepFile);
+                retryOptions.importAs = ImportAsType.PROJECT;
+                importedItem = app.project.importFile(retryOptions);
+                if (importedItem) importError = null;
+            } catch (impErr2) {
+                if (!importError) importError = impErr2;
+            }
+        }
+
+        if (!importedItem) {
+            _cleanup();
+            return JSON.stringify({
+                error: 'Import failed' + (importError ? ': ' + importError.toString() : ': unknown'),
+                step: 'import_file',
+                aepPath: aepFile.fsName,
+                aepSize: aepFile.length
+            });
+        }
+
+        // --- Find the main composition ---
+        _currentStep = 'find_main_comp';
         var mainComp = null;
         if (importedItem instanceof CompItem) {
             mainComp = importedItem;
@@ -2335,40 +2430,66 @@ function generatePreviewsToDisk(aepPath, outputDir) {
         }
 
         if (!mainComp) {
-            if (importedItem) importedItem.remove();
-            if (_dialogsSuppressed) try { app.endSuppressDialogs(false); } catch(e) {}
-            return JSON.stringify({error: 'No composition found in AEP'});
+            _cleanup();
+            return JSON.stringify({error: 'No composition found in AEP', step: 'find_main_comp'});
         }
 
-        // Detect missing footage in this comp's layer tree (for logging only).
-        // We NO LONGER bail — instead we try to render anyway because many comps
-        // render fine with missing footage (shape/text/solid layers still work).
+        // --- Detect missing footage (for logging & deciding whether to render preview) ---
+        _currentStep = 'check_missing_footage';
         var hasMissingFootage = false;
+        var missingFootageNames = [];
         try {
             var _checkedComps = {};
+            var _checkedCounter = 0;
             var _checkCompMissing = function(comp) {
-                if (!comp || _checkedComps[comp.id]) return false;
-                _checkedComps[comp.id] = true;
+                if (!comp) return false;
+                // comp.id can be undefined on pre-CC AE versions; fall back to a counter
+                // so recursion guard still works without all undefined IDs colliding.
+                var ckey = (comp.id !== undefined && comp.id !== null) ? ('id_' + comp.id) : ('ctr_' + (++_checkedCounter));
+                if (_checkedComps[ckey]) return false;
+                _checkedComps[ckey] = true;
+                var found = false;
                 for (var li = 1; li <= comp.numLayers; li++) {
-                    var layer = comp.layer(li);
-                    if (!layer.enabled) continue;
-                    var src = layer.source;
-                    if (!src) continue;
-                    if (src instanceof FootageItem && src.footageMissing) return true;
-                    if (src instanceof CompItem) {
-                        if (_checkCompMissing(src)) return true;
-                    }
+                    try {
+                        var layer = comp.layer(li);
+                        if (!layer.enabled) continue;
+                        var src = layer.source;
+                        if (!src) continue;
+                        if (src instanceof FootageItem && src.footageMissing) {
+                            found = true;
+                            if (missingFootageNames.length < 5) {
+                                try { missingFootageNames.push(src.name); } catch (e) {}
+                            }
+                        }
+                        if (src instanceof CompItem) {
+                            if (_checkCompMissing(src)) found = true;
+                        }
+                    } catch (layerErr) { /* skip inaccessible layer */ }
                 }
-                return false;
+                return found;
             };
             hasMissingFootage = _checkCompMissing(mainComp);
         } catch (fmErr) { /* ignore */ }
 
-        // Render thumbnail as comp.png — try multiple timestamps as fallback.
+        // Capture comp properties BEFORE rendering (the CompItem reference can become
+        // stale after saveFrameToPng in rare AE edge cases).
+        var compDuration = mainComp.workAreaDuration;
+        var compWidth = mainComp.width;
+        var compHeight = mainComp.height;
+        var compFrameRate = mainComp.frameRate || 30;
+        var compWorkAreaStart = mainComp.workAreaStart;
+
+        // --- Suppress dialogs ONLY for the render phase ---
+        // saveFrameToPng can spam modal "Could not create file" dialogs on Windows.
+        _currentStep = 'suppress_dialogs';
+        try { app.beginSuppressDialogs(); _dialogsSuppressed = true; } catch (sdErr) { /* AE < 13.8 */ }
+
+        // --- Render thumbnail ---
+        _currentStep = 'render_thumbnail';
         var thumbTimes = [
-            mainComp.workAreaStart + (mainComp.workAreaDuration / 2),
-            mainComp.workAreaStart,
-            mainComp.workAreaStart + (mainComp.workAreaDuration * 0.25)
+            compWorkAreaStart + (compDuration / 2),
+            compWorkAreaStart,
+            compWorkAreaStart + (compDuration * 0.25)
         ];
         var thumbFile = new File(outFolder.fsName + '/comp.png');
         for (var tt = 0; tt < thumbTimes.length; tt++) {
@@ -2379,63 +2500,57 @@ function generatePreviewsToDisk(aepPath, outputDir) {
         }
 
         if (!thumbFile.exists) {
-            // If missing footage caused the failure, return a skip result
-            // instead of an error — the comp simply can't be rendered.
-            if (importedItem) importedItem.remove();
-            try { app.purge(PurgeTarget.ALL_CACHES); } catch (purgeErr) {}
-            if (_dialogsSuppressed) try { app.endSuppressDialogs(false); } catch(e) {}
+            _cleanup();
+            if (aepFile && aepFile.exists) { try { aepFile.remove(); } catch(e) {} }
             if (hasMissingFootage) {
                 return JSON.stringify({
                     frameCount: 0,
-                    duration: mainComp.workAreaDuration,
-                    width: mainComp.width,
-                    height: mainComp.height,
+                    duration: compDuration,
+                    width: compWidth,
+                    height: compHeight,
                     skipped: true,
-                    skipReason: 'missing_footage'
+                    skipReason: 'missing_footage',
+                    missingFootage: missingFootageNames
                 });
             }
-            return JSON.stringify({error: 'Failed to render thumbnail frame'});
+            return JSON.stringify({error: 'Failed to render thumbnail frame', step: 'render_thumbnail'});
         }
 
-        // If comp has missing footage, return thumbnail-only (skip preview frames
-        // to avoid potential dialog spam from 12-72 saveFrameToPng calls)
-        var compDuration = mainComp.workAreaDuration;
+        // If footage is missing, emit thumbnail-only (skip spamming 12-72 frame renders)
         if (hasMissingFootage) {
-            if (importedItem) importedItem.remove();
-            if (aepFile.exists) aepFile.remove();
-            try { app.purge(PurgeTarget.ALL_CACHES); } catch (purgeErr) {}
-            if (_dialogsSuppressed) try { app.endSuppressDialogs(false); } catch(e) {}
+            _cleanup();
+            if (aepFile && aepFile.exists) { try { aepFile.remove(); } catch(e) {} }
             return JSON.stringify({
                 frameCount: 0,
                 duration: compDuration,
-                width: mainComp.width,
-                height: mainComp.height,
-                thumbnailOnly: true
+                width: compWidth,
+                height: compHeight,
+                thumbnailOnly: true,
+                missingFootage: missingFootageNames
             });
         }
 
-        // Render preview frames
+        // --- Render preview frames ---
+        _currentStep = 'render_preview_frames';
         var previewFrameCount = 0;
-        var frameRate = mainComp.frameRate || 30;
-        var totalFrames = Math.floor(compDuration * frameRate);
+        var totalFrames = Math.floor(compDuration * compFrameRate);
         var consecutiveFailures = 0;
+        var plannedFrameCount = 0;         // how many we intended to render
+        var incompleteFrames = false;      // did we bail early due to failures?
+        var tooShortWarning = false;       // was the comp too short for a preview?
 
         if (totalFrames > 1) {
             var previewFolder = new Folder(outFolder.fsName + '/preview');
             if (!previewFolder.exists) previewFolder.create();
 
-            // Dynamic frame count: ~6 FPS preview, min 12, max 72 frames
-            var targetPreviewFPS = 6;
-            var minFrames = 12;
-            var maxFrames = 72;
-            var dynamicFrameCount = Math.ceil(compDuration * targetPreviewFPS);
-            var actualFrameCount = Math.max(minFrames, Math.min(maxFrames, dynamicFrameCount));
-            actualFrameCount = Math.min(actualFrameCount, totalFrames);
+            // Shared dynamic-frame-count logic (see computePreviewFrameCount)
+            var actualFrameCount = computePreviewFrameCount(compDuration, totalFrames);
+            plannedFrameCount = actualFrameCount;
 
             for (var pf = 0; pf < actualFrameCount; pf++) {
                 try {
                     var progress = (actualFrameCount > 1) ? (pf / (actualFrameCount - 1)) : 0;
-                    var previewTime = mainComp.workAreaStart + (progress * compDuration);
+                    var previewTime = compWorkAreaStart + (progress * compDuration);
                     var frameFile = new File(previewFolder.fsName + '/frame_' + pf + '.png');
                     mainComp.saveFrameToPng(previewTime, frameFile);
                     if (frameFile.exists) {
@@ -2443,55 +2558,78 @@ function generatePreviewsToDisk(aepPath, outputDir) {
                         consecutiveFailures = 0;
                     } else {
                         consecutiveFailures++;
-                        if (consecutiveFailures >= 2) break;
+                        if (consecutiveFailures >= 2) { incompleteFrames = true; break; }
                     }
                 } catch (frameErr) {
                     consecutiveFailures++;
-                    if (consecutiveFailures >= 2) break;
+                    if (consecutiveFailures >= 2) { incompleteFrames = true; break; }
                 }
             }
+        } else {
+            // Too few frames for a preview animation (static comp, 1-frame still, etc).
+            // This is not an error, but the caller should know the result is
+            // thumbnail-only so the UI doesn't expect a hover animation.
+            tooShortWarning = true;
         }
 
-        // Clean up imported project item
-        if (importedItem) importedItem.remove();
+        // --- Success: clean up and return ---
+        // Remove the temp AEP BEFORE _cleanup() calls app.purge(), since purge can
+        // defer File handle release on some AE versions.
+        _currentStep = 'cleanup';
+        if (aepFile && aepFile.exists) { try { aepFile.remove(); } catch(e) {} }
+        _cleanup();
 
-        // Clean up the temp AEP file
-        if (aepFile.exists) aepFile.remove();
-
-        // Free AE caches to prevent RAM buildup during batch generation
-        try { app.purge(PurgeTarget.ALL_CACHES); } catch (purgeErr) {}
-
-        // Re-enable dialogs (false = discard suppressed messages silently)
-        if (_dialogsSuppressed) try { app.endSuppressDialogs(false); } catch(e) {}
-
-        return JSON.stringify({
+        var result = {
             frameCount: previewFrameCount,
             duration: compDuration,
-            width: mainComp.width,
-            height: mainComp.height
-        });
+            width: compWidth,
+            height: compHeight
+        };
+        if (incompleteFrames) {
+            result.incompleteFrames = true;
+            result.plannedFrameCount = plannedFrameCount;
+        }
+        if (tooShortWarning) result.tooShort = true;
+        return JSON.stringify(result);
     } catch (e) {
-        // Ensure cleanup even on unexpected errors
-        try { app.purge(PurgeTarget.ALL_CACHES); } catch (purgeErr) {}
-        if (_dialogsSuppressed) try { app.endSuppressDialogs(false); } catch(e2) {}
-        return JSON.stringify({error: e.toString()});
+        // Unexpected error: always clean up stale imports AND the temp AEP to
+        // prevent cascading failures and disk leaks. The caller's _cleanupTempDir()
+        // also wipes the parent dir, but we remove the .aep here for defense in depth.
+        var errMsg = e.toString();
+        var stepAtError = _currentStep;
+        if (aepFile && aepFile.exists) { try { aepFile.remove(); } catch (rmErr) {} }
+        _cleanup();
+        return JSON.stringify({
+            error: errMsg,
+            step: stepAtError,
+            aepPath: aepPath
+        });
     }
 }
 
 function removeFolderRecursive(folder) {
+    if (!folder || !folder.exists) return;
+    // getFiles() can return null on macOS when the Folder URI is malformed.
     var files = folder.getFiles();
-    for (var i = 0; i < files.length; i++) {
-        if (files[i] instanceof Folder) {
-            removeFolderRecursive(files[i]);
-        } else {
-            files[i].remove();
+    if (files) {
+        for (var i = 0; i < files.length; i++) {
+            try {
+                if (files[i] instanceof Folder) {
+                    removeFolderRecursive(files[i]);
+                } else {
+                    files[i].remove();
+                }
+            } catch (rfrErr) { /* skip file we can't delete; loop continues */ }
         }
     }
-    folder.remove();
+    try { folder.remove(); } catch (rmErr) {}
 }
 
 /**
  * Get the extension root path (parent of jsx/ folder where this script lives).
+ * Returns the path string on success, or the literal string "ERROR: ..." on failure.
+ * (The previous version returned JSON.stringify({error: ...}), which the JS caller
+ * didn't detect and would have used as if it were a real path.)
  */
 function getExtensionRootPath() {
     try {
@@ -2500,16 +2638,76 @@ function getExtensionRootPath() {
         var rootFolder = jsxFolder.parent;
         return rootFolder.fsName;
     } catch (e) {
-        return JSON.stringify({error: e.toString()});
+        return 'ERROR: ' + e.toString();
     }
 }
 
 /**
  * Write a text file to disk. Creates parent directories if needed.
  * Used by the OTA update system to write JS/CSS files.
+ *
+ * SECURITY: refuses to write outside the extension root directory. This prevents
+ * a compromised or malicious update manifest from dropping arbitrary files into
+ * system paths (e.g. LaunchAgents, Startup folders, etc). Only .js/.css/.html/.jsx/.json
+ * extensions under the extension root are accepted.
  */
 function writeUpdateFile(filePath, content) {
     try {
+        if (!isValidPath(filePath)) {
+            return JSON.stringify({error: 'Invalid update file path'});
+        }
+        // Extension allow-list — reject binaries and native executables
+        var lower = filePath.toLowerCase();
+        var allowedExt = false;
+        var exts = ['.js', '.css', '.html', '.htm', '.jsx', '.json', '.svg', '.xml'];
+        for (var ei = 0; ei < exts.length; ei++) {
+            if (lower.length >= exts[ei].length &&
+                lower.substring(lower.length - exts[ei].length) === exts[ei]) {
+                allowedExt = true;
+                break;
+            }
+        }
+        if (!allowedExt) {
+            return JSON.stringify({error: 'Update file extension not allowed: ' + filePath});
+        }
+        // Resolve extension root and make sure the target stays under it
+        var rootFolder;
+        try {
+            var scriptFile = new File($.fileName);
+            rootFolder = scriptFile.parent.parent; // jsx/ -> extension root
+        } catch (rootErr) {
+            return JSON.stringify({error: 'Could not resolve extension root: ' + rootErr.toString()});
+        }
+        if (!rootFolder || !rootFolder.exists) {
+            return JSON.stringify({error: 'Extension root missing'});
+        }
+        var rootPath = rootFolder.fsName;
+        // Normalize both paths to forward slashes for comparison. On case-
+        // insensitive filesystems (macOS APFS/HFS+ default, Windows NTFS) also
+        // lowercase both sides so a legitimate `/library/...` casing variation
+        // isn't incorrectly rejected.
+        var normalizedTarget = filePath.replace(/\\/g, '/');
+        var normalizedRoot = rootPath.replace(/\\/g, '/');
+        var caseInsensitive = ($.os.indexOf('Windows') !== -1) || ($.os.indexOf('Mac') !== -1);
+        if (caseInsensitive) {
+            normalizedTarget = normalizedTarget.toLowerCase();
+            normalizedRoot = normalizedRoot.toLowerCase();
+        }
+        // Strip trailing slashes
+        while (normalizedRoot.length > 1 && normalizedRoot.charAt(normalizedRoot.length - 1) === '/') {
+            normalizedRoot = normalizedRoot.substring(0, normalizedRoot.length - 1);
+        }
+        // Enforce exact match or strictly-under — prevents prefix-collision attacks
+        // where an extension root of `/Library/Extensions/Blitzkrieg` would otherwise
+        // allow writes to `/Library/Extensions/Blitzkrieg-evil/payload.js`.
+        var exactRoot = normalizedTarget === normalizedRoot;
+        var underRoot = normalizedTarget.length > normalizedRoot.length &&
+                        normalizedTarget.substring(0, normalizedRoot.length) === normalizedRoot &&
+                        normalizedTarget.charAt(normalizedRoot.length) === '/';
+        if (!exactRoot && !underRoot) {
+            return JSON.stringify({error: 'Update target is outside extension root'});
+        }
+
         var f = new File(filePath);
         // Create parent directories if they don't exist
         var parentFolder = f.parent;

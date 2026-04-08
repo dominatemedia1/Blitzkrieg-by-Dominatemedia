@@ -26,30 +26,36 @@
     var offlineRetryBtn = document.getElementById('offline-retry-btn');
 
     function hideAllScreens() {
-        loginScreen.style.display = 'none';
-        deniedScreen.style.display = 'none';
-        offlineScreen.style.display = 'none';
-        appContainer.style.display = 'none';
+        // Defensive null-checks: any of these elements can be absent if the HTML
+        // was stripped by a minifier or the auth.js loads before DOM is parsed.
+        // Without these guards the whole IIFE throws and the plugin fails to boot
+        // with a blank screen and no error surface.
+        if (loginScreen) loginScreen.style.display = 'none';
+        if (deniedScreen) deniedScreen.style.display = 'none';
+        if (offlineScreen) offlineScreen.style.display = 'none';
+        if (appContainer) appContainer.style.display = 'none';
     }
 
     function showScreen(screen) {
         hideAllScreens();
-        screen.style.display = screen === appContainer ? '' : 'flex';
+        if (screen) screen.style.display = screen === appContainer ? '' : 'flex';
     }
 
     function showLoginError(message) {
+        if (!loginError) return;
         loginError.textContent = message;
         loginError.style.display = 'block';
     }
 
     function hideLoginError() {
+        if (!loginError) return;
         loginError.style.display = 'none';
     }
 
     function setLoginLoading(loading) {
-        loginSubmitBtn.disabled = loading;
-        loginBtnText.style.display = loading ? 'none' : '';
-        loginBtnLoading.style.display = loading ? '' : 'none';
+        if (loginSubmitBtn) loginSubmitBtn.disabled = loading;
+        if (loginBtnText) loginBtnText.style.display = loading ? 'none' : '';
+        if (loginBtnLoading) loginBtnLoading.style.display = loading ? '' : 'none';
     }
 
     // Check if user has blitzkrieg_access via team_members table
@@ -192,10 +198,11 @@
         hideLoginError();
     }
 
-    // Attach event listeners
-    loginForm.addEventListener('submit', handleLogin);
-    deniedSignoutBtn.addEventListener('click', handleSignOut);
-    offlineRetryBtn.addEventListener('click', function () {
+    // Attach event listeners — null-guarded so a missing DOM element doesn't
+    // throw at module load and block plugin boot
+    if (loginForm) loginForm.addEventListener('submit', handleLogin);
+    if (deniedSignoutBtn) deniedSignoutBtn.addEventListener('click', handleSignOut);
+    if (offlineRetryBtn) offlineRetryBtn.addEventListener('click', function () {
         validateSession();
     });
 

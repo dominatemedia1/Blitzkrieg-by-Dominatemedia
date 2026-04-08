@@ -183,6 +183,16 @@ defaults write com.adobe.CSXS.11 PlayerDebugMode 1
 
 <!-- END AUTO-MANAGED -->
 
+<!-- AUTO-MANAGED: brain-vault -->
+## Brain Vault
+
+Detailed documentation lives in the Obsidian Brain vault at `~/Documents/Brain/`.
+
+**Check before working:** `Projects/Blitzkrieg.md`, `Memory/Design System.md`, `Notes/Supabase Setup.md`
+**Update after working:** Run `/brain-update` to sync changes.
+
+<!-- END AUTO-MANAGED -->
+
 <!-- MANUAL -->
 ## Custom Notes
 
