@@ -56,6 +56,73 @@
     // localStorage cache for template metadata (persists across restarts)
     var META_CACHE_KEY = 'blitzkrieg_meta_cache';
 
+    // Cloud-side manifest file — a single JSON at bucket root containing the
+    // metadata for every template. One download instead of 248+. Rebuilt on any
+    // mutation (debounced). Subsequent cold loads (new users, cache-cleared
+    // users) go from ~5s → <500ms.
+    var MANIFEST_KEY = '_blitzkrieg_manifest.json';
+    var MANIFEST_TTL_MS = 30 * 60 * 1000; // 30 minutes — stale manifests trigger rebuild
+
+    async function fetchManifest() {
+        try {
+            var res = await sb.storage.from(BUCKET).download(MANIFEST_KEY);
+            if (res.error || !res.data) return null;
+            var text = await res.data.text();
+            var manifest = JSON.parse(text);
+            if (!manifest || !Array.isArray(manifest.folders)) return null;
+            var age = Date.now() - (manifest.ts || 0);
+            if (age > MANIFEST_TTL_MS) {
+                _log('fetchManifest: stale (age ' + Math.round(age / 1000) + 's > TTL)', 'info');
+                return null;
+            }
+            _log('fetchManifest: loaded ' + manifest.folders.length + ' entries (age ' + Math.round(age / 1000) + 's)', 'success');
+            return manifest;
+        } catch (e) {
+            _log('fetchManifest error: ' + (e && e.message || e), 'warn');
+            return null;
+        }
+    }
+
+    function uploadManifest(metadataResults, archives) {
+        // Fire-and-forget — don't block the caller. Failures are logged.
+        try {
+            var manifest = {
+                version: 1,
+                ts: Date.now(),
+                folders: metadataResults,
+                archives: archives || []
+            };
+            var blob = new Blob([JSON.stringify(manifest)], { type: 'application/json' });
+            sb.storage.from(BUCKET).upload(MANIFEST_KEY, blob, {
+                contentType: 'application/json',
+                upsert: true
+            }).then(function (res) {
+                if (res.error) {
+                    _log('uploadManifest: ' + res.error.message, 'warn');
+                } else {
+                    _log('uploadManifest: published ' + metadataResults.length + ' entries', 'success');
+                }
+            }).catch(function (err) {
+                _log('uploadManifest exception: ' + (err && err.message || err), 'warn');
+            });
+        } catch (e) {
+            _log('uploadManifest build failed: ' + (e && e.message || e), 'warn');
+        }
+    }
+
+    // Debounced manifest invalidation — rapid successive mutations (bulk delete,
+    // bulk move) only trigger one delete+rebuild cycle.
+    var _manifestInvalidateTimer = null;
+    function invalidateManifest() {
+        if (_manifestInvalidateTimer) clearTimeout(_manifestInvalidateTimer);
+        _manifestInvalidateTimer = setTimeout(function () {
+            _manifestInvalidateTimer = null;
+            sb.storage.from(BUCKET).remove([MANIFEST_KEY]).then(function (r) {
+                if (!r.error) _log('manifest invalidated', 'info');
+            }).catch(function () {});
+        }, 1500);
+    }
+
     /**
      * Get cached metadata from localStorage (persists across sessions).
      * Returns {folders: [{categoryName, folderName, metadata}], ts: number} or null
@@ -112,12 +179,15 @@
     }
 
     /**
-     * Invalidate the metadata cache
+     * Invalidate the metadata cache (local AND cloud manifest).
+     * Called after every mutation so the next listTemplates() sees fresh data.
      */
     function invalidateCache() {
         try { localStorage.removeItem(META_CACHE_KEY); } catch (e) {}
+        _lastMetaWriteLen = -1;
         _signedUrlCache = null;
         _signedUrlCacheTime = 0;
+        invalidateManifest();
     }
 
     /**
@@ -327,7 +397,7 @@
         }
 
         var categories = allRootItems.filter(function (item) {
-            return item.id === null && item.name !== 'pending' && item.name !== '.emptyFolderPlaceholder';
+            return item.id === null && item.name !== 'pending' && item.name !== '.emptyFolderPlaceholder' && item.name !== MANIFEST_KEY;
         });
         _log('fetchAllMetadata: ' + categories.length + ' categories found: [' + categories.map(function(c) { return c.name; }).join(', ') + ']', 'info');
 
@@ -381,52 +451,69 @@
             return [];
         }
 
-        // Step 3: Download all metadata.json files in parallel (batched to avoid overwhelming)
-        var METADATA_BATCH = 50;
-        var metadataResults = [];
-        for (var mb = 0; mb < allFolderEntries.length; mb += METADATA_BATCH) {
-            var batch = allFolderEntries.slice(mb, mb + METADATA_BATCH);
-            var batchResults = await Promise.all(
-                batch.map(function (entry) {
-                    var metaPath = entry.categoryName + '/' + entry.folderName + '/metadata.json';
-                    return sb.storage.from(BUCKET).download(metaPath).then(function (res) {
-                        if (res.error) {
-                            _log('fetchAllMetadata: download failed for ' + metaPath + ': ' + (res.error.message || 'unknown'), 'warn');
-                            return { categoryName: entry.categoryName, folderName: entry.folderName, metadata: null };
-                        }
-                        return res.data.text().then(function (text) {
-                            try {
-                                return { categoryName: entry.categoryName, folderName: entry.folderName, metadata: JSON.parse(text) };
-                            } catch (parseErr) {
-                                // Surface corrupt metadata so admins can fix it instead of
-                                // having templates silently disappear from the library.
-                                _log('fetchAllMetadata: metadata.json parse failed for ' + metaPath + ': ' + parseErr.message, 'warn');
-                                return { categoryName: entry.categoryName, folderName: entry.folderName, metadata: null };
-                            }
-                        });
-                    }).catch(function (err) {
-                        _log('fetchAllMetadata: unexpected error for ' + metaPath + ': ' + (err && err.message || err), 'warn');
-                        return { categoryName: entry.categoryName, folderName: entry.folderName, metadata: null };
-                    });
-                })
-            );
-            metadataResults = metadataResults.concat(batchResults);
+        // Step 3: Download all metadata.json files using a concurrency-limited
+        // worker pool. The previous version ran SEQUENTIAL WAVES of 50-parallel
+        // requests, so 248 templates = 5 waves = ~5 seconds (every wave waited
+        // for its slowest request before starting the next). A worker pool keeps
+        // 50 requests in flight continuously, so the total time drops from
+        // ~5×slowest to ~total/50 ≈ 1.5-2 seconds for the same 248 templates.
+        var CONCURRENCY = 50;
+        var metadataResults = new Array(allFolderEntries.length);
+        var nextIdx = 0;
+
+        function downloadOne(idx) {
+            var entry = allFolderEntries[idx];
+            var metaPath = entry.categoryName + '/' + entry.folderName + '/metadata.json';
+            return sb.storage.from(BUCKET).download(metaPath).then(function (res) {
+                if (res.error) {
+                    _log('fetchAllMetadata: download failed for ' + metaPath + ': ' + (res.error.message || 'unknown'), 'warn');
+                    metadataResults[idx] = { categoryName: entry.categoryName, folderName: entry.folderName, metadata: null };
+                    return;
+                }
+                return res.data.text().then(function (text) {
+                    try {
+                        metadataResults[idx] = { categoryName: entry.categoryName, folderName: entry.folderName, metadata: JSON.parse(text) };
+                    } catch (parseErr) {
+                        _log('fetchAllMetadata: metadata.json parse failed for ' + metaPath + ': ' + parseErr.message, 'warn');
+                        metadataResults[idx] = { categoryName: entry.categoryName, folderName: entry.folderName, metadata: null };
+                    }
+                });
+            }).catch(function (err) {
+                _log('fetchAllMetadata: unexpected error for ' + metaPath + ': ' + (err && err.message || err), 'warn');
+                metadataResults[idx] = { categoryName: entry.categoryName, folderName: entry.folderName, metadata: null };
+            });
         }
 
-        var withMeta = metadataResults.filter(function(r) { return r.metadata !== null; }).length;
+        async function worker() {
+            while (nextIdx < allFolderEntries.length) {
+                var myIdx = nextIdx++;
+                await downloadOne(myIdx);
+            }
+        }
+
+        var workers = [];
+        for (var w = 0; w < CONCURRENCY; w++) workers.push(worker());
+        await Promise.all(workers);
+
+        var withMeta = metadataResults.filter(function(r) { return r && r.metadata !== null; }).length;
         _log('fetchAllMetadata: done — ' + withMeta + '/' + metadataResults.length + ' have metadata (took ' + (Date.now() - t0) + 'ms)', withMeta > 0 ? 'success' : 'warn');
 
         return metadataResults;
     }
 
     /**
-     * List all templates. Uses localStorage cache for instant loads.
-     * First load: full fetch (slow). Subsequent loads: cached metadata + fresh signed URLs (fast).
+     * List all templates. Three-tier fast path:
+     *   1. localStorage cache (instant, no network)
+     *   2. Cloud manifest file (one download, 500ms cold load)
+     *   3. Full fetchAllMetadata (worker-pool parallel download, 2-3s cold load)
+     *
+     * Tiers 1+2 populate tier 3 for the next load, so a new user or a
+     * cache-cleared user downloads the manifest and is instantly fast.
      */
     async function listTemplates() {
         var t0 = Date.now();
 
-        // Check localStorage cache first
+        // ----- Tier 1: localStorage cache -----
         var cache = getCachedMetadata();
 
         if (cache && cache.folders && cache.folders.length > 0) {
@@ -442,11 +529,22 @@
             // refresh entirely when the cache is younger than 10 minutes.
             var BACKGROUND_REFRESH_TTL = 10 * 60 * 1000;
             if (ageMs >= BACKGROUND_REFRESH_TTL) {
-                fetchAllMetadata().then(function (freshMeta) {
-                    setCachedMetadata(freshMeta);
-                    _log('listTemplates: background refresh done (' + freshMeta.length + ' entries)', 'info');
+                // Prefer the cloud manifest for the refresh too — it's still 1 req
+                // vs hundreds. Fall through to fetchAllMetadata if manifest is missing.
+                fetchManifest().then(function (manifest) {
+                    if (manifest && manifest.folders) {
+                        setCachedMetadata(manifest.folders);
+                        if (manifest.archives) listTemplates._archives = manifest.archives;
+                        _log('listTemplates: background manifest refresh done (' + manifest.folders.length + ' entries)', 'info');
+                        return null;
+                    }
+                    return fetchAllMetadata().then(function (freshMeta) {
+                        setCachedMetadata(freshMeta);
+                        uploadManifest(freshMeta, listTemplates._archives || []);
+                        _log('listTemplates: background full refresh done (' + freshMeta.length + ' entries)', 'info');
+                    });
                 }).catch(function (err) {
-                    _log('listTemplates: background refresh failed: ' + err.message, 'warn');
+                    _log('listTemplates: background refresh failed: ' + (err && err.message || err), 'warn');
                 });
             } else {
                 _log('listTemplates: skipped background refresh (cache age ' + Math.round(ageMs / 1000) + 's < TTL)', 'info');
@@ -458,12 +556,29 @@
             return comps;
         }
 
-        // SLOW PATH: Full fetch (first time or cache cleared)
-        _log('listTemplates: SLOW PATH — no cache, full fetch...', 'info');
+        // ----- Tier 2: Cloud manifest file -----
+        // Try to download a single manifest.json instead of 248+ individual
+        // metadata.json files. Brings cold-load time from ~5s to <500ms.
+        var manifest = await fetchManifest();
+        if (manifest && manifest.folders && manifest.folders.length > 0) {
+            _log('listTemplates: MANIFEST PATH — ' + manifest.folders.length + ' entries in ' + (Date.now() - t0) + 'ms', 'success');
+            setCachedMetadata(manifest.folders);
+            if (manifest.archives) listTemplates._archives = manifest.archives;
+            var mComps = await buildCompsFromMetadata(manifest.folders);
+            _log('listTemplates: MANIFEST PATH complete — ' + mComps.length + ' comps in ' + (Date.now() - t0) + 'ms', 'success');
+            return mComps;
+        }
+
+        // ----- Tier 3: Full fetchAllMetadata (slow path, worker-pool parallel) -----
+        _log('listTemplates: SLOW PATH — no cache, no manifest, full fetch...', 'info');
         var metadataResults = await fetchAllMetadata();
 
-        // Save to localStorage for next time
+        // Save to localStorage for next session
         setCachedMetadata(metadataResults);
+
+        // Publish cloud manifest so the NEXT cold load (this user after cache clear,
+        // or any other user) can skip the slow path entirely.
+        uploadManifest(metadataResults, listTemplates._archives || []);
 
         // Sign URLs and build comps
         var comps2 = await buildCompsFromMetadata(metadataResults);
