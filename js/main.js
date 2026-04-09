@@ -6329,10 +6329,17 @@
                                 }
                                 if (parsed.skipped) {
                                     var skipDetail = parsed.skipReason || 'unrenderable';
-                                    if (parsed.missingFootage && parsed.missingFootage.length) {
-                                        skipDetail += ' — missing: ' + parsed.missingFootage.join(', ');
+                                    if (parsed.skipReason === 'memory_limit') {
+                                        // Friendly toast for editors — surfaces Muhammad's
+                                        // fix so they don't spend time debugging.
+                                        showToast('Memory limit hit on "' + comp.name + '" — lower Motion Tile output values and re-stash.', true);
+                                        debugLog('GEN: skipped (memory_limit) — ' + (parsed.hint || parsed.memoryError || 'AE memory cap exceeded'), 'error');
+                                    } else {
+                                        if (parsed.missingFootage && parsed.missingFootage.length) {
+                                            skipDetail += ' — missing: ' + parsed.missingFootage.join(', ');
+                                        }
+                                        debugLog('GEN: skipped — ' + skipDetail, 'warn');
                                     }
-                                    debugLog('GEN: skipped — ' + skipDetail, 'warn');
                                     resolve(parsed);
                                 } else if (parsed.thumbnailOnly) {
                                     var tOnlyDetail = 'thumbnail only (missing footage, skipped preview frames)';
@@ -6340,6 +6347,11 @@
                                         tOnlyDetail += ' — missing: ' + parsed.missingFootage.join(', ');
                                     }
                                     debugLog('GEN: ' + tOnlyDetail, 'warn');
+                                } else if (parsed.memoryError) {
+                                    // Frame-loop bailed mid-way because AE ran out of memory.
+                                    // The thumbnail already rendered so we keep the partial result.
+                                    showToast('Memory limit hit on "' + comp.name + '" — thumbnail saved but preview frames incomplete. Lower Motion Tile output values.', true);
+                                    debugLog('GEN: memory limit reached after ' + parsed.frameCount + '/' + parsed.plannedFrameCount + ' frames — ' + (parsed.hint || parsed.memoryError), 'error');
                                 } else if (parsed.incompleteFrames) {
                                     debugLog('GEN: ' + parsed.frameCount + '/' + parsed.plannedFrameCount + ' frames (rendering bailed early after consecutive failures)', 'warn');
                                 } else if (parsed.tooShort) {

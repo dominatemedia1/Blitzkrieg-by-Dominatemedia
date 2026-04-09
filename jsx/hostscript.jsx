@@ -982,6 +982,8 @@ function stashSelectedComp(libraryPath, categoryName) {
         // --- Save Thumbnail and Preview Frames ---
         var thumbFile = new File(buildPath(compFolder, "comp.png"));
         var previewFrameCount = 0;
+        var stashMemoryErrorHit = false; // surfaced in the return value so the
+                                         // editor gets a specific Motion Tile hint
 
         try {
             // Save main thumbnail (middle frame)
@@ -1013,12 +1015,28 @@ function stashSelectedComp(libraryPath, categoryName) {
                         compToSave.saveFrameToPng(previewTime, previewFile);
                         previewFrameCount++;
                     } catch (previewErr) {
+                        // Detect AE memory-allocation OOM (Motion Tile with large
+                        // Output Width/Height is the common cause). Break out — no
+                        // point rendering more frames that will all fail the same way.
+                        var pel = previewErr.toString().toLowerCase();
+                        if (pel.indexOf('memory allocation') !== -1 && pel.indexOf('exceed') !== -1) {
+                            stashMemoryErrorHit = true;
+                            $.writeln("Blitzkrieg: Preview frame render hit AE memory limit (Motion Tile?): " + previewErr.toString());
+                            break;
+                        }
                         $.writeln("Blitzkrieg: Warning - Could not generate preview frame " + pf + ": " + previewErr.toString());
                     }
                 }
             }
         } catch(e) {
-            $.writeln("Blitzkrieg: Warning - Could not generate thumbnail: " + e.toString());
+            // Also catch memory errors from the thumbnail render itself.
+            var tel = e.toString().toLowerCase();
+            if (tel.indexOf('memory allocation') !== -1 && tel.indexOf('exceed') !== -1) {
+                stashMemoryErrorHit = true;
+                $.writeln("Blitzkrieg: Thumbnail render hit AE memory limit (Motion Tile?): " + e.toString());
+            } else {
+                $.writeln("Blitzkrieg: Warning - Could not generate thumbnail: " + e.toString());
+            }
         }
 
         // --- Save Metadata ---
@@ -1391,6 +1409,14 @@ function stashSelectedComp(libraryPath, categoryName) {
             return "Warning: '" + compToSaveName + "' was added but " + countSuffix +
                    " were not fully collected: " + missingList +
                    ". Open the bundle in AE, relink the missing files, and re-stash to fix.";
+        }
+
+        // Memory-limit warning for stash: thumbnail/preview rendering hit AE's
+        // "Memory allocation exceeds internal limit" error. The template still
+        // uploaded but the previews are incomplete. Muhammad's tip surfaced as
+        // actionable guidance for the editor.
+        if (stashMemoryErrorHit) {
+            return "Warning: '" + compToSaveName + "' was added but AE hit its memory limit while rendering previews. This usually means Motion Tile (or a similar effect) has very large Output Width/Height values. Lower those values and re-stash to get full preview frames.";
         }
 
         return "Success! '" + compToSaveName + "' was added to your library.";
@@ -2485,6 +2511,12 @@ function generatePreviewsToDisk(aepPath, outputDir) {
         try { app.beginSuppressDialogs(); _dialogsSuppressed = true; } catch (sdErr) { /* AE < 13.8 */ }
 
         // --- Render thumbnail ---
+        // Also detect the AE "Memory allocation X gb exceeds the internal limit"
+        // error that Motion Tile + other effects with huge output values can throw.
+        // When we detect it we surface a clear skip reason so the admin knows to
+        // lower the Motion Tile output values (or raise AE's memory cap), rather
+        // than getting a generic "render failed" cascade that makes the whole
+        // batch look broken.
         _currentStep = 'render_thumbnail';
         var thumbTimes = [
             compWorkAreaStart + (compDuration / 2),
@@ -2492,16 +2524,39 @@ function generatePreviewsToDisk(aepPath, outputDir) {
             compWorkAreaStart + (compDuration * 0.25)
         ];
         var thumbFile = new File(outFolder.fsName + '/comp.png');
+        var thumbMemoryError = null;
         for (var tt = 0; tt < thumbTimes.length; tt++) {
             try {
                 mainComp.saveFrameToPng(thumbTimes[tt], thumbFile);
                 if (thumbFile.exists) break;
-            } catch (thumbErr) { /* try next timestamp */ }
+            } catch (thumbErr) {
+                // Look for AE's memory-allocation diagnostic string. The exact text
+                // has varied across versions but always contains "memory allocation"
+                // and "exceeds". Match substrings case-insensitively.
+                var tem = thumbErr.toString().toLowerCase();
+                if (tem.indexOf('memory allocation') !== -1 && tem.indexOf('exceed') !== -1) {
+                    thumbMemoryError = thumbErr.toString();
+                    break; // no point retrying other timestamps — it's a comp-wide issue
+                }
+                /* otherwise try next timestamp */
+            }
         }
 
         if (!thumbFile.exists) {
             _cleanup();
             if (aepFile && aepFile.exists) { try { aepFile.remove(); } catch(e) {} }
+            if (thumbMemoryError) {
+                return JSON.stringify({
+                    frameCount: 0,
+                    duration: compDuration,
+                    width: compWidth,
+                    height: compHeight,
+                    skipped: true,
+                    skipReason: 'memory_limit',
+                    memoryError: thumbMemoryError,
+                    hint: 'Motion Tile or similar effect with large output values is exceeding AE memory limit. Lower the Motion Tile output dimensions (Output Width/Height) and re-stash this template.'
+                });
+            }
             if (hasMissingFootage) {
                 return JSON.stringify({
                     frameCount: 0,
@@ -2538,6 +2593,7 @@ function generatePreviewsToDisk(aepPath, outputDir) {
         var plannedFrameCount = 0;         // how many we intended to render
         var incompleteFrames = false;      // did we bail early due to failures?
         var tooShortWarning = false;       // was the comp too short for a preview?
+        var frameMemoryError = null;       // populated if AE threw OOM during frame render
 
         if (totalFrames > 1) {
             var previewFolder = new Folder(outFolder.fsName + '/preview');
@@ -2561,6 +2617,16 @@ function generatePreviewsToDisk(aepPath, outputDir) {
                         if (consecutiveFailures >= 2) { incompleteFrames = true; break; }
                     }
                 } catch (frameErr) {
+                    // Detect AE memory-allocation errors and bail immediately —
+                    // no point grinding through 11 more frames that will all fail
+                    // with the same error. Surface the memory-limit signal so the
+                    // caller can display the Motion Tile fix hint.
+                    var fem = frameErr.toString().toLowerCase();
+                    if (fem.indexOf('memory allocation') !== -1 && fem.indexOf('exceed') !== -1) {
+                        frameMemoryError = frameErr.toString();
+                        incompleteFrames = true;
+                        break;
+                    }
                     consecutiveFailures++;
                     if (consecutiveFailures >= 2) { incompleteFrames = true; break; }
                 }
@@ -2589,6 +2655,10 @@ function generatePreviewsToDisk(aepPath, outputDir) {
             result.incompleteFrames = true;
             result.plannedFrameCount = plannedFrameCount;
         }
+        if (frameMemoryError) {
+            result.memoryError = frameMemoryError;
+            result.hint = 'Motion Tile or similar effect with large output values is exceeding AE memory limit. Lower the Motion Tile Output Width/Height and re-stash this template.';
+        }
         if (tooShortWarning) result.tooShort = true;
         return JSON.stringify(result);
     } catch (e) {
@@ -2599,6 +2669,21 @@ function generatePreviewsToDisk(aepPath, outputDir) {
         var stepAtError = _currentStep;
         if (aepFile && aepFile.exists) { try { aepFile.remove(); } catch (rmErr) {} }
         _cleanup();
+        // Special-case memory-allocation errors at the outer catch level too.
+        // Some AE versions throw these through the ExtendScript bridge before
+        // our per-call try/catch can touch them.
+        var outerLower = errMsg.toLowerCase();
+        if (outerLower.indexOf('memory allocation') !== -1 && outerLower.indexOf('exceed') !== -1) {
+            return JSON.stringify({
+                frameCount: 0,
+                skipped: true,
+                skipReason: 'memory_limit',
+                memoryError: errMsg,
+                step: stepAtError,
+                hint: 'Motion Tile or similar effect with large output values is exceeding AE memory limit. Lower the Motion Tile Output Width/Height and re-stash this template.',
+                aepPath: aepPath
+            });
+        }
         return JSON.stringify({
             error: errMsg,
             step: stepAtError,
