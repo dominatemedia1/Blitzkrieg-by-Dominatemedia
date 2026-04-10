@@ -1464,6 +1464,10 @@ function stashSelectedComp(libraryPath, categoryName) {
             app.open(originalProjectFile);
         }
 
+        // End dialog suppression immediately after the last save/open call.
+        // Don't leave it active during cleanup or return logic.
+        if (_stashDialogsSuppressed) { try { app.endSuppressDialogs(false); } catch(e) {} _stashDialogsSuppressed = false; }
+
         // Clean up the temp project file we created on behalf of an unsaved user
         // project. The user's work is still in-memory in the restored project, so
         // the temp file is safe to delete — leaving it on disk would accumulate
@@ -1473,15 +1477,6 @@ function stashSelectedComp(libraryPath, categoryName) {
                 $.writeln("Blitzkrieg: Could not remove temp project file: " + tmpRmErr.toString());
             }
         }
-
-        // Warn about missing / skipped footage so users know their bundle is
-        // incomplete. This is non-fatal (the AEP still saved), but the template will
-        // render with "ImporterJP"/"missing footage" placeholders when re-imported
-        // elsewhere. Each entry now includes the SKIP REASON so users know whether
-        // to relink, re-save, check permissions, or re-import their sequences.
-        // `missingTotalCount` tracks overflow beyond the detail cap so the user
-        // sees the TRUE number even when we can only list the first 30 by name.
-        if (_stashDialogsSuppressed) { try { app.endSuppressDialogs(false); } catch(e) {} _stashDialogsSuppressed = false; }
 
         if (missingTotalCount > 0) {
             var missingList = missingFootageItems.slice(0, 5).join('; ');
@@ -1639,7 +1634,10 @@ function importComp(aepPath, displayName) {
                                 // Don't remove if used as a layer source in
                                 // mainComp or any of its nested pre-comps.
                                 var isUsed = false;
+                                var _seenComps = {};
                                 var _checkUsage = function(comp, item) {
+                                    if (_seenComps[comp.id]) return false;
+                                    _seenComps[comp.id] = true;
                                     for (var li = 1; li <= comp.numLayers; li++) {
                                         try {
                                             var lyr = comp.layer(li);
