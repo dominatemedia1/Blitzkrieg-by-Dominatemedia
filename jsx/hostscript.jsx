@@ -1555,19 +1555,31 @@ function importComp(aepPath, displayName) {
 
         app.beginUndoGroup("Blitzkrieg Import");
 
-        // Suppress "file not found" dialogs on AE versions where it's safe.
-        // AE 2024+ (majorVersion >= 24) crashes with "Object is invalid" when
-        // beginSuppressDialogs() is active during importFile() — skip on those.
+        // Suppress "missing file" dialogs during import. On AE 2024+ this MAY
+        // cause importFile to throw "Object is invalid" — if so, we catch it and
+        // retry without suppression (dialog appears but import works).
         var _importDialogsSuppressed = false;
-        if (AE_VERSION_INFO.majorVersion > 0 && AE_VERSION_INFO.majorVersion < 24) {
-            try { app.beginSuppressDialogs(); _importDialogsSuppressed = true; } catch (sdErr) {}
-        }
+        try { app.beginSuppressDialogs(); _importDialogsSuppressed = true; } catch (sdErr) {}
 
         // Import with optimized settings
         var importOptions = new ImportOptions(fileToImport);
         importOptions.importAs = ImportAsType.PROJECT;
 
-        var importedItem = app.project.importFile(importOptions);
+        var importedItem = null;
+        try {
+            importedItem = app.project.importFile(importOptions);
+        } catch (impErr) {
+            // AE 2024+ can throw with suppression active — retry without it
+            if (_importDialogsSuppressed) {
+                try { app.endSuppressDialogs(false); } catch (ed) {}
+                _importDialogsSuppressed = false;
+            }
+            try {
+                var retryOpts = new ImportOptions(fileToImport);
+                retryOpts.importAs = ImportAsType.PROJECT;
+                importedItem = app.project.importFile(retryOpts);
+            } catch (impErr2) { /* both attempts failed */ }
+        }
 
         if (_importDialogsSuppressed) {
             try { app.endSuppressDialogs(false); } catch (edErr) {}
@@ -2067,15 +2079,26 @@ function generatePreviewFrames(aepPath) {
             previewFolder.create();
         }
 
-        // Temporarily import the AEP to generate frames
-        // Version-gated dialog suppression: safe on AE < 2024, skip on 2024+
+        // Temporarily import the AEP to generate frames.
+        // Suppress dialogs; if AE 2024+ throws, retry without suppression.
         var _genFrameDialogsSuppressed = false;
-        if (AE_VERSION_INFO.majorVersion > 0 && AE_VERSION_INFO.majorVersion < 24) {
-            try { app.beginSuppressDialogs(); _genFrameDialogsSuppressed = true; } catch (sdErr) {}
-        }
+        try { app.beginSuppressDialogs(); _genFrameDialogsSuppressed = true; } catch (sdErr) {}
         var importOptions = new ImportOptions(aepFile);
         importOptions.importAs = ImportAsType.PROJECT;
-        var importedItem = app.project.importFile(importOptions);
+        var importedItem = null;
+        try {
+            importedItem = app.project.importFile(importOptions);
+        } catch (gfImpErr) {
+            if (_genFrameDialogsSuppressed) {
+                try { app.endSuppressDialogs(false); } catch (ed) {}
+                _genFrameDialogsSuppressed = false;
+            }
+            try {
+                var retryOpts = new ImportOptions(aepFile);
+                retryOpts.importAs = ImportAsType.PROJECT;
+                importedItem = app.project.importFile(retryOpts);
+            } catch (gfImpErr2) { /* both failed */ }
+        }
         if (_genFrameDialogsSuppressed) {
             try { app.endSuppressDialogs(false); } catch (edErr) {}
             _genFrameDialogsSuppressed = false;
@@ -2478,13 +2501,11 @@ function cleanupTempStash(tempPath) {
  * @returns {string} JSON: {frameCount: N} or {error: "..."}
  */
 function generatePreviewsToDisk(aepPath, outputDir) {
-    // NOTE: Dialog suppression is deliberately deferred until AFTER the import.
-    // On AE 2024/2025, beginSuppressDialogs() before app.project.importFile() can
-    // cause the importer to throw "ReferenceError: Object is invalid" when the AEP
-    // triggers a version-compatibility or missing-footage dialog that AE then
-    // cannot show. Suppressing dialogs only around saveFrameToPng() (the operation
-    // that actually spams modal "Could not create file" dialogs on Windows) avoids
-    // the import-time crash while still protecting batch rendering.
+    // NOTE: We always suppress dialogs before importFile() to prevent blocking
+    // "missing file" dialogs. On AE 2024/2025 this MAY cause importFile() to throw
+    // "Object is invalid" — the import try/catch handles this by ending suppression
+    // and retrying without it (dialog appears but import completes). Separate
+    // _dialogsSuppressed flag still used around saveFrameToPng() for Windows.
     var _dialogsSuppressed = false;
     var importedItem = null;  // declared outside try so catch block can clean up
     var aepFile = null;
@@ -2558,21 +2579,25 @@ function generatePreviewsToDisk(aepPath, outputDir) {
             return JSON.stringify({error: 'Cannot create output dir: ' + outFolder.fsName});
         }
 
-        // --- Import the AEP with version-gated dialog suppression ---
-        // On AE < 2024, beginSuppressDialogs() safely silences "file not found"
-        // dialogs during import. On AE 2024+ it crashes (see note at top of function).
+        // --- Import the AEP with dialog suppression ---
+        // Always suppress to prevent blocking "missing file" dialogs. If AE 2024+
+        // throws "Object is invalid" with suppression active, we catch it, end
+        // suppression, and retry (dialog may appear but import completes).
         _currentStep = 'import_file';
         var importError = null;
         var _genImportDialogsSuppressed = false;
-        if (AE_VERSION_INFO.majorVersion > 0 && AE_VERSION_INFO.majorVersion < 24) {
-            try { app.beginSuppressDialogs(); _genImportDialogsSuppressed = true; } catch (sdErr) {}
-        }
+        try { app.beginSuppressDialogs(); _genImportDialogsSuppressed = true; } catch (sdErr) {}
         try {
             var importOptions = new ImportOptions(aepFile);
             importOptions.importAs = ImportAsType.PROJECT;
             importedItem = app.project.importFile(importOptions);
         } catch (impErr1) {
             importError = impErr1;
+            // AE 2024+ may throw with suppression — end it before retry
+            if (_genImportDialogsSuppressed) {
+                try { app.endSuppressDialogs(false); } catch (ed) {}
+                _genImportDialogsSuppressed = false;
+            }
         }
         if (_genImportDialogsSuppressed) {
             try { app.endSuppressDialogs(false); } catch (edErr) {}
@@ -2589,9 +2614,6 @@ function generatePreviewsToDisk(aepPath, outputDir) {
         // OneDrive/Dropbox flush timing via _cleanupTempDir delays between items.
         if (!importedItem) {
             try { app.purge(PurgeTarget.ALL_CACHES); } catch (purgeErr) {}
-            if (AE_VERSION_INFO.majorVersion > 0 && AE_VERSION_INFO.majorVersion < 24) {
-                try { app.beginSuppressDialogs(); _genImportDialogsSuppressed = true; } catch (sdErr2) {}
-            }
             try {
                 var retryOptions = new ImportOptions(aepFile);
                 retryOptions.importAs = ImportAsType.PROJECT;
@@ -2599,10 +2621,6 @@ function generatePreviewsToDisk(aepPath, outputDir) {
                 if (importedItem) importError = null;
             } catch (impErr2) {
                 if (!importError) importError = impErr2;
-            }
-            if (_genImportDialogsSuppressed) {
-                try { app.endSuppressDialogs(false); } catch (edErr2) {}
-                _genImportDialogsSuppressed = false;
             }
         }
 
