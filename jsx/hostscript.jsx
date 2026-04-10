@@ -1315,6 +1315,78 @@ function stashSelectedComp(libraryPath, categoryName) {
             }
         }
 
+        // --- Remove missing footage items before saving ---
+        // After reduceProject, any FootageItem with footageMissing or a dead file
+        // reference will trigger an AE "file not found" dialog when the AEP is
+        // re-imported on another machine. Remove them now so stashed templates
+        // are clean. Iterate in reverse so .remove() doesn't shift indices.
+        var removedMissingCount = 0;
+        for (var rmi = app.project.numItems; rmi >= 1; rmi--) {
+            try {
+                var rmItem = app.project.item(rmi);
+                if (!(rmItem instanceof FootageItem)) continue;
+
+                var shouldRemove = false;
+                var rmReason = '';
+
+                // Check explicit footageMissing flag
+                try {
+                    if (rmItem.footageMissing) {
+                        shouldRemove = true;
+                        rmReason = 'footageMissing flag';
+                    }
+                } catch (fmErr) {}
+
+                // Check if file reference exists but file is gone from disk
+                if (!shouldRemove) {
+                    try {
+                        var rmSource = rmItem.mainSource;
+                        if (rmSource && rmSource.file && !rmSource.file.exists) {
+                            shouldRemove = true;
+                            rmReason = 'source file missing: ' + rmSource.file.fsName;
+                        }
+                    } catch (srcErr) {}
+                }
+
+                if (shouldRemove) {
+                    // Don't remove if a remaining comp uses it as a layer source
+                    var rmUsed = false;
+                    for (var cui = 1; cui <= app.project.numItems; cui++) {
+                        try {
+                            var cuItem = app.project.item(cui);
+                            if (!(cuItem instanceof CompItem)) continue;
+                            for (var cli = 1; cli <= cuItem.numLayers; cli++) {
+                                try {
+                                    if (cuItem.layer(cli).source === rmItem) {
+                                        rmUsed = true;
+                                        break;
+                                    }
+                                } catch (clErr) {}
+                            }
+                            if (rmUsed) break;
+                        } catch (cuErr) {}
+                    }
+
+                    var rmName = '';
+                    try { rmName = rmItem.name || ('item ' + rmi); } catch (nmErr) { rmName = 'item ' + rmi; }
+                    if (rmUsed) {
+                        $.writeln("Blitzkrieg: Keeping missing footage (in use by comp): " + rmName);
+                    } else {
+                        try {
+                            rmItem.remove();
+                            removedMissingCount++;
+                            $.writeln("Blitzkrieg: Removed missing footage before save: " + rmName + " (" + rmReason + ")");
+                        } catch (rmErr) {
+                            $.writeln("Blitzkrieg: Could not remove missing footage " + rmName + ": " + rmErr.toString());
+                        }
+                    }
+                }
+            } catch (rmiErr) {}
+        }
+        if (removedMissingCount > 0) {
+            $.writeln("Blitzkrieg: Cleaned " + removedMissingCount + " missing footage item(s) before save.");
+        }
+
         // Save the reduced project to library
         // Try the primary path first, then fallback strategies for macOS
         var finalAEPFile = new File(buildPath(compFolder, safeCompName + ".aep"));
@@ -1475,11 +1547,25 @@ function importComp(aepPath, displayName) {
 
         app.beginUndoGroup("Blitzkrieg Import");
 
+        // Suppress "file not found" dialogs on AE versions where it's safe.
+        // AE 2024+ (majorVersion >= 24) crashes with "Object is invalid" when
+        // beginSuppressDialogs() is active during importFile() — skip on those.
+        var _importDialogsSuppressed = false;
+        if (AE_VERSION_INFO.majorVersion > 0 && AE_VERSION_INFO.majorVersion < 24) {
+            try { app.beginSuppressDialogs(); _importDialogsSuppressed = true; } catch (sdErr) {}
+        }
+
         // Import with optimized settings
         var importOptions = new ImportOptions(fileToImport);
         importOptions.importAs = ImportAsType.PROJECT;
 
         var importedItem = app.project.importFile(importOptions);
+
+        if (_importDialogsSuppressed) {
+            try { app.endSuppressDialogs(false); } catch (edErr) {}
+            _importDialogsSuppressed = false;
+        }
+
         if (!importedItem) {
             app.endUndoGroup();
             return "Error: Import returned no items.";
@@ -1512,6 +1598,59 @@ function importComp(aepPath, displayName) {
             findCompInFolder(importedItem);
         } else if (importedItem instanceof CompItem) {
             mainComp = importedItem;
+        }
+
+        // --- Clean up missing footage from imported project ---
+        // Templates with broken file references leave broken items in the
+        // project panel. Remove unused missing footage to keep things clean.
+        if (importedItem instanceof FolderItem) {
+            var _cleanupMissing = function(folder) {
+                for (var ci = folder.numItems; ci >= 1; ci--) {
+                    try {
+                        var cItem = folder.item(ci);
+                        if (cItem instanceof FolderItem) {
+                            _cleanupMissing(cItem);
+                            if (cItem.numItems === 0) {
+                                try { cItem.remove(); } catch (efErr) {}
+                            }
+                        } else if (cItem instanceof FootageItem) {
+                            var cMissing = false;
+                            try { cMissing = !!cItem.footageMissing; } catch (fmChk) {}
+                            if (!cMissing) {
+                                try {
+                                    if (cItem.mainSource && cItem.mainSource.file && !cItem.mainSource.file.exists) {
+                                        cMissing = true;
+                                    }
+                                } catch (srcChk) {}
+                            }
+                            if (cMissing) {
+                                // Don't remove if used as a layer source in
+                                // mainComp or any of its nested pre-comps.
+                                var isUsed = false;
+                                var _checkUsage = function(comp, item) {
+                                    for (var li = 1; li <= comp.numLayers; li++) {
+                                        try {
+                                            var lyr = comp.layer(li);
+                                            if (lyr.source === item) return true;
+                                            if (lyr.source instanceof CompItem) {
+                                                if (_checkUsage(lyr.source, item)) return true;
+                                            }
+                                        } catch (lErr) {}
+                                    }
+                                    return false;
+                                };
+                                if (mainComp) {
+                                    isUsed = _checkUsage(mainComp, cItem);
+                                }
+                                if (!isUsed) {
+                                    try { cItem.remove(); } catch (rmErr) {}
+                                }
+                            }
+                        }
+                    } catch (ciErr) {}
+                }
+            };
+            _cleanupMissing(importedItem);
         }
 
         if (mainComp && mainComp.name !== compName) {
@@ -1560,6 +1699,9 @@ function importComp(aepPath, displayName) {
         return mainComp ? "Success: '" + compName + "' imported." : "Success: Project imported.";
 
     } catch (e) {
+        if (_importDialogsSuppressed) {
+            try { app.endSuppressDialogs(false); } catch (edErr) {}
+        }
         try { app.endUndoGroup(); } catch(ue) {}
         return "Error: " + e.toString();
     }
@@ -1915,9 +2057,18 @@ function generatePreviewFrames(aepPath) {
         }
 
         // Temporarily import the AEP to generate frames
+        // Version-gated dialog suppression: safe on AE < 2024, skip on 2024+
+        var _genFrameDialogsSuppressed = false;
+        if (AE_VERSION_INFO.majorVersion > 0 && AE_VERSION_INFO.majorVersion < 24) {
+            try { app.beginSuppressDialogs(); _genFrameDialogsSuppressed = true; } catch (sdErr) {}
+        }
         var importOptions = new ImportOptions(aepFile);
         importOptions.importAs = ImportAsType.PROJECT;
         var importedItem = app.project.importFile(importOptions);
+        if (_genFrameDialogsSuppressed) {
+            try { app.endSuppressDialogs(false); } catch (edErr) {}
+            _genFrameDialogsSuppressed = false;
+        }
 
         if (!importedItem) {
             // Restore the original project before returning so we don't leak the
@@ -2032,6 +2183,9 @@ function generatePreviewFrames(aepPath) {
         }
 
     } catch (e) {
+        if (_genFrameDialogsSuppressed) {
+            try { app.endSuppressDialogs(false); } catch (edErr) {}
+        }
         // Try to restore original project on error
         try {
             if (originalProjectFile && originalProjectFile.exists) {
@@ -2393,15 +2547,25 @@ function generatePreviewsToDisk(aepPath, outputDir) {
             return JSON.stringify({error: 'Cannot create output dir: ' + outFolder.fsName});
         }
 
-        // --- Import the AEP (WITHOUT dialog suppression to avoid AE 2024/2025 crash) ---
+        // --- Import the AEP with version-gated dialog suppression ---
+        // On AE < 2024, beginSuppressDialogs() safely silences "file not found"
+        // dialogs during import. On AE 2024+ it crashes (see note at top of function).
         _currentStep = 'import_file';
         var importError = null;
+        var _genImportDialogsSuppressed = false;
+        if (AE_VERSION_INFO.majorVersion > 0 && AE_VERSION_INFO.majorVersion < 24) {
+            try { app.beginSuppressDialogs(); _genImportDialogsSuppressed = true; } catch (sdErr) {}
+        }
         try {
             var importOptions = new ImportOptions(aepFile);
             importOptions.importAs = ImportAsType.PROJECT;
             importedItem = app.project.importFile(importOptions);
         } catch (impErr1) {
             importError = impErr1;
+        }
+        if (_genImportDialogsSuppressed) {
+            try { app.endSuppressDialogs(false); } catch (edErr) {}
+            _genImportDialogsSuppressed = false;
         }
 
         // Retry once on failure: purge caches and try again. Transient state in
@@ -2414,6 +2578,9 @@ function generatePreviewsToDisk(aepPath, outputDir) {
         // OneDrive/Dropbox flush timing via _cleanupTempDir delays between items.
         if (!importedItem) {
             try { app.purge(PurgeTarget.ALL_CACHES); } catch (purgeErr) {}
+            if (AE_VERSION_INFO.majorVersion > 0 && AE_VERSION_INFO.majorVersion < 24) {
+                try { app.beginSuppressDialogs(); _genImportDialogsSuppressed = true; } catch (sdErr2) {}
+            }
             try {
                 var retryOptions = new ImportOptions(aepFile);
                 retryOptions.importAs = ImportAsType.PROJECT;
@@ -2421,6 +2588,10 @@ function generatePreviewsToDisk(aepPath, outputDir) {
                 if (importedItem) importError = null;
             } catch (impErr2) {
                 if (!importError) importError = impErr2;
+            }
+            if (_genImportDialogsSuppressed) {
+                try { app.endSuppressDialogs(false); } catch (edErr2) {}
+                _genImportDialogsSuppressed = false;
             }
         }
 
