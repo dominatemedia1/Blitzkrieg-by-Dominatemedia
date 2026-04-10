@@ -1500,8 +1500,8 @@ function stashSelectedComp(libraryPath, categoryName) {
         return "Success! '" + compToSaveName + "' was added to your library.";
 
     } catch (e) {
-        if (_stashDialogsSuppressed) { try { app.endSuppressDialogs(false); } catch(e2) {} }
-        // Try to restore original project on error
+        // Try to restore original project on error (keep dialog suppression
+        // active so app.open doesn't trigger "missing files" dialogs)
         try {
             if (originalProjectFile && originalProjectFile.exists) {
                 app.open(originalProjectFile);
@@ -1509,6 +1509,7 @@ function stashSelectedComp(libraryPath, categoryName) {
         } catch (restoreErr) {
             $.writeln("Blitzkrieg: Error restoring project: " + restoreErr.toString());
         }
+        if (_stashDialogsSuppressed) { try { app.endSuppressDialogs(false); } catch(e2) {} }
         return "Error: " + e.toString();
     }
 }
