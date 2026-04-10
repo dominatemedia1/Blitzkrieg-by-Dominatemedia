@@ -2107,8 +2107,11 @@ function generatePreviewFrames(aepPath) {
         if (!importedItem) {
             // Restore the original project before returning so we don't leak the
             // user's current context into the blitzkrieg temp AEP.
+            // Suppress dialogs around open() to prevent "missing files" dialogs.
             if (originalProjectFile && originalProjectFile.exists) {
+                try { app.beginSuppressDialogs(); } catch (sd) {}
                 try { app.open(originalProjectFile); } catch (restImpErr) {}
+                try { app.endSuppressDialogs(false); } catch (ed) {}
             }
             return "Error: Could not import composition for preview generation.";
         }
@@ -2205,9 +2208,11 @@ function generatePreviewFrames(aepPath) {
             importedItem.remove();
         }
 
-        // Restore original project if needed
+        // Restore original project — suppress dialogs around open()
         if (originalProjectFile && originalProjectFile.exists) {
-            app.open(originalProjectFile);
+            try { app.beginSuppressDialogs(); } catch (sd) {}
+            try { app.open(originalProjectFile); } catch (opErr) {}
+            try { app.endSuppressDialogs(false); } catch (ed) {}
         }
 
         if (previewFrameCount > 0) {
@@ -2220,7 +2225,8 @@ function generatePreviewFrames(aepPath) {
         if (_genFrameDialogsSuppressed) {
             try { app.endSuppressDialogs(false); } catch (edErr) {}
         }
-        // Try to restore original project on error
+        // Try to restore original project on error — suppress dialogs
+        try { app.beginSuppressDialogs(); } catch (sd) {}
         try {
             if (originalProjectFile && originalProjectFile.exists) {
                 app.open(originalProjectFile);
@@ -2228,6 +2234,7 @@ function generatePreviewFrames(aepPath) {
         } catch (restoreErr) {
             $.writeln("Blitzkrieg: Error restoring project: " + restoreErr.toString());
         }
+        try { app.endSuppressDialogs(false); } catch (ed) {}
         return "Error: " + e.toString();
     }
 }
