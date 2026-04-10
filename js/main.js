@@ -2911,8 +2911,19 @@
                 debugLog('IMPORT: downloaded ' + downloaded.fileName + ' (' + (downloaded.blob.size / 1024).toFixed(0) + 'KB)');
                 var tempAepPath = _cachedTempDir + '/blitzkrieg_import_' + downloaded.fileName;
                 return writeBlobToFile(downloaded.blob, tempAepPath).then(function(writtenPath) {
-                    debugLog('IMPORT: written to disk, calling ExtendScript importComp...');
                     var aepDiskPath = writtenPath || tempAepPath;
+                    debugLog('IMPORT: written to disk, healing AEP...');
+                    // Heal the AEP (strip missing footage) before importing to prevent dialog
+                    return new Promise(function(healResolve) {
+                        safeEvalScript('healAepFile("' + escapeForExtendScript(aepDiskPath) + '")', function(hr) {
+                            try {
+                                var h = JSON.parse(hr || '{}');
+                                if (h.healed) debugLog('IMPORT: healed AEP — removed ' + h.removed + ' missing item(s)');
+                            } catch(e) {}
+                            healResolve();
+                        });
+                    }).then(function() {
+                    debugLog('IMPORT: calling ExtendScript importComp...');
                     return new Promise(function(resolve, reject) {
                         var safePath = escapeForExtendScript(aepDiskPath);
                         var safeDisplayName = _trackComp ? escapeForExtendScript(_trackComp.name) : '';
@@ -2935,6 +2946,7 @@
                                 reject(new Error(result || 'Import failed'));
                             }
                         });
+                    });
                     });
                 });
             }).catch(function (err) {
@@ -6305,7 +6317,20 @@
             debugLog('GEN: AEP downloaded (' + (downloaded.blob.size / 1024).toFixed(0) + 'KB), writing to disk...');
             var aepPath = tempDir + '/' + downloaded.fileName;
             return writeBlobToFile(downloaded.blob, aepPath).then(function() {
-                debugLog('GEN: AEP written, calling generatePreviewsToDisk...');
+                debugLog('GEN: AEP written, healing AEP (stripping missing footage)...');
+                // Pre-process: strip missing footage from the AEP on disk before
+                // generation. This prevents AE's native "missing files" dialog.
+                return new Promise(function(healResolve) {
+                    safeEvalScript('healAepFile("' + escapeForExtendScript(aepPath) + '")', function(healResult) {
+                        try {
+                            var hr = JSON.parse(healResult || '{}');
+                            if (hr.healed) debugLog('GEN: healed AEP — removed ' + hr.removed + ' missing footage item(s)');
+                            else if (hr.reason) debugLog('GEN: heal skipped — ' + hr.reason, 'warn');
+                        } catch (e) { debugLog('GEN: heal parse error: ' + (healResult || ''), 'warn'); }
+                        healResolve();
+                    });
+                }).then(function() {
+                debugLog('GEN: calling generatePreviewsToDisk...');
                 return new Promise(function(resolve, reject) {
                     safeEvalScript(
                         'generatePreviewsToDisk("' + escapeForExtendScript(aepPath) + '", "' + escapeForExtendScript(outputDir) + '")',

@@ -2499,6 +2499,106 @@ function cleanupTempStash(tempPath) {
 }
 
 /**
+ * Strip missing footage from an AEP file on disk. Opens the AEP as the
+ * active project, removes FootageItems with footageMissing or dead file refs,
+ * saves the cleaned AEP back to the same path, then restores the user's project.
+ *
+ * Call this BEFORE importComp/generatePreviewsToDisk to ensure the AEP
+ * is clean and won't trigger AE's native "missing files" dialog.
+ *
+ * @returns {string} JSON: {healed: true, removed: N} or {healed: false, reason: "..."}
+ */
+function healAepFile(aepPath) {
+    var aepFile = new File(aepPath);
+    if (!aepFile.exists) return JSON.stringify({healed: false, reason: 'file not found'});
+
+    // Remember the user's current project so we can restore it
+    var userProjectFile = null;
+    try { userProjectFile = app.project.file; } catch (e) {}
+    var userProjectDirty = false;
+    try { userProjectDirty = app.project.dirty; } catch (e) {}
+
+    try {
+        // Save user's project first if it has unsaved changes
+        if (userProjectDirty && userProjectFile && userProjectFile.exists) {
+            try { app.beginSuppressDialogs(); } catch (sd) {}
+            try { app.project.save(userProjectFile); } catch (saveErr) {}
+            try { app.endSuppressDialogs(false); } catch (ed) {}
+        }
+
+        // Open the template AEP as the active project (suppress dialogs)
+        try { app.beginSuppressDialogs(); } catch (sd) {}
+        try {
+            app.open(aepFile);
+        } catch (openErr) {
+            // AE 2024+ may throw with suppression — retry without
+            try { app.endSuppressDialogs(false); } catch (ed) {}
+            try { app.open(aepFile); } catch (openErr2) {
+                // Can't open — restore user project and bail
+                if (userProjectFile && userProjectFile.exists) {
+                    try { app.open(userProjectFile); } catch (e) {}
+                }
+                return JSON.stringify({healed: false, reason: 'open failed: ' + openErr2.toString()});
+            }
+        }
+        try { app.endSuppressDialogs(false); } catch (ed) {}
+
+        // The template AEP is now the active project. Strip missing footage.
+        var removedCount = 0;
+        for (var i = app.project.numItems; i >= 1; i--) {
+            try {
+                var item = app.project.item(i);
+                if (!(item instanceof FootageItem)) continue;
+
+                var isMissing = false;
+                try { if (item.footageMissing) isMissing = true; } catch (e) {}
+                if (!isMissing) {
+                    try {
+                        if (item.mainSource && item.mainSource.file && !item.mainSource.file.exists) {
+                            isMissing = true;
+                        }
+                    } catch (e) {}
+                }
+
+                if (isMissing) {
+                    try { item.remove(); removedCount++; } catch (e) {}
+                }
+            } catch (e) {}
+        }
+
+        // Save cleaned AEP back to disk (overwrites the original temp file)
+        if (removedCount > 0) {
+            try { app.beginSuppressDialogs(); } catch (sd) {}
+            try { app.project.save(aepFile); } catch (saveErr) {
+                $.writeln('Blitzkrieg healAepFile: save failed: ' + saveErr.toString());
+            }
+            try { app.endSuppressDialogs(false); } catch (ed) {}
+        }
+
+        // Restore the user's original project
+        try { app.beginSuppressDialogs(); } catch (sd) {}
+        if (userProjectFile && userProjectFile.exists) {
+            try { app.open(userProjectFile); } catch (e) {}
+        } else {
+            // User had an unsaved project — close without saving the template
+            try { app.project.close(CloseOptions.DO_NOT_SAVE_CHANGES); } catch (e) {}
+        }
+        try { app.endSuppressDialogs(false); } catch (ed) {}
+
+        return JSON.stringify({healed: removedCount > 0, removed: removedCount});
+    } catch (e) {
+        try { app.endSuppressDialogs(false); } catch (ed) {}
+        // Try to restore user project on error
+        if (userProjectFile && userProjectFile.exists) {
+            try { app.beginSuppressDialogs(); } catch (sd) {}
+            try { app.open(userProjectFile); } catch (re) {}
+            try { app.endSuppressDialogs(false); } catch (ed2) {}
+        }
+        return JSON.stringify({healed: false, reason: e.toString()});
+    }
+}
+
+/**
  * Generate thumbnail + preview frames from an AEP file and write them to disk.
  * Uses same dynamic frame count logic as stashSelectedComp (~6 FPS, min 12, max 72).
  * Returns only a small JSON string (no base64), avoiding evalScript size limits.
