@@ -395,8 +395,8 @@ function getSafeTempFolder() {
         // Fallback: user Library/Caches
         try { candidates.push(new Folder(Folder.userData.fsName + '/Caches')); } catch(e) {}
     }
-    // Cross-platform: desktop as last resort before Folder.temp
-    try { candidates.push(Folder.desktop); } catch(e) {}
+    // Cross-platform fallbacks (never use Desktop — leftover temp files confuse users)
+    // Windows: Folder.temp resolves to %TEMP%; macOS: to /var/folders/.../TemporaryItems
     candidates.push(Folder.temp);
 
     for (var ci = 0; ci < candidates.length; ci++) {
@@ -1056,6 +1056,13 @@ function stashSelectedComp(libraryPath, categoryName) {
         }));
         metadataFile.close();
 
+        // --- Suppress AE dialogs for the entire stash operation ---
+        // app.project.save() and app.open() trigger native "missing files" dialogs
+        // when the project has broken footage references. Unlike importFile(), save/open
+        // do NOT crash AE 2024/2025 with beginSuppressDialogs, so no version gate needed.
+        var _stashDialogsSuppressed = false;
+        try { app.beginSuppressDialogs(); _stashDialogsSuppressed = true; } catch (sdErr) {}
+
         // --- Save the project first if it hasn't been saved ---
         // On macOS, app.project.save() can fail silently. Wrap each call in try/catch
         // AND verify the file exists after, matching the same safety pattern we use
@@ -1067,6 +1074,7 @@ function stashSelectedComp(libraryPath, categoryName) {
                 $.writeln("Blitzkrieg: save() threw saving pre-stash temp project: " + preSaveErr1.toString());
             }
             if (!tempProjectFile.exists) {
+                if (_stashDialogsSuppressed) { try { app.endSuppressDialogs(false); } catch(e) {} }
                 return "Error: Could not save the project to a temp file before stashing. Please save your project manually and try again.";
             }
             originalProjectFile = tempProjectFile;
@@ -1444,6 +1452,7 @@ function stashSelectedComp(libraryPath, categoryName) {
             if (originalProjectFile && originalProjectFile.exists) {
                 try { app.open(originalProjectFile); } catch (rErr) {}
             }
+            if (_stashDialogsSuppressed) { try { app.endSuppressDialogs(false); } catch(e) {} }
             return "Error: Failed to save .aep file after all fallback attempts. Composition was not added to the library. Check that the library path is writable and that the project is not locked.";
         }
         $.writeln("Blitzkrieg: AEP verified at: " + savedAEP.fsName);
@@ -1472,6 +1481,8 @@ function stashSelectedComp(libraryPath, categoryName) {
         // to relink, re-save, check permissions, or re-import their sequences.
         // `missingTotalCount` tracks overflow beyond the detail cap so the user
         // sees the TRUE number even when we can only list the first 30 by name.
+        if (_stashDialogsSuppressed) { try { app.endSuppressDialogs(false); } catch(e) {} _stashDialogsSuppressed = false; }
+
         if (missingTotalCount > 0) {
             var missingList = missingFootageItems.slice(0, 5).join('; ');
             if (missingFootageItems.length > 5) missingList += ' (+' + (missingFootageItems.length - 5) + ' more shown)';
@@ -1494,6 +1505,7 @@ function stashSelectedComp(libraryPath, categoryName) {
         return "Success! '" + compToSaveName + "' was added to your library.";
 
     } catch (e) {
+        if (_stashDialogsSuppressed) { try { app.endSuppressDialogs(false); } catch(e2) {} }
         // Try to restore original project on error
         try {
             if (originalProjectFile && originalProjectFile.exists) {
