@@ -239,6 +239,11 @@ JSON = {};
  * AFTER EFFECTS VERSION DETECTION AND COMPATIBILITY
  * ============================================================================
  */
+// Monotonically increasing counter for import operations. Baked into
+// scheduleTask scripts so stale tasks (from a prior import) no-op when
+// they fire and find the counter has moved on.
+var _blitzImportGeneration = 0;
+
 var AE_VERSION_INFO = (function() {
     var info = {
         version: 0,
@@ -1592,32 +1597,65 @@ function importComp(aepPath, displayName) {
         }
 
         // Recursive comp discovery — imported AEPs can have nested folders.
-        // We use EXACT name match only for the override; the previous substring
-        // match would falsely override the first comp with any other CompItem
-        // whose name happened to contain the target as a substring (e.g.
-        // compName="Logo" was overridden by "Logo Reveal" or "My Logo Big"),
-        // randomly opening the wrong composition.
+        // Strategy: collect ALL comps, then pick the best one.
+        //  1. Exact name match → use it
+        //  2. Top-level comp (not used as a pre-comp by any other comp in the
+        //     import) → the "main" comp the user wants to see
+        //  3. First comp found → last resort
         var mainComp = null;
-        function findCompInFolder(folder) {
+        var _allImportedComps = [];
+        function collectCompsInFolder(folder) {
             for (var j = 1; j <= folder.numItems; j++) {
                 var child = folder.item(j);
                 if (child instanceof CompItem) {
-                    if (!mainComp) mainComp = child;
-                    if (child.name === compName) {
-                        mainComp = child;
-                        return true; // exact match found
-                    }
+                    _allImportedComps.push(child);
                 } else if (child instanceof FolderItem) {
-                    if (findCompInFolder(child)) return true;
+                    collectCompsInFolder(child);
                 }
             }
-            return false;
         }
         if (importedItem instanceof FolderItem) {
             importedItem.name = compName + " [Blitzkrieg]";
-            findCompInFolder(importedItem);
+            collectCompsInFolder(importedItem);
         } else if (importedItem instanceof CompItem) {
-            mainComp = importedItem;
+            _allImportedComps.push(importedItem);
+        }
+
+        // Pick the best comp from the collected list
+        if (_allImportedComps.length === 1) {
+            mainComp = _allImportedComps[0];
+        } else if (_allImportedComps.length > 1) {
+            // Check for exact name match first
+            for (var cni = 0; cni < _allImportedComps.length; cni++) {
+                if (_allImportedComps[cni].name === compName) {
+                    mainComp = _allImportedComps[cni];
+                    break;
+                }
+            }
+            // No exact match — find the top-level comp (one not used as a
+            // pre-comp source by any other comp in this import)
+            if (!mainComp) {
+                var _usedAsPrecomp = {};
+                for (var sci = 0; sci < _allImportedComps.length; sci++) {
+                    var scanComp = _allImportedComps[sci];
+                    for (var sli = 1; sli <= scanComp.numLayers; sli++) {
+                        try {
+                            var slyr = scanComp.layer(sli);
+                            if (slyr.source instanceof CompItem) {
+                                _usedAsPrecomp[slyr.source.id] = true;
+                            }
+                        } catch (slErr) {}
+                    }
+                }
+                for (var tli = 0; tli < _allImportedComps.length; tli++) {
+                    if (!_usedAsPrecomp[_allImportedComps[tli].id]) {
+                        mainComp = _allImportedComps[tli];
+                        break;
+                    }
+                }
+            }
+            // Still nothing — use first comp as absolute fallback
+            if (!mainComp) mainComp = _allImportedComps[0];
         }
 
         // --- Clean up missing footage from imported project ---
@@ -1682,40 +1720,54 @@ function importComp(aepPath, displayName) {
 
         // AUTO-OPEN: Open the imported comp in the viewer/timeline.
         // openInViewer() during ExtendScript eval often fails because the CEP panel
-        // holds focus. We schedule multiple delayed attempts that also call
-        // viewer.setActive() to force the Timeline panel to the front.
+        // holds focus. We schedule a single delayed attempt that uses a generation
+        // counter to prevent stale tasks from opening the wrong comp.
         if (mainComp) {
+            _blitzImportGeneration++;
+            var _thisGen = _blitzImportGeneration;
+
             try {
                 mainComp.selected = true;
                 var v = mainComp.openInViewer();
                 if (v) try { v.setActive(); } catch(e) {}
             } catch (viewerErr) {}
 
-            // Build a reusable script that recursively finds the comp and opens it.
-            // Scheduled tasks run after CEP releases focus, so openInViewer works.
+            // Build a script that finds the comp. Uses a hybrid approach:
+            //  1. Try by comp ID first (reliable within same project session)
+            //  2. Fall back to name if ID not found (handles edge cases)
+            // The generation counter guards against stale tasks from a prior
+            // import firing and opening the wrong comp.
+            var _safeName = compName.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n').replace(/\r/g, '\\r');
             var _openScript =
                 '(function(){' +
-                '  function find(p){' +
+                '  if(_blitzImportGeneration!==' + _thisGen + ')return;' +
+                '  function open(c){c.selected=true;var v=c.openInViewer();if(v)try{v.setActive();}catch(e){}}' +
+                '  function findById(p){' +
                 '    for(var i=1;i<=p.numItems;i++){' +
                 '      try{' +
                 '        var it=p.item(i);' +
-                '        if(it instanceof CompItem && it.id==' + mainComp.id + '){' +
-                '          it.selected=true;' +
-                '          var v=it.openInViewer();' +
-                '          if(v)try{v.setActive();}catch(e){}' +
-                '          return true;' +
-                '        }' +
-                '        if(it instanceof FolderItem && find(it))return true;' +
+                '        if(it instanceof CompItem && it.id==' + mainComp.id + '){open(it);return true;}' +
+                '        if(it instanceof FolderItem && findById(it))return true;' +
                 '      }catch(e){}' +
                 '    }' +
                 '    return false;' +
                 '  }' +
-                '  find(app.project.rootFolder);' +
+                '  function findByName(p){' +
+                '    for(var i=1;i<=p.numItems;i++){' +
+                '      try{' +
+                '        var it=p.item(i);' +
+                '        if(it instanceof CompItem && it.name===\'' + _safeName + '\'){open(it);return true;}' +
+                '        if(it instanceof FolderItem && findByName(it))return true;' +
+                '      }catch(e){}' +
+                '    }' +
+                '    return false;' +
+                '  }' +
+                '  if(!findById(app.project.rootFolder))findByName(app.project.rootFolder);' +
                 '})()';
 
-            // Schedule two attempts at staggered delays for reliability
-            try { app.scheduleTask(_openScript, 300, false); } catch(e) {}
-            try { app.scheduleTask(_openScript, 800, false); } catch(e) {}
+            // Single delayed attempt — the immediate openInViewer above handles
+            // the fast path; this catches the case where CEP still holds focus.
+            try { app.scheduleTask(_openScript, 500, false); } catch(e) {}
         }
 
         app.endUndoGroup();
@@ -2495,106 +2547,6 @@ function cleanupTempStash(tempPath) {
         return 'OK';
     } catch (e) {
         return 'ERROR: ' + e.toString();
-    }
-}
-
-/**
- * Strip missing footage from an AEP file on disk. Opens the AEP as the
- * active project, removes FootageItems with footageMissing or dead file refs,
- * saves the cleaned AEP back to the same path, then restores the user's project.
- *
- * Call this BEFORE importComp/generatePreviewsToDisk to ensure the AEP
- * is clean and won't trigger AE's native "missing files" dialog.
- *
- * @returns {string} JSON: {healed: true, removed: N} or {healed: false, reason: "..."}
- */
-function healAepFile(aepPath) {
-    var aepFile = new File(aepPath);
-    if (!aepFile.exists) return JSON.stringify({healed: false, reason: 'file not found'});
-
-    // Remember the user's current project so we can restore it
-    var userProjectFile = null;
-    try { userProjectFile = app.project.file; } catch (e) {}
-    var userProjectDirty = false;
-    try { userProjectDirty = app.project.dirty; } catch (e) {}
-
-    try {
-        // Save user's project first if it has unsaved changes
-        if (userProjectDirty && userProjectFile && userProjectFile.exists) {
-            try { app.beginSuppressDialogs(); } catch (sd) {}
-            try { app.project.save(userProjectFile); } catch (saveErr) {}
-            try { app.endSuppressDialogs(false); } catch (ed) {}
-        }
-
-        // Open the template AEP as the active project (suppress dialogs)
-        try { app.beginSuppressDialogs(); } catch (sd) {}
-        try {
-            app.open(aepFile);
-        } catch (openErr) {
-            // AE 2024+ may throw with suppression — retry without
-            try { app.endSuppressDialogs(false); } catch (ed) {}
-            try { app.open(aepFile); } catch (openErr2) {
-                // Can't open — restore user project and bail
-                if (userProjectFile && userProjectFile.exists) {
-                    try { app.open(userProjectFile); } catch (e) {}
-                }
-                return JSON.stringify({healed: false, reason: 'open failed: ' + openErr2.toString()});
-            }
-        }
-        try { app.endSuppressDialogs(false); } catch (ed) {}
-
-        // The template AEP is now the active project. Strip missing footage.
-        var removedCount = 0;
-        for (var i = app.project.numItems; i >= 1; i--) {
-            try {
-                var item = app.project.item(i);
-                if (!(item instanceof FootageItem)) continue;
-
-                var isMissing = false;
-                try { if (item.footageMissing) isMissing = true; } catch (e) {}
-                if (!isMissing) {
-                    try {
-                        if (item.mainSource && item.mainSource.file && !item.mainSource.file.exists) {
-                            isMissing = true;
-                        }
-                    } catch (e) {}
-                }
-
-                if (isMissing) {
-                    try { item.remove(); removedCount++; } catch (e) {}
-                }
-            } catch (e) {}
-        }
-
-        // Save cleaned AEP back to disk (overwrites the original temp file)
-        if (removedCount > 0) {
-            try { app.beginSuppressDialogs(); } catch (sd) {}
-            try { app.project.save(aepFile); } catch (saveErr) {
-                $.writeln('Blitzkrieg healAepFile: save failed: ' + saveErr.toString());
-            }
-            try { app.endSuppressDialogs(false); } catch (ed) {}
-        }
-
-        // Restore the user's original project
-        try { app.beginSuppressDialogs(); } catch (sd) {}
-        if (userProjectFile && userProjectFile.exists) {
-            try { app.open(userProjectFile); } catch (e) {}
-        } else {
-            // User had an unsaved project — close without saving the template
-            try { app.project.close(CloseOptions.DO_NOT_SAVE_CHANGES); } catch (e) {}
-        }
-        try { app.endSuppressDialogs(false); } catch (ed) {}
-
-        return JSON.stringify({healed: removedCount > 0, removed: removedCount});
-    } catch (e) {
-        try { app.endSuppressDialogs(false); } catch (ed) {}
-        // Try to restore user project on error
-        if (userProjectFile && userProjectFile.exists) {
-            try { app.beginSuppressDialogs(); } catch (sd) {}
-            try { app.open(userProjectFile); } catch (re) {}
-            try { app.endSuppressDialogs(false); } catch (ed2) {}
-        }
-        return JSON.stringify({healed: false, reason: e.toString()});
     }
 }
 

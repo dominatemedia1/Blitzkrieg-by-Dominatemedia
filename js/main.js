@@ -2246,8 +2246,11 @@
     }
 
     /**
-     * Double-click on a comp card to import it instantly
+     * Double-click on a comp card to import it instantly.
+     * Cooldown prevents accidental rapid-fire imports (CEP panel lag can
+     * register a single click as a double-click).
      */
+    var _lastDblClickImportTime = 0;
     function handleStashGridDoubleClick(e) {
         // Suppress double-click in analytics views
         if (analyticsView) return;
@@ -2255,6 +2258,10 @@
         if (!item) return;
         // Don't trigger on buttons
         if (e.target.closest('.action-btn') || e.target.closest('.import-btn') || e.target.closest('.generate-preview-btn')) return;
+        // Cooldown: ignore double-clicks within 2 seconds of the last import
+        var now = Date.now();
+        if (now - _lastDblClickImportTime < 2000) return;
+        _lastDblClickImportTime = now;
         var aepPath = item.dataset.aepPath;
         var uniqueId = item.dataset.uniqueId;
         var storagePath = item.dataset.storagePath;
@@ -2901,6 +2908,7 @@
         // Cloud import path
         if (storagePath && window.cloudLibrary) {
             showSpinner();
+            stashInProgress = true; // Block focus-triggered loadLibrary during import
             showToast('Downloading template...');
             debugLog('IMPORT: starting cloud import for ' + storagePath);
 
@@ -2912,18 +2920,7 @@
                 var tempAepPath = _cachedTempDir + '/blitzkrieg_import_' + downloaded.fileName;
                 return writeBlobToFile(downloaded.blob, tempAepPath).then(function(writtenPath) {
                     var aepDiskPath = writtenPath || tempAepPath;
-                    debugLog('IMPORT: written to disk, healing AEP...');
-                    // Heal the AEP (strip missing footage) before importing to prevent dialog
-                    return new Promise(function(healResolve) {
-                        safeEvalScript('healAepFile("' + escapeForExtendScript(aepDiskPath) + '")', function(hr) {
-                            try {
-                                var h = JSON.parse(hr || '{}');
-                                if (h.healed) debugLog('IMPORT: healed AEP — removed ' + h.removed + ' missing item(s)');
-                            } catch(e) {}
-                            healResolve();
-                        });
-                    }).then(function() {
-                    debugLog('IMPORT: calling ExtendScript importComp...');
+                    debugLog('IMPORT: written to disk, calling importComp...');
                     return new Promise(function(resolve, reject) {
                         var safePath = escapeForExtendScript(aepDiskPath);
                         var safeDisplayName = _trackComp ? escapeForExtendScript(_trackComp.name) : '';
@@ -2933,8 +2930,8 @@
                                 try { safeEvalScript('(function(){ var f = new File("' + safePath + '"); if(f.exists) f.remove(); return "ok"; })()'); } catch(e) {}
                             }, 2000);
 
-                            hideSpinner();
                             if (result && result.indexOf('Success') === 0) {
+                                hideSpinner();
                                 showToast('Imported and opened in timeline!');
                                 if (uniqueId) addToRecent(uniqueId);
                                 if (window.blitzkriegAnalytics && _trackComp) {
@@ -2942,14 +2939,16 @@
                                 }
                                 resolve();
                             } else {
-                                showToast(result || 'Unexpected error importing.', true);
+                                // hideSpinner called by outer error handler
                                 reject(new Error(result || 'Import failed'));
                             }
                         });
                     });
-                    });
                 });
-            }).catch(function (err) {
+            }).then(function() {
+                stashInProgress = false;
+            }, function (err) {
+                stashInProgress = false;
                 hideSpinner();
                 debugLog('IMPORT FAIL: ' + err.message, 'error');
                 showToast('Import failed: ' + err.message, true);
@@ -2964,10 +2963,12 @@
         }
 
         showSpinner();
+        stashInProgress = true; // Block focus-triggered loadLibrary during import
         var safePath = escapeForExtendScript(aepPath);
         var safeDisplayName = _trackComp ? escapeForExtendScript(_trackComp.name) : '';
 
         safeEvalScript('importComp("' + safePath + '","' + safeDisplayName + '")', function (result) {
+            stashInProgress = false;
             hideSpinner();
             if (!result) {
                 showToast('Unexpected error importing.', true);
@@ -6317,20 +6318,7 @@
             debugLog('GEN: AEP downloaded (' + (downloaded.blob.size / 1024).toFixed(0) + 'KB), writing to disk...');
             var aepPath = tempDir + '/' + downloaded.fileName;
             return writeBlobToFile(downloaded.blob, aepPath).then(function() {
-                debugLog('GEN: AEP written, healing AEP (stripping missing footage)...');
-                // Pre-process: strip missing footage from the AEP on disk before
-                // generation. This prevents AE's native "missing files" dialog.
-                return new Promise(function(healResolve) {
-                    safeEvalScript('healAepFile("' + escapeForExtendScript(aepPath) + '")', function(healResult) {
-                        try {
-                            var hr = JSON.parse(healResult || '{}');
-                            if (hr.healed) debugLog('GEN: healed AEP — removed ' + hr.removed + ' missing footage item(s)');
-                            else if (hr.reason) debugLog('GEN: heal skipped — ' + hr.reason, 'warn');
-                        } catch (e) { debugLog('GEN: heal parse error: ' + (healResult || ''), 'warn'); }
-                        healResolve();
-                    });
-                }).then(function() {
-                debugLog('GEN: calling generatePreviewsToDisk...');
+                debugLog('GEN: AEP written, calling generatePreviewsToDisk...');
                 return new Promise(function(resolve, reject) {
                     safeEvalScript(
                         'generatePreviewsToDisk("' + escapeForExtendScript(aepPath) + '", "' + escapeForExtendScript(outputDir) + '")',
@@ -6391,7 +6379,6 @@
                         }
                     );
                 });
-            });
             });
         }).then(function(renderResult) {
             // If generation was skipped (e.g. missing footage), clean up and return early
