@@ -6392,6 +6392,7 @@
                     );
                 });
             });
+            });
         }).then(function(renderResult) {
             // If generation was skipped (e.g. missing footage), clean up and return early
             if (renderResult.skipped) {
