@@ -130,8 +130,6 @@
     function _invalidateCategoryCache() { _cachedCategoryList = null; }
     // Per-session view tracking dedupe — see stash-item mouseenter handler.
     var _trackedViewsThisSession = {};
-    // Concurrency budget for hover-triggered auto-generation (see on-hover handler).
-    var _autoGenInFlight = 0;
     // Per-submission-id in-flight set — prevents double-click from firing two
     // parallel approve/withdraw/resubmit/reject pipelines against the same row.
     var _submissionInFlight = {};
@@ -1960,71 +1958,9 @@
             }
         });
 
-        // On-hover auto-generate preview for cloud templates without preview frames.
-        // We throttle with a small global budget (_autoGenBudget): a user scrolling
-        // past 20 no-preview cards in rapid succession would otherwise enqueue 20
-        // simultaneous AEP downloads + renders via _genQueue, holding 20 blobs in
-        // memory. Cap the number of outstanding auto-generations so only the first
-        // few trigger — if the user actually wants a later card, their hover will
-        // clear the cap once earlier ones finish.
-        var AUTO_GEN_MAX = 3;
-        var noPreviewItems = container.querySelectorAll('.stash-item[data-storage-path]:not(.has-preview):not([data-hover-bound])');
-        noPreviewItems.forEach(function(item) {
-            item.setAttribute('data-hover-bound', '1');
-            var storagePath = item.dataset.storagePath;
-            var uniqueId = item.dataset.uniqueId;
-            var compName = item.dataset.name;
-            if (!storagePath) return;
-
-            var generating = false;
-            var generated = false;
-
-            item.addEventListener('mouseenter', function() {
-                if (generated || generating) return;
-                if (!_hasCepBridge) return;
-                if (!window.blitzkriegSupabase) return;
-                if (_autoGenInFlight >= AUTO_GEN_MAX) return;
-
-                generating = true;
-                _autoGenInFlight++;
-                // Show subtle generating indicator
-                var thumb = item.querySelector('.thumbnail');
-                if (thumb) {
-                    var genIndicator = document.createElement('div');
-                    genIndicator.className = 'generating-indicator';
-                    genIndicator.innerHTML = '<div class="gen-spinner"></div>';
-                    thumb.appendChild(genIndicator);
-                }
-
-                // Find comp object
-                var comp = null;
-                for (var ci = 0; ci < allComps.length; ci++) {
-                    if (allComps[ci].uniqueId === uniqueId) { comp = allComps[ci]; break; }
-                }
-                if (!comp) { comp = { storagePath: storagePath, name: compName }; }
-
-                generateCloudThumbnail(comp).then(function(result) {
-                    generated = true;
-                    generating = false;
-                    _autoGenInFlight = Math.max(0, _autoGenInFlight - 1);
-                    var gi = item.querySelector('.generating-indicator');
-                    if (gi) gi.remove();
-                    if (result && result.skipped) {
-                        debugLog('Auto-generate skipped for ' + compName + ': ' + (result.reason || 'unrenderable'), 'warn');
-                    } else {
-                        window.cloudLibrary.invalidateCache();
-                        debugLog('Auto-generated preview for ' + compName, 'success');
-                    }
-                }).catch(function(err) {
-                    generating = false;
-                    generated = true;
-                    _autoGenInFlight = Math.max(0, _autoGenInFlight - 1);
-                    var gi = item.querySelector('.generating-indicator');
-                    if (gi) gi.remove();
-                    debugLog('Auto-generate failed for ' + compName + ': ' + err.message, 'warn');
-                });
-            });
-        });
+        // Hover auto-generate DISABLED. It was importing AEP files into the
+        // user's project just by mousing over cards, triggering "file not found"
+        // dialogs and disrupting workflow. Use the explicit generate button instead.
 
         // View tracking + drag/drop for all unbound stash items.
         // Per-session dedupe: a user scrolling through 40 cards fires 40 trackView
