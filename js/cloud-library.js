@@ -198,7 +198,7 @@
         // Sign ONLY thumbnail URLs (2 per template: comp.png + thumbnail.png)
         // Preview frame URLs are signed lazily on hover via signPreviewFrames()
 
-        var validEntries = metadataResults.filter(function(mr) { return mr.metadata !== null; });
+        var validEntries = metadataResults.filter(function(mr) { return mr.metadata !== null && mr.metadata !== undefined; });
         _log('buildCompsFromMetadata: ' + validEntries.length + ' entries with metadata (of ' + metadataResults.length + ' total)', 'info');
 
         var signedUrlMap;
@@ -256,6 +256,11 @@
         var allComps = [];
         metadataResults.forEach(function (mr) {
             if (!mr.metadata) return;
+            var meta = mr.metadata;
+
+            // Guard against missing required fields — metadata.json could be corrupt/partial
+            var displayName = meta.displayName || meta.name || mr.folderName || 'Untitled';
+            if (typeof displayName !== 'string') displayName = String(displayName);
 
             var parts = mr.folderName.split('_');
             var uniqueId = parts.length > 1 ? parts[parts.length - 1] : mr.folderName;
@@ -271,25 +276,25 @@
             }
 
             var previewFrameCount = 0;
-            if (typeof mr.metadata.previewFrames === 'number') previewFrameCount = mr.metadata.previewFrames;
-            if (mr.metadata.cloudPreviewFrameCount) previewFrameCount = Math.max(previewFrameCount, mr.metadata.cloudPreviewFrameCount);
+            if (typeof meta.previewFrames === 'number') previewFrameCount = meta.previewFrames;
+            if (meta.cloudPreviewFrameCount) previewFrameCount = Math.max(previewFrameCount, meta.cloudPreviewFrameCount);
 
             // A template's thumbnail is "verified" if we have evidence it was generated:
             // either via cloud generation (cloudThumbnailGenerated flag or cloudPreviewFrameCount)
             // or via stash upload (previewFrameCount > 0 means thumbnail was included)
-            var thumbnailVerified = !!(mr.metadata.cloudThumbnailGenerated || previewFrameCount > 0);
+            var thumbnailVerified = !!(meta.cloudThumbnailGenerated || previewFrameCount > 0);
 
             allComps.push({
-                name: mr.metadata.displayName || mr.folderName,
+                name: displayName,
                 category: mr.categoryName,
                 uniqueId: uniqueId,
                 folderName: mr.folderName,
                 thumbUrl: thumbUrl,
                 thumbUrlAlt: thumbUrlAlt,
-                duration: mr.metadata.duration || 0,
-                width: mr.metadata.width || 0,
-                height: mr.metadata.height || 0,
-                frameRate: mr.metadata.frameRate || 0,
+                duration: meta.duration || 0,
+                width: meta.width || 0,
+                height: meta.height || 0,
+                frameRate: meta.frameRate || 0,
                 previewFrames: null,  // Signed lazily on hover
                 previewFrameCount: previewFrameCount,
                 thumbnailVerified: thumbnailVerified,

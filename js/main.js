@@ -30,6 +30,9 @@
         }
     }
 
+    // Expose safeEvalScript for other modules (telemetry.js)
+    window.safeEvalScript = safeEvalScript;
+
     // App / main elements
     var appContainer = document.getElementById('app');
     var pathDisplay = document.getElementById('library-path-display');
@@ -581,14 +584,21 @@
      */
     function pathToFileUrl(path) {
         if (!path) return '';
+        // Already a file:// URL — return as-is to avoid double-encoding
+        if (path.indexOf('file://') === 0) return path;
         var normalized = path.replace(/\\/g, '/');
-        // Encode characters that have special meaning in URLs but can appear in file paths
-        normalized = normalized
-            .replace(/%/g, '%25')   // Must be first to avoid double-encoding
-            .replace(/ /g, '%20')   // Spaces (common in macOS paths like "Application Support")
-            .replace(/#/g, '%23')   // Fragment separator
-            .replace(/\?/g, '%3F') // Query string separator
-            .replace(/"/g, '%22'); // Double quotes
+        // Detect already-encoded paths (contain %XX sequences like %20, %23)
+        // If path has valid percent-encoding, skip re-encoding to prevent %20 → %2520
+        var alreadyEncoded = /%[0-9A-Fa-f]{2}/.test(normalized);
+        if (!alreadyEncoded) {
+            // Encode characters that have special meaning in URLs but can appear in file paths
+            normalized = normalized
+                .replace(/%/g, '%25')   // Must be first to avoid double-encoding
+                .replace(/ /g, '%20')   // Spaces (common in macOS paths like "Application Support")
+                .replace(/#/g, '%23')   // Fragment separator
+                .replace(/\?/g, '%3F') // Query string separator
+                .replace(/"/g, '%22'); // Double quotes
+        }
         // On macOS/Linux, paths start with / so file:// + /path = file:///path (correct)
         // On Windows, paths start with C:/ so file:/// + C:/path = file:///C:/path (correct)
         if (normalized.charAt(0) === '/') {
@@ -1239,8 +1249,13 @@
                             debugLog('    [' + cat.name + '] - ' + cat.compFolders.length + ' comp folders', 'info');
                             for (var cj = 0; cj < cat.compFolders.length; cj++) {
                                 var cmp = cat.compFolders[cj];
-                                var status = cmp.hasAep ? 'OK' : 'MISSING .aep!';
-                                debugLog('      ' + cmp.name + ' - AEP:' + cmp.hasAep + ' Meta:' + cmp.hasMetadata + ' Thumb:' + cmp.hasThumbnail + ' Files:[' + cmp.files.join(', ') + '] ' + status, cmp.hasAep ? 'success' : 'error');
+                                if (!cmp.isTemplate) {
+                                    // Non-template folder (assets, presets, plugins, fonts, grouping folders)
+                                    debugLog('      ' + cmp.name + ' - non-template folder (skipped) Files:[' + cmp.files.slice(0, 5).join(', ') + (cmp.files.length > 5 ? ', ... +' + (cmp.files.length - 5) + ' more' : '') + ']', 'info');
+                                } else {
+                                    var status = cmp.hasAep ? 'OK' : 'MISSING .aep!';
+                                    debugLog('      ' + cmp.name + ' - AEP:' + cmp.hasAep + ' Meta:' + cmp.hasMetadata + ' Thumb:' + cmp.hasThumbnail + ' Files:[' + cmp.files.join(', ') + '] ' + status, cmp.hasAep ? 'success' : 'error');
+                                }
                             }
                         }
                     }
@@ -1670,10 +1685,11 @@
             generatePreviewBtn = '<button class="generate-preview-btn" title="Generate Preview Animation"><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> Preview</button>';
         }
 
-        var nameInitial = (comp.name || '?').charAt(0).toUpperCase();
+        var safeName_ = comp.name || '?';
+        var nameInitial = safeName_.charAt(0).toUpperCase();
         var placeholderColors = ['#1e3a5f','#2d4a3e','#3d2c5e','#4a2c2c','#2c3e50','#1a472a','#3b1f2b','#2c3e6b'];
         var colorIdx = 0;
-        for (var ci2 = 0; ci2 < comp.name.length; ci2++) { colorIdx += comp.name.charCodeAt(ci2); }
+        for (var ci2 = 0; ci2 < safeName_.length; ci2++) { colorIdx += safeName_.charCodeAt(ci2); }
         var placeholderColor = placeholderColors[colorIdx % placeholderColors.length];
         var placeholderHtml = '<div class="thumb-placeholder" style="background-color:' + placeholderColor + '"><span class="thumb-placeholder-initial">' + escapeHTML(nameInitial) + '</span></div>';
 
@@ -1936,7 +1952,10 @@
                     } else if (previewCount > 0 && storagePath && !signingInProgress) {
                         // Lazy sign preview frames on first hover
                         signingInProgress = true;
+                        // Safety timeout: reset flag after 15s if promise never settles
+                        var signingTimeout = setTimeout(function() { signingInProgress = false; }, 15000);
                         window.cloudLibrary.signPreviewFrames(storagePath, previewCount).then(function(urls) {
+                            clearTimeout(signingTimeout);
                             if (urls && urls.length > 0) {
                                 cachedFrameUrls = urls;
                                 // Also cache on the comp object for reuse
@@ -1949,7 +1968,7 @@
                                 startPreviewAnimation(thumbnailContainer, urls, uniqueId, duration);
                             }
                             signingInProgress = false;
-                        }).catch(function() { signingInProgress = false; });
+                        }).catch(function() { clearTimeout(signingTimeout); signingInProgress = false; });
                     }
                 });
                 item.addEventListener('mouseleave', function() {
@@ -2873,6 +2892,9 @@
                                 if (window.blitzkriegAnalytics && _trackComp) {
                                     window.blitzkriegAnalytics.trackImport(_trackComp.name, _trackComp.category, storagePath);
                                 }
+                                if (window.blitzkriegTelemetry && _trackComp) {
+                                    window.blitzkriegTelemetry.trackTemplateImport(_trackComp.name, _trackComp.category, storagePath, _trackComp);
+                                }
                                 resolve();
                             } else {
                                 // hideSpinner called by outer error handler
@@ -2917,6 +2939,9 @@
                 }
                 if (window.blitzkriegAnalytics && _trackComp) {
                     window.blitzkriegAnalytics.trackImport(_trackComp.name, _trackComp.category, storagePath);
+                }
+                if (window.blitzkriegTelemetry && _trackComp) {
+                    window.blitzkriegTelemetry.trackTemplateImport(_trackComp.name, _trackComp.category, storagePath, _trackComp);
                 }
             } else {
                 showToast(result, true);
@@ -6598,9 +6623,14 @@
         if (window.blitzkriegAnalytics) {
             window.blitzkriegAnalytics.trackSessionStart();
         }
+        // Start telemetry session
+        if (window.blitzkriegTelemetry) {
+            window.blitzkriegTelemetry.startSession();
+        }
         // Track session end on panel close
         window.addEventListener('beforeunload', function() {
             if (window.blitzkriegAnalytics) window.blitzkriegAnalytics.trackSessionEnd();
+            if (window.blitzkriegTelemetry) window.blitzkriegTelemetry.endSession();
         });
     };
 

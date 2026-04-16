@@ -323,6 +323,11 @@ function isValidName(name) {
     if (name.indexOf('\0') !== -1) return false;
     // Reasonable length
     if (name.length > 255) return false;
+    // Block URL-encoded path separators
+    if (/%2[fF]/.test(name) || /%5[cC]/.test(name)) return false;
+    // Block leading/trailing dots and whitespace (matches JS validateName)
+    if (name !== name.replace(/^\s+|\s+$/g, '')) return false;
+    if (name.charAt(0) === '.' || name.charAt(name.length - 1) === '.') return false;
     return true;
 }
 
@@ -750,6 +755,8 @@ function debugLibrary(libraryPath) {
                     hasAep: false,
                     hasMetadata: false,
                     hasThumbnail: false,
+                    isTemplate: false,
+                    hasSubfolders: false,
                     files: []
                 };
 
@@ -758,12 +765,21 @@ function debugLibrary(libraryPath) {
                     for (var k = 0; k < cmpFiles.length; k++) {
                         var f = cmpFiles[k];
                         var fname = safeDecodeURI(f.name);
+                        if (f instanceof Folder) {
+                            cmpInfo.hasSubfolders = true;
+                        }
                         cmpInfo.files.push(fname);
                         if (fname.toLowerCase().indexOf('.aep') !== -1) cmpInfo.hasAep = true;
                         if (fname === 'metadata.json') cmpInfo.hasMetadata = true;
                         if (fname === 'comp.png') cmpInfo.hasThumbnail = true;
                     }
                 }
+
+                // A folder is a template if it has .aep, metadata.json, or comp.png.
+                // Folders with only non-template files (assets, presets, plugins, fonts)
+                // or folders that are parent/grouping containers (have subfolders but no
+                // template markers) are NOT templates.
+                cmpInfo.isTemplate = cmpInfo.hasAep || cmpInfo.hasMetadata || cmpInfo.hasThumbnail;
 
                 catInfo.compFolders.push(cmpInfo);
             }
@@ -1899,9 +1915,10 @@ function renameCategory(libraryPath, oldName, newName) {
                     try {
                         metadataFile.open('r');
                         metadataFile.encoding = 'UTF-8';
-                        var metadata = JSON.parse(metadataFile.read());
+                        var metaRaw = metadataFile.read();
                         metadataFile.close();
 
+                        var metadata = JSON.parse(metaRaw);
                         metadata.category = newName;
 
                         metadataFile.open('w');
@@ -1909,6 +1926,7 @@ function renameCategory(libraryPath, oldName, newName) {
                         metadataFile.write(JSON.stringify(metadata));
                         metadataFile.close();
                     } catch (metaErr) {
+                        try { metadataFile.close(); } catch (mcErr) {}
                         $.writeln("Blitzkrieg: Warning - Could not update metadata for comp: " + metaErr.toString());
                     }
                 }
@@ -2029,9 +2047,10 @@ function moveCompToCategory(libraryPath, uniqueId, oldCategory, newCategory) {
             try {
                 metadataFile.open('r');
                 metadataFile.encoding = 'UTF-8';
-                var metadata = JSON.parse(metadataFile.read());
+                var metaRaw = metadataFile.read();
                 metadataFile.close();
 
+                var metadata = JSON.parse(metaRaw);
                 metadata.category = newCategory;
 
                 metadataFile.open('w');
@@ -2039,12 +2058,20 @@ function moveCompToCategory(libraryPath, uniqueId, oldCategory, newCategory) {
                 metadataFile.write(JSON.stringify(metadata));
                 metadataFile.close();
             } catch (metaErr) {
+                try { metadataFile.close(); } catch (mcErr) {}
                 $.writeln("Blitzkrieg: Warning - Could not update metadata: " + metaErr.toString());
             }
         }
 
         // Remove original folder ONLY after we know the copy succeeded.
-        removeFolderRecursive(sourceFolder);
+        try {
+            removeFolderRecursive(sourceFolder);
+        } catch (rmErr) {
+            // Copy succeeded but source cleanup failed — comp exists in both locations.
+            // Not data loss, but user should know.
+            $.writeln("Blitzkrieg: moveComp - source cleanup failed: " + rmErr.toString());
+            return "Warning: Comp copied to '" + newCategory + "' but original folder could not be removed. Please delete it manually.";
+        }
 
         return "Success: Comp moved to '" + newCategory + "'.";
     } catch(e) {
@@ -2236,9 +2263,10 @@ function generatePreviewFrames(aepPath) {
             try {
                 metadataFile.open('r');
                 metadataFile.encoding = 'UTF-8';
-                var metadata = JSON.parse(metadataFile.read());
+                var metaRaw = metadataFile.read();
                 metadataFile.close();
 
+                var metadata = JSON.parse(metaRaw);
                 metadata.previewFrames = previewFrameCount;
                 metadata.duration = mainComp.workAreaDuration;
                 metadata.frameRate = mainComp.frameRate;
@@ -2251,6 +2279,7 @@ function generatePreviewFrames(aepPath) {
                 metadataFile.write(JSON.stringify(metadata));
                 metadataFile.close();
             } catch (metaErr) {
+                try { metadataFile.close(); } catch (mcErr) {}
                 $.writeln("Blitzkrieg: Warning - Could not update metadata: " + metaErr.toString());
             }
         }
@@ -3065,5 +3094,27 @@ function writeUpdateFile(filePath, content) {
         return 'ok';
     } catch (e) {
         return JSON.stringify({error: e.toString()});
+    }
+}
+
+/**
+ * Get metadata about the active composition for telemetry.
+ * Returns JSON string with comp info or "null" if no active comp.
+ */
+function getActiveCompInfo() {
+    try {
+        var comp = app.project.activeItem;
+        if (!comp || !(comp instanceof CompItem)) return 'null';
+
+        return JSON.stringify({
+            name: comp.name,
+            width: comp.width,
+            height: comp.height,
+            duration: comp.duration,
+            frameRate: comp.frameRate,
+            numLayers: comp.numLayers
+        });
+    } catch (e) {
+        return 'null';
     }
 }
