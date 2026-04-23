@@ -2437,6 +2437,22 @@
                             }
                         });
                         showToast('Template submitted for review!');
+                        if (window.blitzkriegAnalytics && window.blitzkriegAnalytics.trackStash) {
+                            var totalBytes = 0;
+                            try {
+                                if (files.aepBlob && files.aepBlob.size) totalBytes += files.aepBlob.size;
+                                if (files.thumbnailBlob && files.thumbnailBlob.size) totalBytes += files.thumbnailBlob.size;
+                                if (files.previewFrameBlobs) {
+                                    files.previewFrameBlobs.forEach(function(b) { if (b && b.size) totalBytes += b.size; });
+                                }
+                            } catch (e) {}
+                            window.blitzkriegAnalytics.trackStash(
+                                submissionName,
+                                categoryName,
+                                pendingBasePath,
+                                totalBytes
+                            );
+                        }
                         stashInProgress = false;
                         hideSpinner();
                         loadSubmissionCounts();
@@ -3408,6 +3424,9 @@
         window.cloudLibrary.moveTemplates(storagePaths, targetCategory).then(function() {
             hideSpinner();
             showToast(storagePaths.length + ' template(s) moved to "' + targetCategory + '".');
+            if (window.blitzkriegAnalytics && window.blitzkriegAnalytics.trackBulkOp) {
+                window.blitzkriegAnalytics.trackBulkOp('bulk_move', storagePaths.length, storagePaths);
+            }
             toggleBulkMode(false);
             loadLibrary();
         }).catch(function(err) {
@@ -3443,6 +3462,9 @@
         window.cloudLibrary.deleteTemplates(storagePaths).then(function() {
             hideSpinner();
             showToast(storagePaths.length + ' template(s) deleted.');
+            if (window.blitzkriegAnalytics && window.blitzkriegAnalytics.trackBulkOp) {
+                window.blitzkriegAnalytics.trackBulkOp('bulk_delete', storagePaths.length, storagePaths);
+            }
             toggleBulkMode(false);
             loadLibrary();
         }).catch(function(err) {
@@ -6248,6 +6270,21 @@
         var sb = window.blitzkriegSupabase;
         if (!sb) return Promise.reject(new Error('No Supabase client'));
 
+        var _genStart = Date.now();
+        var _genName = comp.name || '';
+        function _reportGen(ok, err) {
+            if (window.blitzkriegAnalytics && window.blitzkriegAnalytics.trackGenerate) {
+                try {
+                    window.blitzkriegAnalytics.trackGenerate(
+                        _genName,
+                        ok === true,
+                        Date.now() - _genStart,
+                        ok ? null : (err && err.message ? err.message : String(err || 'unknown'))
+                    );
+                } catch (e) {}
+            }
+        }
+
         // Enqueue to prevent concurrent ExtendScript calls
         return _enqueueGeneration(function() {
         var tempDir, outputDir;
@@ -6428,11 +6465,13 @@
         }).then(function(result) {
             // Success: clean up temp dir and purge AE caches
             _cleanupTempDir(tempDir);
+            _reportGen(true);
             return result;
         }, function(err) {
             // Failure: log, clean up, re-throw so caller can count it
             debugLog('GEN FAIL [' + comp.name + ']: ' + err.message, 'error');
             _cleanupTempDir(tempDir);
+            _reportGen(false, err);
             throw err;
         });
         }); // end _enqueueGeneration
