@@ -3,7 +3,7 @@
     'use strict';
 
     var csInterface = new CSInterface();
-    var BLITZKRIEG_LOCAL_VERSION = '1.2.3';
+    var BLITZKRIEG_LOCAL_VERSION = '1.2.4';
 
     // CEP bridge detection — window.__adobe_cep__ is the native bridge to ExtendScript.
     // csInterface.evalScript is always a function (prototype), but it THROWS if __adobe_cep__ is missing.
