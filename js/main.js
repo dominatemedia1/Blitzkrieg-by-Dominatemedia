@@ -892,6 +892,17 @@
                 isLoading = true;
                 showSpinner();
                 var t0 = Date.now();
+                // Drain any pendingLibraryReload that focus events queued
+                // while forceReload was running — without this the flag
+                // could get stuck `true` indefinitely (loadLibrary checks
+                // it inside its own success/fail handlers, which never
+                // run if loadLibrary itself isn't called).
+                function _drainPending() {
+                    if (pendingLibraryReload) {
+                        pendingLibraryReload = false;
+                        loadLibrary();
+                    }
+                }
                 window.cloudLibrary.forceReload().then(function (comps) {
                     var elapsed = Date.now() - t0;
                     debugLog('forceReload: ' + comps.length + ' templates in ' + elapsed + 'ms', 'success');
@@ -905,11 +916,13 @@
                     isLoading = false;
                     updateAdminBarLabel();
                     showToast('Library reloaded — ' + comps.length + ' templates.');
+                    _drainPending();
                 }).catch(function (err) {
                     debugLog('forceReload failed: ' + (err && err.message || err), 'error');
                     showToast('Reload failed: ' + (err && err.message || 'unknown'), true);
                     hideSpinner();
                     isLoading = false;
+                    _drainPending();
                 });
             });
         }

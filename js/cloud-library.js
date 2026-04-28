@@ -116,7 +116,7 @@
                 if (res.error) {
                     _log('uploadManifest: ' + res.error.message, 'warn');
                 } else {
-                    _log('uploadManifest: published ' + metadataResults.length + ' entries', 'success');
+                    _log('uploadManifest: published ' + cleanResults.length + ' entries', 'success');
                 }
             }).catch(function (err) {
                 _log('uploadManifest exception: ' + (err && err.message || err), 'warn');
@@ -1182,19 +1182,30 @@
         return result;
     }
 
-    // Hard reload — wipes EVERY cache layer (in-memory signed URL cache,
-    // localStorage metadata cache, cloud manifest) and runs a fresh slow path.
-    // Used by the "Reload library" admin button when the grid is undercounting
-    // and the user wants to force a clean fetch.
+    // Hard reload — wipes LOCAL caches and bypasses the cloud manifest by
+    // calling fetchAllMetadata directly. The cloud manifest is intentionally
+    // left in place: uploadManifest uses upsert, so a clean fetch atomically
+    // replaces it. Deleting the shared manifest before knowing whether the
+    // slow path will succeed would self-DoS during a chronic Supabase
+    // outage — every editor whose local cache TTL expires would fall to
+    // slow path with no fallback, and if their slow paths also partial,
+    // the manifest stays gone forever.
     async function forceReload() {
-        _log('forceReload: clearing all caches + slow-path fetch', 'info');
+        _log('forceReload: clearing local caches + slow-path fetch (bypass manifest)', 'info');
         _signedUrlCache = null;
         _signedUrlCacheTime = 0;
         _lastMetaWriteLen = -1;
         try { localStorage.removeItem(META_CACHE_KEY); } catch (e) {}
-        // Delete the cloud manifest so this and other editors get a fresh one
-        try { await sb.storage.from(BUCKET).remove([MANIFEST_KEY]); } catch (e) {}
-        return await listTemplates();
+
+        var fresh = await fetchAllMetadata();
+        if (!listTemplates._archives) listTemplates._archives = [];
+        if (!fresh._failedCategories || fresh._failedCategories.length === 0) {
+            setCachedMetadata(fresh);
+            uploadManifest(fresh, listTemplates._archives);
+        } else {
+            _log('forceReload: partial fetch — leaving cache + manifest in their last good state', 'warn');
+        }
+        return await buildCompsFromMetadata(fresh);
     }
 
     // Expose globally
