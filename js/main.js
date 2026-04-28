@@ -875,13 +875,42 @@
             }
         });
 
-        // Refresh Library action
+        // Refresh Library action — uses forceReload() so a deliberate user
+        // click ALWAYS clears every cache layer (in-memory signed URLs,
+        // localStorage metadata, cloud manifest) and fetches fresh. This is
+        // the recovery path when the grid is undercounting templates.
         if (dropdownRefresh) {
             dropdownRefresh.addEventListener('click', function(e) {
                 e.preventDefault();
                 dropdownContainer.classList.remove('open');
-                loadLibrary();
-                showToast('Library refreshed.');
+                if (isLoading) {
+                    pendingLibraryReload = true;
+                    showToast('Already loading...');
+                    return;
+                }
+                showToast('Reloading library from cloud...');
+                isLoading = true;
+                showSpinner();
+                var t0 = Date.now();
+                window.cloudLibrary.forceReload().then(function (comps) {
+                    var elapsed = Date.now() - t0;
+                    debugLog('forceReload: ' + comps.length + ' templates in ' + elapsed + 'ms', 'success');
+                    allComps = comps;
+                    _invalidateCategoryCache();
+                    if (activeCategory === '__analytics') { renderCategories(); renderAnalyticsDashboard(); }
+                    else if (activeCategory.indexOf('__submissions_') === 0) { renderCategories(); renderSubmissionsGrid(activeCategory.replace('__submissions_', '')); }
+                    else if (activeCategory === '__review_pending') { renderCategories(); renderSubmissionsGrid('pending_review'); }
+                    else { renderUI(); }
+                    hideSpinner();
+                    isLoading = false;
+                    updateAdminBarLabel();
+                    showToast('Library reloaded — ' + comps.length + ' templates.');
+                }).catch(function (err) {
+                    debugLog('forceReload failed: ' + (err && err.message || err), 'error');
+                    showToast('Reload failed: ' + (err && err.message || 'unknown'), true);
+                    hideSpinner();
+                    isLoading = false;
+                });
             });
         }
 

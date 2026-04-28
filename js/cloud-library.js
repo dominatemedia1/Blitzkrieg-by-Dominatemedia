@@ -90,10 +90,22 @@
     function uploadManifest(metadataResults, archives) {
         // Fire-and-forget — don't block the caller. Failures are logged.
         try {
+            // CRITICAL: filter out null-metadata entries before persisting. A
+            // transient 503/timeout on a single metadata.json must NOT poison
+            // the cloud manifest with a null entry — every editor that fetches
+            // the poisoned manifest would render fewer templates than reality.
+            // The next slow path picks up the missing entries fresh.
+            var cleanResults = (metadataResults || []).filter(function(mr) {
+                return mr && mr.metadata !== null && mr.metadata !== undefined;
+            });
+            var droppedNulls = (metadataResults || []).length - cleanResults.length;
+            if (droppedNulls > 0) {
+                _log('uploadManifest: dropped ' + droppedNulls + ' null-metadata entries from manifest', 'warn');
+            }
             var manifest = {
                 version: 1,
                 ts: Date.now(),
-                folders: metadataResults,
+                folders: cleanResults,
                 archives: archives || []
             };
             var blob = new Blob([JSON.stringify(manifest)], { type: 'application/json' });
@@ -114,12 +126,41 @@
         }
     }
 
-    // Notify main.js when a background refresh found a different template count
-    // than what's currently rendered. Triggers a transparent re-load so users
-    // see new templates added by other admins without reloading the panel.
-    function _maybeNotifyChange(oldCount, newCount) {
-        if (oldCount === newCount) return;
-        _log('library count changed: ' + oldCount + ' -> ' + newCount + ', notifying UI', 'info');
+    // Notify main.js when a background refresh found a different template SET
+    // than what's currently rendered. Compares the set of "category/folder"
+    // paths instead of just counts — two libraries with the same total but
+    // different members (one removed, one added) used to silently bypass this
+    // and leave the user looking at a stale grid.
+    function _pathSet(folders) {
+        var out = {};
+        if (!folders || !folders.length) return out;
+        for (var i = 0; i < folders.length; i++) {
+            var f = folders[i];
+            if (!f) continue;
+            out[f.categoryName + '/' + f.folderName] = 1;
+        }
+        return out;
+    }
+    function _setsDiffer(a, b) {
+        var ka = Object.keys(a), kb = Object.keys(b);
+        if (ka.length !== kb.length) return true;
+        for (var i = 0; i < ka.length; i++) { if (!b[ka[i]]) return true; }
+        return false;
+    }
+    function _maybeNotifyChange(staleFolders, freshFolders) {
+        // Backwards-compatible: callers may still pass plain numbers (legacy)
+        // but the new contract is two folder arrays so we can compare sets.
+        var oldCount, newCount, changed;
+        if (typeof staleFolders === 'number' && typeof freshFolders === 'number') {
+            oldCount = staleFolders; newCount = freshFolders;
+            changed = oldCount !== newCount;
+        } else {
+            oldCount = (staleFolders || []).length;
+            newCount = (freshFolders || []).length;
+            changed = _setsDiffer(_pathSet(staleFolders), _pathSet(freshFolders));
+        }
+        if (!changed) return;
+        _log('library changed: ' + oldCount + ' -> ' + newCount + ' (set differs), notifying UI', 'info');
         try {
             window.dispatchEvent(new CustomEvent('blitzkrieg-library-changed', {
                 detail: { oldCount: oldCount, newCount: newCount }
@@ -228,9 +269,46 @@
         var signedUrlMap;
         var now = Date.now();
 
-        // Use cached signed URLs if still fresh (avoids re-signing on every focus)
+        // Use cached signed URLs if still fresh (avoids re-signing on every focus).
+        // Templates added since the cache was built are NOT in the cached map,
+        // so sign just the missing ones and merge — otherwise newly added
+        // templates would render with empty thumbnail URLs after a background
+        // refresh until the next 4h cache rotation.
         if (_signedUrlCache && (now - _signedUrlCacheTime < SIGNED_URL_CACHE_TTL)) {
             signedUrlMap = _signedUrlCache;
+            var missingPaths = [];
+            var missingIndex = {};
+            for (var mi = 0; mi < validEntries.length; mi++) {
+                var mEntry = validEntries[mi];
+                var mKey = mEntry.categoryName + '/' + mEntry.folderName;
+                if (signedUrlMap[mKey]) continue;
+                var mCompPath = mKey + '/comp.png';
+                var mThumbPath = mKey + '/thumbnail.png';
+                missingPaths.push(mCompPath);
+                missingPaths.push(mThumbPath);
+                missingIndex[mCompPath] = { categoryName: mEntry.categoryName, folderName: mEntry.folderName, type: 'thumb_comp' };
+                missingIndex[mThumbPath] = { categoryName: mEntry.categoryName, folderName: mEntry.folderName, type: 'thumb_new' };
+            }
+            if (missingPaths.length > 0) {
+                _log('buildCompsFromMetadata: signing ' + missingPaths.length + ' new thumbnails missing from cache', 'info');
+                var BATCH_M = 100;
+                for (var bm = 0; bm < missingPaths.length; bm += BATCH_M) {
+                    var batchM = missingPaths.slice(bm, bm + BATCH_M);
+                    var resM = await sb.storage.from(BUCKET).createSignedUrls(batchM, SIGNED_URL_EXPIRY);
+                    if (resM.data) {
+                        resM.data.forEach(function(item) {
+                            if (item.error || !item.signedUrl) return;
+                            var info = missingIndex[item.path];
+                            if (!info) return;
+                            var key = info.categoryName + '/' + info.folderName;
+                            if (!signedUrlMap[key]) signedUrlMap[key] = {};
+                            if (info.type === 'thumb_comp') signedUrlMap[key].thumbCompUrl = item.signedUrl;
+                            else if (info.type === 'thumb_new') signedUrlMap[key].thumbNewUrl = item.signedUrl;
+                        });
+                    }
+                }
+                _signedUrlCache = signedUrlMap;
+            }
         } else {
             var pathsToSign = [];
             var pathIndexMap = {};
@@ -524,8 +602,47 @@
         for (var w = 0; w < CONCURRENCY; w++) workers.push(worker());
         await Promise.all(workers);
 
+        // Retry pass for transient failures. A single 503 / network blip
+        // during the first sweep used to permanently null that template
+        // (and worse, poison the published manifest). Retry once with
+        // lower concurrency before giving up.
+        var nullIdxs = [];
+        for (var ni = 0; ni < metadataResults.length; ni++) {
+            if (!metadataResults[ni] || metadataResults[ni].metadata == null) nullIdxs.push(ni);
+        }
+        if (nullIdxs.length > 0) {
+            _log('fetchAllMetadata: retrying ' + nullIdxs.length + ' failed metadata downloads...', 'info');
+            var RETRY_CONCURRENCY = Math.min(10, nullIdxs.length);
+            var retryQueue = nullIdxs.slice();
+            async function retryWorker() {
+                while (retryQueue.length > 0) {
+                    var idx = retryQueue.shift();
+                    if (idx === undefined) break;
+                    await new Promise(function(r) { setTimeout(r, 200); });
+                    await downloadOne(idx);
+                }
+            }
+            var retryWorkers = [];
+            for (var rw = 0; rw < RETRY_CONCURRENCY; rw++) retryWorkers.push(retryWorker());
+            await Promise.all(retryWorkers);
+            var stillNull = 0;
+            for (var sni = 0; sni < nullIdxs.length; sni++) {
+                if (!metadataResults[nullIdxs[sni]] || metadataResults[nullIdxs[sni]].metadata == null) stillNull++;
+            }
+            _log('fetchAllMetadata: retry recovered ' + (nullIdxs.length - stillNull) + '/' + nullIdxs.length + ' failed entries', 'info');
+        }
+
         var withMeta = metadataResults.filter(function(r) { return r && r.metadata !== null; }).length;
+        var partial = withMeta < metadataResults.length;
         _log('fetchAllMetadata: done — ' + withMeta + '/' + metadataResults.length + ' have metadata (took ' + (Date.now() - t0) + 'ms)', withMeta > 0 ? 'success' : 'warn');
+
+        // Surface partial loads as a discrete telemetry event so we can see in
+        // analytics how often the library is undercounting.
+        if (partial && window.blitzkriegAnalytics && window.blitzkriegAnalytics.trackAccessChange) {
+            try {
+                window.blitzkriegAnalytics.trackAccessChange(null, 'library_partial_load', null);
+            } catch (te) {}
+        }
 
         return metadataResults;
     }
@@ -559,23 +676,38 @@
             // from 10 minutes so users see new templates from other admins quickly
             // without having to reload the panel.
             var BACKGROUND_REFRESH_TTL = 60 * 1000;
-            var staleCount = cache.folders.length;
-            if (ageMs >= BACKGROUND_REFRESH_TTL) {
+            var staleFolders = cache.folders;
+
+            // If the local cache contains null-metadata entries (poisoned by a
+            // prior transient failure), force a refresh regardless of TTL —
+            // those entries are invisible to the user and we want to retry
+            // them ASAP rather than waiting up to 60s.
+            var hasNulls = false;
+            for (var nci = 0; nci < cache.folders.length; nci++) {
+                if (!cache.folders[nci] || cache.folders[nci].metadata == null) { hasNulls = true; break; }
+            }
+            if (hasNulls) {
+                _log('listTemplates: cache has null-metadata entries — forcing immediate refresh', 'warn');
+            }
+
+            if (ageMs >= BACKGROUND_REFRESH_TTL || hasNulls) {
                 // Prefer the cloud manifest for the refresh too — it's still 1 req
                 // vs hundreds. Fall through to fetchAllMetadata if manifest is missing.
                 fetchManifest().then(function (manifest) {
-                    if (manifest && manifest.folders) {
+                    if (manifest && manifest.folders && !hasNulls) {
                         setCachedMetadata(manifest.folders);
                         if (manifest.archives) listTemplates._archives = manifest.archives;
                         _log('listTemplates: background manifest refresh done (' + manifest.folders.length + ' entries)', 'info');
-                        _maybeNotifyChange(staleCount, manifest.folders.length);
+                        _maybeNotifyChange(staleFolders, manifest.folders);
                         return null;
                     }
+                    // Either no manifest, or our local cache had nulls and we want
+                    // to re-download metadata directly to fix them.
                     return fetchAllMetadata().then(function (freshMeta) {
                         setCachedMetadata(freshMeta);
                         uploadManifest(freshMeta, listTemplates._archives || []);
                         _log('listTemplates: background full refresh done (' + freshMeta.length + ' entries)', 'info');
-                        _maybeNotifyChange(staleCount, freshMeta.length);
+                        _maybeNotifyChange(staleFolders, freshMeta);
                     });
                 }).catch(function (err) {
                     _log('listTemplates: background refresh failed: ' + (err && err.message || err), 'warn');
@@ -986,6 +1118,21 @@
         return result;
     }
 
+    // Hard reload — wipes EVERY cache layer (in-memory signed URL cache,
+    // localStorage metadata cache, cloud manifest) and runs a fresh slow path.
+    // Used by the "Reload library" admin button when the grid is undercounting
+    // and the user wants to force a clean fetch.
+    async function forceReload() {
+        _log('forceReload: clearing all caches + slow-path fetch', 'info');
+        _signedUrlCache = null;
+        _signedUrlCacheTime = 0;
+        _lastMetaWriteLen = -1;
+        try { localStorage.removeItem(META_CACHE_KEY); } catch (e) {}
+        // Delete the cloud manifest so this and other editors get a fresh one
+        try { await sb.storage.from(BUCKET).remove([MANIFEST_KEY]); } catch (e) {}
+        return await listTemplates();
+    }
+
     // Expose globally
     window.cloudLibrary = {
         listTemplates: listTemplates,
@@ -1002,6 +1149,7 @@
         getArchives: getArchives,
         getArchiveDownloadUrl: getArchiveDownloadUrl,
         invalidateCache: invalidateCache,
+        forceReload: forceReload,
         signPreviewFrames: signPreviewFrames,
         signPaths: signPaths,
     };
