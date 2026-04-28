@@ -51,13 +51,18 @@ jobs:
           sed -i -E "s/(ExtensionBundleVersion=\")[^\"]+(\")/\1${new}\2/" CSXS/manifest.xml
           sed -i -E "s/(<Extension Id=\"com\.blitzkrieg\.dominatemedia\" Version=\")[^\"]+(\")/\1${new}\2/" CSXS/manifest.xml
 
+          # index.html — bump every ?v=<version> query string so CEF treats
+          # the script/css URLs as fresh after OTA. Without this the panel
+          # writes new files to disk but reload serves cached old bytes.
+          sed -i -E "s/(\?v=)[0-9]+\.[0-9]+\.[0-9]+/\1${new}/g" index.html
+
           echo "new_version=$new" >> "$GITHUB_OUTPUT"
 
       - name: Commit + push bump
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add version.json js/main.js CSXS/manifest.xml
+          git add version.json js/main.js CSXS/manifest.xml index.html
           if git diff --cached --quiet; then
             echo "No version changes to commit"
             exit 0

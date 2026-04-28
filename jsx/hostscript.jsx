@@ -3098,6 +3098,157 @@ function writeUpdateFile(filePath, content) {
 }
 
 /**
+ * Recursively create a directory (mkdir -p) under the extension root.
+ * Refuses to create paths outside the extension dir.
+ */
+function mkdirUnderRoot(targetPath) {
+    try {
+        if (!isValidPath(targetPath)) return JSON.stringify({error: 'Invalid path'});
+        var rootFolder;
+        try {
+            var scriptFile = new File($.fileName);
+            rootFolder = scriptFile.parent.parent;
+        } catch (rootErr) {
+            return JSON.stringify({error: 'Could not resolve extension root'});
+        }
+        var rootPath = rootFolder.fsName;
+        var caseInsensitive = ($.os.indexOf('Windows') !== -1) || ($.os.indexOf('Mac') !== -1);
+        var nt = targetPath.replace(/\\/g, '/');
+        var nr = rootPath.replace(/\\/g, '/');
+        if (caseInsensitive) { nt = nt.toLowerCase(); nr = nr.toLowerCase(); }
+        while (nr.length > 1 && nr.charAt(nr.length - 1) === '/') nr = nr.substring(0, nr.length - 1);
+        var underR = nt.length > nr.length && nt.substring(0, nr.length) === nr && nt.charAt(nr.length) === '/';
+        if (!underR) return JSON.stringify({error: 'mkdir target outside extension root'});
+        var folder = new Folder(targetPath);
+        if (folder.exists) return 'ok';
+        if (!folder.create()) return JSON.stringify({error: 'Folder.create() returned false for ' + targetPath});
+        return 'ok';
+    } catch (e) {
+        return JSON.stringify({error: e.toString()});
+    }
+}
+
+/**
+ * Atomic move for OTA: rename a staged file into its final destination.
+ * Both src and dst must be inside the extension root and must have allow-listed
+ * extensions. Used after staging downloaded update bytes so a partial failure
+ * leaves the installed copy untouched.
+ */
+function moveUpdateFile(srcPath, dstPath) {
+    try {
+        if (!isValidPath(srcPath) || !isValidPath(dstPath)) {
+            return JSON.stringify({error: 'Invalid move path'});
+        }
+        var allowedExt = ['.js', '.css', '.html', '.htm', '.jsx', '.json', '.svg', '.xml'];
+        function hasAllowedExt(p) {
+            var lower = p.toLowerCase();
+            for (var i = 0; i < allowedExt.length; i++) {
+                if (lower.length >= allowedExt[i].length &&
+                    lower.substring(lower.length - allowedExt[i].length) === allowedExt[i]) return true;
+            }
+            return false;
+        }
+        if (!hasAllowedExt(dstPath)) {
+            return JSON.stringify({error: 'Move destination extension not allowed: ' + dstPath});
+        }
+        var rootFolder;
+        try {
+            var scriptFile = new File($.fileName);
+            rootFolder = scriptFile.parent.parent;
+        } catch (rootErr) {
+            return JSON.stringify({error: 'Could not resolve extension root: ' + rootErr.toString()});
+        }
+        if (!rootFolder || !rootFolder.exists) {
+            return JSON.stringify({error: 'Extension root missing'});
+        }
+        var rootPath = rootFolder.fsName;
+        var caseInsensitive = ($.os.indexOf('Windows') !== -1) || ($.os.indexOf('Mac') !== -1);
+        function underRoot(p) {
+            var nt = p.replace(/\\/g, '/');
+            var nr = rootPath.replace(/\\/g, '/');
+            if (caseInsensitive) { nt = nt.toLowerCase(); nr = nr.toLowerCase(); }
+            while (nr.length > 1 && nr.charAt(nr.length - 1) === '/') nr = nr.substring(0, nr.length - 1);
+            return nt.length > nr.length && nt.substring(0, nr.length) === nr && nt.charAt(nr.length) === '/';
+        }
+        if (!underRoot(srcPath) || !underRoot(dstPath)) {
+            return JSON.stringify({error: 'Move endpoints outside extension root'});
+        }
+        var src = new File(srcPath);
+        if (!src.exists) {
+            return JSON.stringify({error: 'Staged file missing: ' + srcPath});
+        }
+        var dst = new File(dstPath);
+        // ExtendScript File.copy + remove pattern — rename across same volume works
+        // but copy+remove is more reliable when dest exists.
+        var parentFolder = dst.parent;
+        if (!parentFolder.exists) parentFolder.create();
+        // If dst exists, delete it first (File.copy refuses to overwrite on Windows)
+        if (dst.exists) {
+            if (!dst.remove()) {
+                return JSON.stringify({error: 'Could not overwrite ' + dstPath});
+            }
+        }
+        if (!src.copy(dst)) {
+            return JSON.stringify({error: 'Copy failed ' + srcPath + ' -> ' + dstPath});
+        }
+        try { src.remove(); } catch (rmErr) {}
+        return 'ok';
+    } catch (e) {
+        return JSON.stringify({error: e.toString()});
+    }
+}
+
+/**
+ * Recursively delete a staging directory under the extension root.
+ * Used to clean up after a failed or successful OTA update.
+ */
+function deleteUpdateDir(dirPath) {
+    try {
+        if (!isValidPath(dirPath)) return JSON.stringify({error: 'Invalid path'});
+        var rootFolder;
+        try {
+            var scriptFile = new File($.fileName);
+            rootFolder = scriptFile.parent.parent;
+        } catch (rootErr) {
+            return JSON.stringify({error: 'Could not resolve extension root'});
+        }
+        var rootPath = rootFolder.fsName;
+        var caseInsensitive = ($.os.indexOf('Windows') !== -1) || ($.os.indexOf('Mac') !== -1);
+        var nt = dirPath.replace(/\\/g, '/');
+        var nr = rootPath.replace(/\\/g, '/');
+        if (caseInsensitive) { nt = nt.toLowerCase(); nr = nr.toLowerCase(); }
+        while (nr.length > 1 && nr.charAt(nr.length - 1) === '/') nr = nr.substring(0, nr.length - 1);
+        var underR = nt.length > nr.length && nt.substring(0, nr.length) === nr && nt.charAt(nr.length) === '/';
+        if (!underR) return JSON.stringify({error: 'Path outside extension root'});
+        // Refuse to delete anything that doesn't look like a staging dir
+        if (nt.indexOf('/.update-staging') === -1) {
+            return JSON.stringify({error: 'Refusing to delete non-staging dir: ' + dirPath});
+        }
+        var dir = new Folder(dirPath);
+        if (!dir.exists) return 'ok';
+        function rmTree(folder) {
+            var entries = folder.getFiles();
+            if (entries) {
+                for (var i = 0; i < entries.length; i++) {
+                    var e = entries[i];
+                    if (e instanceof Folder) {
+                        rmTree(e);
+                        try { e.remove(); } catch (re) {}
+                    } else {
+                        try { e.remove(); } catch (re2) {}
+                    }
+                }
+            }
+        }
+        rmTree(dir);
+        try { dir.remove(); } catch (e2) {}
+        return 'ok';
+    } catch (e) {
+        return JSON.stringify({error: e.toString()});
+    }
+}
+
+/**
  * Get metadata about the active composition for telemetry.
  * Returns JSON string with comp info or "null" if no active comp.
  */
