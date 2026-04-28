@@ -35,7 +35,8 @@ js/
   supabase-config.js     # Supabase client init → window.blitzkriegSupabase
   supabase.min.js        # Supabase JS SDK (vendored)
   CSInterface.js         # Adobe CEP JS bridge (vendored)
-  analytics.js           # Analytics
+  analytics.js           # Analytics (Supabase-direct usage events)
+  telemetry.js           # Telemetry — session/import/render tracking, POSTs to Insight Flow edge function
 jsx/
   hostscript.jsx         # ExtendScript — runs in After Effects host process; includes JSON polyfill (always replaces native JSON), AE version detection, and macOS path utilities
 README.md

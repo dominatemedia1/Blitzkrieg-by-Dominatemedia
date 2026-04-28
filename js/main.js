@@ -3,7 +3,7 @@
     'use strict';
 
     var csInterface = new CSInterface();
-    var BLITZKRIEG_LOCAL_VERSION = '1.2.0';
+    var BLITZKRIEG_LOCAL_VERSION = '1.2.2';
 
     // CEP bridge detection — window.__adobe_cep__ is the native bridge to ExtendScript.
     // csInterface.evalScript is always a function (prototype), but it THROWS if __adobe_cep__ is missing.
@@ -5833,9 +5833,33 @@
         return false;
     }
 
+    var _updateInProgress = false;
+
+    function showUpdatingBanner(version) {
+        var app = document.getElementById('app');
+        if (!app || document.getElementById('blitz-update-banner')) return;
+        var banner = document.createElement('div');
+        banner.id = 'blitz-update-banner';
+        banner.className = 'update-banner';
+
+        var infoDiv = document.createElement('div');
+        infoDiv.className = 'update-banner-info';
+        infoDiv.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="flex-shrink:0;animation:blitz-spin 1s linear infinite"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5" stroke-dasharray="6 6" fill="none"/></svg>';
+        var infoSpan = document.createElement('span');
+        infoSpan.appendChild(document.createTextNode('Auto-updating to '));
+        var strongVer = document.createElement('strong');
+        strongVer.textContent = 'v' + version;
+        infoSpan.appendChild(strongVer);
+        infoSpan.appendChild(document.createTextNode('… panel will reload automatically.'));
+        infoDiv.appendChild(infoSpan);
+        banner.appendChild(infoDiv);
+        app.insertBefore(banner, app.firstChild);
+    }
+
     function checkForUpdates() {
         var sb = window.blitzkriegSupabase;
         if (!sb) return;
+        if (_updateInProgress) return;
 
         sb.rpc('get_blitzkrieg_update_manifest').then(function(res) {
             if (res.error || !res.data) return;
@@ -5844,65 +5868,29 @@
             if (!remoteVersion || !isNewerVersion(remoteVersion, BLITZKRIEG_LOCAL_VERSION)) return;
 
             var files = manifest.files || [];
-            debugLog('Update available: v' + remoteVersion + ' (current: v' + BLITZKRIEG_LOCAL_VERSION + ')', 'info');
+            if (!files.length) {
+                debugLog('Update v' + remoteVersion + ' available but no files in manifest', 'warn');
+                return;
+            }
 
-            // Track update check
+            debugLog('Auto-updating: v' + BLITZKRIEG_LOCAL_VERSION + ' -> v' + remoteVersion + ' (' + files.length + ' files)', 'info');
             if (window.blitzkriegAnalytics) {
                 window.blitzkriegAnalytics.trackAccessChange(null, 'update_check', null);
             }
 
-            // Show update banner. We deliberately use textContent + addEventListener
-            // (NOT inline `onclick="..."` with JSON.stringify(files)) because the
-            // remoteVersion and files come from a Supabase RPC; injecting them into an
-            // HTML attribute string is an XSS-to-RCE vector — a backslash or unescaped
-            // quote in the manifest would let an attacker break out of the JS string
-            // literal context inside the onclick. Using DOM APIs keeps the data out of
-            // the parser entirely.
-            var app = document.getElementById('app');
-            if (!app || document.getElementById('blitz-update-banner')) return;
-            var banner = document.createElement('div');
-            banner.id = 'blitz-update-banner';
-            banner.className = 'update-banner';
-
-            var infoDiv = document.createElement('div');
-            infoDiv.className = 'update-banner-info';
-            infoDiv.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="flex-shrink:0"><path d="M8 1L1 15h14L8 1z" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M8 6v4M8 12h.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
-            var infoSpan = document.createElement('span');
-            // Build with textContent for the dynamic version string. The static prefix
-            // and the local version (a build constant) can stay as innerHTML for the
-            // <strong> wrapper. Use a fragment to keep the markup clean.
-            var localVersion = BLITZKRIEG_LOCAL_VERSION;
-            infoSpan.appendChild(document.createTextNode('Update available: '));
-            var strongVer = document.createElement('strong');
-            strongVer.textContent = 'v' + remoteVersion;
-            infoSpan.appendChild(strongVer);
-            infoSpan.appendChild(document.createTextNode(' (you have v' + localVersion + ')'));
-            infoDiv.appendChild(infoSpan);
-            banner.appendChild(infoDiv);
-
-            var actionsDiv = document.createElement('div');
-            actionsDiv.className = 'update-banner-actions';
-            var installBtn = document.createElement('button');
-            installBtn.className = 'update-banner-btn';
-            installBtn.textContent = 'Install & Reload';
-            installBtn.addEventListener('click', function() {
-                installUpdate(remoteVersion, files);
-            });
-            actionsDiv.appendChild(installBtn);
-
-            var dismissBtn = document.createElement('button');
-            dismissBtn.className = 'update-banner-dismiss';
-            dismissBtn.innerHTML = '&times;';
-            dismissBtn.addEventListener('click', function() {
-                banner.remove();
-            });
-            actionsDiv.appendChild(dismissBtn);
-            banner.appendChild(actionsDiv);
-
-            app.insertBefore(banner, app.firstChild);
+            _updateInProgress = true;
+            showUpdatingBanner(remoteVersion);
+            installUpdate(remoteVersion, files);
         }).catch(function(err) {
             debugLog('Update check failed: ' + err.message, 'warn');
         });
+    }
+
+    // Recheck for updates every 30 minutes — covers long-running sessions where
+    // the editor leaves AE open all day. First check still fires on auth-ready.
+    function startUpdateChecker() {
+        checkForUpdates();
+        setInterval(checkForUpdates, 30 * 60 * 1000);
     }
 
     /**
@@ -6656,8 +6644,8 @@
     // The auth module (auth.js) handles login/access and calls onBlitzkriegAuthReady when access is granted
     window.onBlitzkriegAuthReady = function () {
         masterInit();
-        // Check for OTA updates (non-blocking)
-        checkForUpdates();
+        // Auto OTA: install on detection + recheck every 30 min (non-blocking)
+        startUpdateChecker();
         // Track session start
         if (window.blitzkriegAnalytics) {
             window.blitzkriegAnalytics.trackSessionStart();
@@ -6679,6 +6667,15 @@
         if (window.blitzkriegAuth) {
             window.blitzkriegAuth.validateSession();
         }
+    });
+
+    // Auto-refresh grid when background manifest fetch finds new/removed templates.
+    // Eliminates the "I see 142 but there are actually 245" stale-cache bug.
+    window.addEventListener('blitzkrieg-library-changed', function (e) {
+        var detail = e && e.detail || {};
+        debugLog('Library changed (' + (detail.oldCount || '?') + ' -> ' + (detail.newCount || '?') + '), reloading grid', 'info');
+        if (!isLoading) loadLibrary();
+        else pendingLibraryReload = true;
     });
 
     // expose some internals for inline calls (keeps compatibility)

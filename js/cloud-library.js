@@ -110,6 +110,26 @@
         }
     }
 
+    // Notify main.js when a background refresh found a different template count
+    // than what's currently rendered. Triggers a transparent re-load so users
+    // see new templates added by other admins without reloading the panel.
+    function _maybeNotifyChange(oldCount, newCount) {
+        if (oldCount === newCount) return;
+        _log('library count changed: ' + oldCount + ' -> ' + newCount + ', notifying UI', 'info');
+        try {
+            window.dispatchEvent(new CustomEvent('blitzkrieg-library-changed', {
+                detail: { oldCount: oldCount, newCount: newCount }
+            }));
+        } catch (e) {
+            // CEP 8/9 fallback — CustomEvent constructor missing in old Chromium
+            try {
+                var ev = document.createEvent('CustomEvent');
+                ev.initCustomEvent('blitzkrieg-library-changed', false, false, { oldCount: oldCount, newCount: newCount });
+                window.dispatchEvent(ev);
+            } catch (e2) {}
+        }
+    }
+
     // Debounced manifest invalidation — rapid successive mutations (bulk delete,
     // bulk move) only trigger one delete+rebuild cycle.
     var _manifestInvalidateTimer = null;
@@ -531,8 +551,11 @@
             // TTL-gated background refresh — the previous version refreshed every
             // single fast-path call (i.e. on every focus event after cooldown), which
             // burned ~248 metadata downloads on every alt-tab back into AE. Skip the
-            // refresh entirely when the cache is younger than 10 minutes.
-            var BACKGROUND_REFRESH_TTL = 10 * 60 * 1000;
+            // refresh entirely when the cache is younger than 60 seconds. Lowered
+            // from 10 minutes so users see new templates from other admins quickly
+            // without having to reload the panel.
+            var BACKGROUND_REFRESH_TTL = 60 * 1000;
+            var staleCount = cache.folders.length;
             if (ageMs >= BACKGROUND_REFRESH_TTL) {
                 // Prefer the cloud manifest for the refresh too — it's still 1 req
                 // vs hundreds. Fall through to fetchAllMetadata if manifest is missing.
@@ -541,12 +564,14 @@
                         setCachedMetadata(manifest.folders);
                         if (manifest.archives) listTemplates._archives = manifest.archives;
                         _log('listTemplates: background manifest refresh done (' + manifest.folders.length + ' entries)', 'info');
+                        _maybeNotifyChange(staleCount, manifest.folders.length);
                         return null;
                     }
                     return fetchAllMetadata().then(function (freshMeta) {
                         setCachedMetadata(freshMeta);
                         uploadManifest(freshMeta, listTemplates._archives || []);
                         _log('listTemplates: background full refresh done (' + freshMeta.length + ' entries)', 'info');
+                        _maybeNotifyChange(staleCount, freshMeta.length);
                     });
                 }).catch(function (err) {
                     _log('listTemplates: background refresh failed: ' + (err && err.message || err), 'warn');
