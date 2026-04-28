@@ -528,18 +528,47 @@
             return [];
         }
 
-        // Step 2: List ALL category comp folders in parallel — paginated
+        // Step 2: List ALL category comp folders in parallel — paginated.
+        // CRITICAL: per-category retry. A single Supabase storage list timeout
+        // for one category used to silently drop ALL templates in that
+        // category (and worse, the published manifest got rebuilt without
+        // them, poisoning every editor's cache for up to 5 min).
         _log('fetchAllMetadata: listing ' + categories.length + ' category folders in parallel...', 'info');
+        async function listCategoryWithRetry(catName, maxAttempts) {
+            maxAttempts = maxAttempts || 3;
+            var attempts = 0;
+            var lastErr;
+            while (attempts < maxAttempts) {
+                attempts++;
+                try {
+                    return await listAllPaginated(catName);
+                } catch (err) {
+                    lastErr = err;
+                    _log('listCategory "' + catName + '" attempt ' + attempts + '/' + maxAttempts + ' failed: ' + (err && err.message || err), 'warn');
+                    if (attempts < maxAttempts) {
+                        await new Promise(function(r) { setTimeout(r, 1000 * attempts); });
+                    }
+                }
+            }
+            throw lastErr;
+        }
         var categoryResults = await Promise.all(
             categories.map(function (cat) {
-                return listAllPaginated(cat.name).then(function (items) {
+                return listCategoryWithRetry(cat.name).then(function (items) {
                     return { category: cat.name, data: items };
                 }).catch(function (err) {
-                    _log('fetchAllMetadata: listing category "' + cat.name + '" FAILED: ' + err.message, 'error');
+                    _log('fetchAllMetadata: listing category "' + cat.name + '" FAILED after retries: ' + (err && err.message || err), 'error');
                     return { category: cat.name, data: [], error: err };
                 });
             })
         );
+
+        // Track which categories failed so the caller can decide whether to
+        // overwrite the cache + manifest (no) or render partial results (ok
+        // for this session, but don't persist a poisoned snapshot).
+        var failedCategoryNames = categoryResults
+            .filter(function(r) { return r.error; })
+            .map(function(r) { return r.category; });
 
         var allFolderEntries = [];
         categoryResults.forEach(function (catResult) {
@@ -555,7 +584,9 @@
 
         if (allFolderEntries.length === 0) {
             _log('fetchAllMetadata: no comp folders → returning empty (took ' + (Date.now() - t0) + 'ms)', 'warn');
-            return [];
+            var emptyOut = [];
+            if (failedCategoryNames.length > 0) emptyOut._failedCategories = failedCategoryNames;
+            return emptyOut;
         }
 
         // Step 3: Download all metadata.json files using a concurrency-limited
@@ -637,11 +668,33 @@
         _log('fetchAllMetadata: done — ' + withMeta + '/' + metadataResults.length + ' have metadata (took ' + (Date.now() - t0) + 'ms)', withMeta > 0 ? 'success' : 'warn');
 
         // Surface partial loads as a discrete telemetry event so we can see in
-        // analytics how often the library is undercounting.
-        if (partial && window.blitzkriegAnalytics && window.blitzkriegAnalytics.trackAccessChange) {
+        // analytics how often the library is undercounting. A category-list
+        // failure is FAR worse than a single metadata.json failure — it drops
+        // every template in that category from the published manifest.
+        var hasCategoryFailures = failedCategoryNames.length > 0;
+        if ((partial || hasCategoryFailures) && window.blitzkriegAnalytics && window.blitzkriegAnalytics.trackAccessChange) {
             try {
                 window.blitzkriegAnalytics.trackAccessChange(null, 'library_partial_load', null);
             } catch (te) {}
+        }
+
+        // Attach the failed-category list to the result so the caller can
+        // refuse to overwrite the cache + manifest with a poisoned snapshot.
+        if (hasCategoryFailures) {
+            metadataResults._failedCategories = failedCategoryNames;
+            _log('fetchAllMetadata: ' + failedCategoryNames.length + ' categories FAILED to list: [' + failedCategoryNames.join(', ') + ']. Caller MUST skip cache + manifest write.', 'error');
+            // Emit user-facing event so main.js can surface a toast/banner.
+            try {
+                window.dispatchEvent(new CustomEvent('blitzkrieg-library-partial', {
+                    detail: { failedCategories: failedCategoryNames.slice(), withMeta: withMeta, total: metadataResults.length }
+                }));
+            } catch (e) {
+                try {
+                    var ev = document.createEvent('CustomEvent');
+                    ev.initCustomEvent('blitzkrieg-library-partial', false, false, { failedCategories: failedCategoryNames.slice(), withMeta: withMeta, total: metadataResults.length });
+                    window.dispatchEvent(ev);
+                } catch (e2) {}
+            }
         }
 
         return metadataResults;
@@ -704,6 +757,13 @@
                     // Either no manifest, or our local cache had nulls and we want
                     // to re-download metadata directly to fix them.
                     return fetchAllMetadata().then(function (freshMeta) {
+                        // Refuse to overwrite cache + manifest with a poisoned
+                        // snapshot when one or more category lists timed out.
+                        // Leave the existing cache alone — partial > poisoned.
+                        if (freshMeta && freshMeta._failedCategories && freshMeta._failedCategories.length > 0) {
+                            _log('listTemplates: background refresh aborted — categories failed: [' + freshMeta._failedCategories.join(', ') + ']. Cache + manifest left untouched.', 'warn');
+                            return;
+                        }
                         setCachedMetadata(freshMeta);
                         uploadManifest(freshMeta, listTemplates._archives || []);
                         _log('listTemplates: background full refresh done (' + freshMeta.length + ' entries)', 'info');
@@ -739,12 +799,16 @@
         _log('listTemplates: SLOW PATH — no cache, no manifest, full fetch...', 'info');
         var metadataResults = await fetchAllMetadata();
 
-        // Save to localStorage for next session
-        setCachedMetadata(metadataResults);
-
-        // Publish cloud manifest so the NEXT cold load (this user after cache clear,
-        // or any other user) can skip the slow path entirely.
-        uploadManifest(metadataResults, listTemplates._archives || []);
+        // Build comps from whatever we got so the user sees SOMETHING this
+        // session. But only persist to the cache + cloud manifest when the
+        // fetch was clean — otherwise we'd poison every other editor with a
+        // missing-category snapshot until the manifest TTL expires.
+        if (metadataResults && metadataResults._failedCategories && metadataResults._failedCategories.length > 0) {
+            _log('listTemplates: SLOW PATH partial — refusing to write cache or publish manifest. Failed categories: [' + metadataResults._failedCategories.join(', ') + ']', 'warn');
+        } else {
+            setCachedMetadata(metadataResults);
+            uploadManifest(metadataResults, listTemplates._archives || []);
+        }
 
         // Sign URLs and build comps
         var comps2 = await buildCompsFromMetadata(metadataResults);

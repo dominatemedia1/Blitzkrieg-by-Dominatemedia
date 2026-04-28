@@ -6939,6 +6939,25 @@
         else pendingLibraryReload = true;
     });
 
+    // Surface category-list failures to the user. Without this, an editor whose
+    // bucket has a category that times out on Supabase storage just silently
+    // sees fewer templates than reality.
+    var _lastPartialToastTs = 0;
+    window.addEventListener('blitzkrieg-library-partial', function (e) {
+        var detail = e && e.detail || {};
+        var failed = detail.failedCategories || [];
+        if (!failed.length) return;
+        debugLog('Library PARTIAL load — categories failed: [' + failed.join(', ') + ']', 'error');
+        // Throttle: never show this toast more than once per 30s.
+        var now = Date.now();
+        if (now - _lastPartialToastTs < 30000) return;
+        _lastPartialToastTs = now;
+        var label = failed.length === 1
+            ? 'Category "' + failed[0] + '" failed to load'
+            : failed.length + ' categories failed to load: ' + failed.join(', ');
+        showToast(label + '. Click Refresh Library to retry.', true);
+    });
+
     // expose some internals for inline calls (keeps compatibility)
     window.loadLibrary = loadLibrary;
 
