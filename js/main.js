@@ -6335,8 +6335,16 @@
                         // Wipe the persistent failure record so the post-reload
                         // panel boots with a clean slate.
                         clearFailedRecord();
-                        _clearWatchdog();
+                        // Order matters: setUpdateBannerStatus reads
+                        // banner.dataset.version and re-arms the watchdog
+                        // via _kickWatchdog, so the banner update must
+                        // happen FIRST and the watchdog clear AFTER.
+                        // Otherwise a stalled $.evalFile callback past
+                        // 120s would fire _failUpdate on a successful
+                        // install, write a phantom failure record, and
+                        // undo the clearFailedRecord above.
                         setUpdateBannerStatus('reloading');
+                        _clearWatchdog();
                         // CEP shares one ExtendScript context per extension — it survives
                         // panel reloads, so the just-written hostscript.jsx still points
                         // at the OLD function definitions until we $.evalFile() it.

@@ -42,8 +42,23 @@ if [[ ! -x "$ZXP_TOOL" ]]; then
       exit 1
       ;;
   esac
-  curl -sSL "$URL" -o "$ZXP_TOOL"
-  chmod +x "$ZXP_TOOL"
+  # --fail makes curl exit non-zero on HTTP 4xx/5xx instead of saving the
+  # error body to disk. Atomic-rename via tempfile so a partial download
+  # never lands as $ZXP_TOOL — otherwise the next invocation sees the
+  # broken file exists and skips re-download forever.
+  TMP_TOOL="$ZXP_TOOL.tmp.$$"
+  if ! curl --fail -sSL "$URL" -o "$TMP_TOOL"; then
+    rm -f "$TMP_TOOL"
+    echo "!! ZXPSignCmd download failed: $URL" >&2
+    exit 1
+  fi
+  if ! file "$TMP_TOOL" | grep -q -E "(Mach-O|ELF)"; then
+    rm -f "$TMP_TOOL"
+    echo "!! Downloaded file is not an executable binary (got: $(file -b "$TMP_TOOL" 2>/dev/null || echo unknown))" >&2
+    exit 1
+  fi
+  chmod +x "$TMP_TOOL"
+  mv "$TMP_TOOL" "$ZXP_TOOL"
 fi
 
 # ---- 2. Ensure signing cert exists -------------------------------------------

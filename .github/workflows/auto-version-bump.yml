@@ -72,5 +72,10 @@ jobs:
           # Tag the bump commit so release-zxp.yml fires on `push: tags: 'v*'`
           # and attaches the signed installer to a GitHub Release.
           git tag "v${new}"
-          git push
-          git push origin "v${new}"
+          # Atomic push of branch + tag — if either side fails, the other
+          # does not land. Without --atomic, the branch push could succeed
+          # while the tag push failed (auth/network blip), and the manual
+          # -recovery URL would serve an OLDER release's zxp until the
+          # next successful tag push, creating an OTA loop where editors
+          # install the older version that immediately tries to bump UP.
+          git push --atomic origin HEAD "v${new}"
