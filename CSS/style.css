@@ -3971,3 +3971,7 @@ body.debug-panel-open #app {
 .update-banner-dismiss:hover {
     color: var(--text-primary);
 }
+
+@keyframes blitz-spin {
+    to { transform: rotate(360deg); }
+}

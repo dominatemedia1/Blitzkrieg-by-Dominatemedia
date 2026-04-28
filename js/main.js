@@ -3,7 +3,7 @@
     'use strict';
 
     var csInterface = new CSInterface();
-    var BLITZKRIEG_LOCAL_VERSION = '1.2.0';
+    var BLITZKRIEG_LOCAL_VERSION = '1.2.3';
 
     // CEP bridge detection — window.__adobe_cep__ is the native bridge to ExtendScript.
     // csInterface.evalScript is always a function (prototype), but it THROWS if __adobe_cep__ is missing.
@@ -2437,6 +2437,22 @@
                             }
                         });
                         showToast('Template submitted for review!');
+                        if (window.blitzkriegAnalytics && window.blitzkriegAnalytics.trackStash) {
+                            var totalBytes = 0;
+                            try {
+                                if (files.aepBlob && files.aepBlob.size) totalBytes += files.aepBlob.size;
+                                if (files.thumbnailBlob && files.thumbnailBlob.size) totalBytes += files.thumbnailBlob.size;
+                                if (files.previewFrameBlobs) {
+                                    files.previewFrameBlobs.forEach(function(b) { if (b && b.size) totalBytes += b.size; });
+                                }
+                            } catch (e) {}
+                            window.blitzkriegAnalytics.trackStash(
+                                submissionName,
+                                categoryName,
+                                pendingBasePath,
+                                totalBytes
+                            );
+                        }
                         stashInProgress = false;
                         hideSpinner();
                         loadSubmissionCounts();
@@ -3408,6 +3424,9 @@
         window.cloudLibrary.moveTemplates(storagePaths, targetCategory).then(function() {
             hideSpinner();
             showToast(storagePaths.length + ' template(s) moved to "' + targetCategory + '".');
+            if (window.blitzkriegAnalytics && window.blitzkriegAnalytics.trackBulkOp) {
+                window.blitzkriegAnalytics.trackBulkOp('bulk_move', storagePaths.length, storagePaths);
+            }
             toggleBulkMode(false);
             loadLibrary();
         }).catch(function(err) {
@@ -3443,6 +3462,9 @@
         window.cloudLibrary.deleteTemplates(storagePaths).then(function() {
             hideSpinner();
             showToast(storagePaths.length + ' template(s) deleted.');
+            if (window.blitzkriegAnalytics && window.blitzkriegAnalytics.trackBulkOp) {
+                window.blitzkriegAnalytics.trackBulkOp('bulk_delete', storagePaths.length, storagePaths);
+            }
             toggleBulkMode(false);
             loadLibrary();
         }).catch(function(err) {
@@ -5797,7 +5819,24 @@
         }
     }
 
-    /* --------- OTA Live Update System --------- */
+    /* --------- OTA Live Update System (GitHub raw) --------- */
+
+    // Source of truth: a public GitHub repo. The panel polls
+    //   https://raw.githubusercontent.com/<owner>/<repo>/<branch>/version.json
+    // on auth-ready and every 30 min. If `version` is newer than this build's
+    // BLITZKRIEG_LOCAL_VERSION constant, all listed files are downloaded from
+    // the same repo+branch and written to the extension dir, then the panel
+    // reloads. Push to main = panels update. No publish step.
+    var GH_OWNER = 'dominatemedia1';
+    var GH_REPO  = 'Blitzkrieg-by-Dominatemedia';
+    var GH_BRANCH = 'main';
+    function ghRawUrl(path) {
+        // Cache-bust with a per-check timestamp so GitHub's CDN doesn't serve
+        // a stale version.json or stale file bytes (raw.githubusercontent.com
+        // caches for ~5 min).
+        return 'https://raw.githubusercontent.com/' + GH_OWNER + '/' + GH_REPO + '/' + GH_BRANCH + '/' + path
+            + '?_=' + Date.now();
+    }
 
     function isNewerVersion(remote, local) {
         var rParts = String(remote).split('.').map(Number);
@@ -5811,76 +5850,63 @@
         return false;
     }
 
-    function checkForUpdates() {
-        var sb = window.blitzkriegSupabase;
-        if (!sb) return;
+    var _updateInProgress = false;
 
-        sb.rpc('get_blitzkrieg_update_manifest').then(function(res) {
-            if (res.error || !res.data) return;
-            var manifest = res.data;
-            var remoteVersion = manifest.current_version;
+    function showUpdatingBanner(version) {
+        var app = document.getElementById('app');
+        if (!app || document.getElementById('blitz-update-banner')) return;
+        var banner = document.createElement('div');
+        banner.id = 'blitz-update-banner';
+        banner.className = 'update-banner';
+
+        var infoDiv = document.createElement('div');
+        infoDiv.className = 'update-banner-info';
+        infoDiv.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="flex-shrink:0;animation:blitz-spin 1s linear infinite"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5" stroke-dasharray="6 6" fill="none"/></svg>';
+        var infoSpan = document.createElement('span');
+        infoSpan.appendChild(document.createTextNode('Auto-updating to '));
+        var strongVer = document.createElement('strong');
+        strongVer.textContent = 'v' + version;
+        infoSpan.appendChild(strongVer);
+        infoSpan.appendChild(document.createTextNode('… panel will reload automatically.'));
+        infoDiv.appendChild(infoSpan);
+        banner.appendChild(infoDiv);
+        app.insertBefore(banner, app.firstChild);
+    }
+
+    function checkForUpdates() {
+        if (_updateInProgress) return;
+
+        fetch(ghRawUrl('version.json'), { cache: 'no-store' }).then(function(res) {
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            return res.json();
+        }).then(function(manifest) {
+            var remoteVersion = manifest && manifest.version;
             if (!remoteVersion || !isNewerVersion(remoteVersion, BLITZKRIEG_LOCAL_VERSION)) return;
 
             var files = manifest.files || [];
-            debugLog('Update available: v' + remoteVersion + ' (current: v' + BLITZKRIEG_LOCAL_VERSION + ')', 'info');
+            if (!files.length) {
+                debugLog('Update v' + remoteVersion + ' available but no files in manifest', 'warn');
+                return;
+            }
 
-            // Track update check
+            debugLog('Auto-updating from GitHub: v' + BLITZKRIEG_LOCAL_VERSION + ' -> v' + remoteVersion + ' (' + files.length + ' files)', 'info');
             if (window.blitzkriegAnalytics) {
                 window.blitzkriegAnalytics.trackAccessChange(null, 'update_check', null);
             }
 
-            // Show update banner. We deliberately use textContent + addEventListener
-            // (NOT inline `onclick="..."` with JSON.stringify(files)) because the
-            // remoteVersion and files come from a Supabase RPC; injecting them into an
-            // HTML attribute string is an XSS-to-RCE vector — a backslash or unescaped
-            // quote in the manifest would let an attacker break out of the JS string
-            // literal context inside the onclick. Using DOM APIs keeps the data out of
-            // the parser entirely.
-            var app = document.getElementById('app');
-            if (!app || document.getElementById('blitz-update-banner')) return;
-            var banner = document.createElement('div');
-            banner.id = 'blitz-update-banner';
-            banner.className = 'update-banner';
-
-            var infoDiv = document.createElement('div');
-            infoDiv.className = 'update-banner-info';
-            infoDiv.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="flex-shrink:0"><path d="M8 1L1 15h14L8 1z" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M8 6v4M8 12h.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
-            var infoSpan = document.createElement('span');
-            // Build with textContent for the dynamic version string. The static prefix
-            // and the local version (a build constant) can stay as innerHTML for the
-            // <strong> wrapper. Use a fragment to keep the markup clean.
-            var localVersion = BLITZKRIEG_LOCAL_VERSION;
-            infoSpan.appendChild(document.createTextNode('Update available: '));
-            var strongVer = document.createElement('strong');
-            strongVer.textContent = 'v' + remoteVersion;
-            infoSpan.appendChild(strongVer);
-            infoSpan.appendChild(document.createTextNode(' (you have v' + localVersion + ')'));
-            infoDiv.appendChild(infoSpan);
-            banner.appendChild(infoDiv);
-
-            var actionsDiv = document.createElement('div');
-            actionsDiv.className = 'update-banner-actions';
-            var installBtn = document.createElement('button');
-            installBtn.className = 'update-banner-btn';
-            installBtn.textContent = 'Install & Reload';
-            installBtn.addEventListener('click', function() {
-                installUpdate(remoteVersion, files);
-            });
-            actionsDiv.appendChild(installBtn);
-
-            var dismissBtn = document.createElement('button');
-            dismissBtn.className = 'update-banner-dismiss';
-            dismissBtn.innerHTML = '&times;';
-            dismissBtn.addEventListener('click', function() {
-                banner.remove();
-            });
-            actionsDiv.appendChild(dismissBtn);
-            banner.appendChild(actionsDiv);
-
-            app.insertBefore(banner, app.firstChild);
+            _updateInProgress = true;
+            showUpdatingBanner(remoteVersion);
+            installUpdate(remoteVersion, files);
         }).catch(function(err) {
-            debugLog('Update check failed: ' + err.message, 'warn');
+            debugLog('Update check failed: ' + (err && err.message || err), 'warn');
         });
+    }
+
+    // Recheck for updates every 30 minutes — covers long-running sessions where
+    // the editor leaves AE open all day. First check still fires on auth-ready.
+    function startUpdateChecker() {
+        checkForUpdates();
+        setInterval(checkForUpdates, 30 * 60 * 1000);
     }
 
     /**
@@ -5918,9 +5944,6 @@
             debugLog('No files in update manifest', 'warn');
             return;
         }
-
-        var sb = window.blitzkriegSupabase;
-        if (!sb) return;
 
         // SECURITY: client-side validation of update file paths. Reject anything
         // containing parent-directory traversal, absolute paths, or weird leading
@@ -5985,40 +6008,25 @@
                 }
 
                 var fileName = fileList[idx];
-                var storagePath = version + '/' + fileName;
 
-                // Download from Supabase Storage
-                sb.storage.from('blitzkrieg-updates').download(storagePath).then(function(res) {
-                    if (res.error) {
-                        debugLog('Download failed: ' + fileName + ' — ' + res.error.message, 'error');
-                        failed++;
+                // Download directly from GitHub raw — no Supabase publish step.
+                fetch(ghRawUrl(fileName), { cache: 'no-store' }).then(function(res) {
+                    if (!res.ok) throw new Error('HTTP ' + res.status);
+                    return res.text();
+                }).then(function(text) {
+                    var localPath = rootPath + separator + fileName.replace(/\//g, separator);
+                    writeFileViaCep(localPath, text, function(err) {
+                        if (err) {
+                            debugLog('Write failed: ' + fileName + ' — ' + err.message, 'error');
+                            failed++;
+                        } else {
+                            completed++;
+                            debugLog('Updated: ' + fileName + ' (' + completed + '/' + fileList.length + ')', 'info');
+                        }
                         processFile(idx + 1);
-                        return;
-                    }
-
-                    // Read blob as text
-                    var reader = new FileReader();
-                    reader.onload = function() {
-                        var localPath = rootPath + separator + fileName.replace(/\//g, separator);
-                        writeFileViaCep(localPath, reader.result, function(err) {
-                            if (err) {
-                                debugLog('Write failed: ' + fileName + ' — ' + err.message, 'error');
-                                failed++;
-                            } else {
-                                completed++;
-                                debugLog('Updated: ' + fileName + ' (' + completed + '/' + fileList.length + ')', 'info');
-                            }
-                            processFile(idx + 1);
-                        });
-                    };
-                    reader.onerror = function() {
-                        debugLog('Read failed: ' + fileName, 'error');
-                        failed++;
-                        processFile(idx + 1);
-                    };
-                    reader.readAsText(res.data);
+                    });
                 }).catch(function(err) {
-                    debugLog('Download error: ' + fileName + ' — ' + err.message, 'error');
+                    debugLog('Download error: ' + fileName + ' — ' + (err && err.message || err), 'error');
                     failed++;
                     processFile(idx + 1);
                 });
@@ -6248,6 +6256,21 @@
         var sb = window.blitzkriegSupabase;
         if (!sb) return Promise.reject(new Error('No Supabase client'));
 
+        var _genStart = Date.now();
+        var _genName = comp.name || '';
+        function _reportGen(ok, err) {
+            if (window.blitzkriegAnalytics && window.blitzkriegAnalytics.trackGenerate) {
+                try {
+                    window.blitzkriegAnalytics.trackGenerate(
+                        _genName,
+                        ok === true,
+                        Date.now() - _genStart,
+                        ok ? null : (err && err.message ? err.message : String(err || 'unknown'))
+                    );
+                } catch (e) {}
+            }
+        }
+
         // Enqueue to prevent concurrent ExtendScript calls
         return _enqueueGeneration(function() {
         var tempDir, outputDir;
@@ -6428,11 +6451,13 @@
         }).then(function(result) {
             // Success: clean up temp dir and purge AE caches
             _cleanupTempDir(tempDir);
+            _reportGen(true);
             return result;
         }, function(err) {
             // Failure: log, clean up, re-throw so caller can count it
             debugLog('GEN FAIL [' + comp.name + ']: ' + err.message, 'error');
             _cleanupTempDir(tempDir);
+            _reportGen(false, err);
             throw err;
         });
         }); // end _enqueueGeneration
@@ -6617,8 +6642,8 @@
     // The auth module (auth.js) handles login/access and calls onBlitzkriegAuthReady when access is granted
     window.onBlitzkriegAuthReady = function () {
         masterInit();
-        // Check for OTA updates (non-blocking)
-        checkForUpdates();
+        // Auto OTA: install on detection + recheck every 30 min (non-blocking)
+        startUpdateChecker();
         // Track session start
         if (window.blitzkriegAnalytics) {
             window.blitzkriegAnalytics.trackSessionStart();
@@ -6640,6 +6665,15 @@
         if (window.blitzkriegAuth) {
             window.blitzkriegAuth.validateSession();
         }
+    });
+
+    // Auto-refresh grid when background manifest fetch finds new/removed templates.
+    // Eliminates the "I see 142 but there are actually 245" stale-cache bug.
+    window.addEventListener('blitzkrieg-library-changed', function (e) {
+        var detail = e && e.detail || {};
+        debugLog('Library changed (' + (detail.oldCount || '?') + ' -> ' + (detail.newCount || '?') + '), reloading grid', 'info');
+        if (!isLoading) loadLibrary();
+        else pendingLibraryReload = true;
     });
 
     // expose some internals for inline calls (keeps compatibility)

@@ -194,6 +194,39 @@
         track('session_end', {});
     }
 
+    // ---- Bulk ops, stash, generate ----
+
+    function trackBulkOp(action, count, targetIds) {
+        // action: 'bulk_delete' | 'bulk_move' | 'bulk_tag'
+        if (action !== 'bulk_delete' && action !== 'bulk_move' && action !== 'bulk_tag') return;
+        track(action, {
+            metadata: {
+                count: typeof count === 'number' ? count : 0,
+                target_ids: Array.isArray(targetIds) ? targetIds.slice(0, 200) : []
+            }
+        });
+    }
+
+    function trackStash(compName, category, storagePath, sizeBytes) {
+        track('stash_created', {
+            templateName: compName,
+            templateCategory: category,
+            storagePath: storagePath,
+            metadata: { size_bytes: typeof sizeBytes === 'number' ? sizeBytes : null }
+        });
+    }
+
+    function trackGenerate(templateName, success, durationMs, errorMsg) {
+        track('generate_run', {
+            templateName: templateName,
+            metadata: {
+                success: success === true,
+                duration_ms: typeof durationMs === 'number' ? durationMs : null,
+                error: errorMsg ? String(errorMsg).substring(0, 500) : null
+            }
+        });
+    }
+
     // Expose globally
     window.blitzkriegAnalytics = {
         trackImport: trackImport,
@@ -205,5 +238,8 @@
         trackSessionEnd: trackSessionEnd,
         reportError: reportError,
         trackAccessChange: trackAccessChange,
+        trackBulkOp: trackBulkOp,
+        trackStash: trackStash,
+        trackGenerate: trackGenerate,
     };
 })();

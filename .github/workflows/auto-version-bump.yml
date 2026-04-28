@@ -1,0 +1,66 @@
+name: Auto-bump panel version on push
+
+# Bumps the patch number in version.json + main.js + CSXS/manifest.xml on every
+# push to main that touches the panel source. Once this commit lands, installed
+# Blitzkrieg panels will detect the new version on their next 30-min OTA check
+# and silently pull the new files from GitHub raw.
+#
+# Skip the auto-bump by including [skip-bump] in the commit message, or by
+# pushing a commit that only touches the auto-bump-managed files.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'js/**'
+      - 'jsx/**'
+      - 'CSS/**'
+      - 'index.html'
+      - 'CSXS/manifest.xml'
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.event.head_commit.message, '[skip-bump]') && github.actor != 'github-actions[bot]' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump patch version everywhere
+        id: bump
+        run: |
+          set -euo pipefail
+          current=$(jq -r .version version.json)
+          IFS=. read -r maj min patch <<< "$current"
+          new="${maj}.${min}.$((patch + 1))"
+          echo "Old: $current  ->  New: $new"
+
+          # version.json
+          tmp=$(mktemp)
+          jq --arg v "$new" '.version = $v' version.json > "$tmp" && mv "$tmp" version.json
+
+          # js/main.js
+          sed -i -E "s/(BLITZKRIEG_LOCAL_VERSION = ')[^']+(')/\1${new}\2/" js/main.js
+
+          # CSXS/manifest.xml — both ExtensionBundleVersion and Extension Version
+          sed -i -E "s/(ExtensionBundleVersion=\")[^\"]+(\")/\1${new}\2/" CSXS/manifest.xml
+          sed -i -E "s/(<Extension Id=\"com\.blitzkrieg\.dominatemedia\" Version=\")[^\"]+(\")/\1${new}\2/" CSXS/manifest.xml
+
+          echo "new_version=$new" >> "$GITHUB_OUTPUT"
+
+      - name: Commit + push bump
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add version.json js/main.js CSXS/manifest.xml
+          if git diff --cached --quiet; then
+            echo "No version changes to commit"
+            exit 0
+          fi
+          git commit -m "chore(release): v${{ steps.bump.outputs.new_version }} [skip-bump]"
+          git push
