@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<ExtensionManifest Version="7.0" ExtensionBundleId="com.blitzkrieg.dominatemedia" ExtensionBundleVersion="1.2.5" ExtensionBundleName="Blitzkrieg by Dominate Media" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<ExtensionManifest Version="7.0" ExtensionBundleId="com.blitzkrieg.dominatemedia" ExtensionBundleVersion="1.2.6" ExtensionBundleName="Blitzkrieg by Dominate Media" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
     <ExtensionList>
-        <Extension Id="com.blitzkrieg.dominatemedia" Version="1.2.5" />
+        <Extension Id="com.blitzkrieg.dominatemedia" Version="1.2.6" />
     </ExtensionList>
     <ExecutionEnvironment>
         <HostList>
