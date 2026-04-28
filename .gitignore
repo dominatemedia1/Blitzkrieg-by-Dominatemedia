@@ -1,0 +1,6 @@
+.DS_Store
+dist/
+.tools/
+*.zxp
+*.p12
+node_modules/

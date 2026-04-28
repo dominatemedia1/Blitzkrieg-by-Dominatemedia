@@ -1,0 +1,76 @@
+name: Build + publish .zxp on tag
+
+# Triggered by every v* tag pushed by auto-version-bump.yml. Builds, signs, and
+# attaches a blitzkrieg.zxp installer to a GitHub Release. The Release is
+# tagged the same as the version tag (v1.2.7, v1.2.8, …) and the asset URL
+#   https://github.com/dominatemedia1/Blitzkrieg-by-Dominatemedia/releases/latest/download/blitzkrieg.zxp
+# is hardcoded in js/main.js as the manual-reinstall escape hatch when an OTA
+# update is stuck.
+#
+# Required repo secrets:
+#   ZXP_CERT_P12_BASE64  — base64-encoded .p12 signing cert
+#   ZXP_CERT_PASSWORD    — password for the .p12
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # macOS only — Adobe never shipped a Linux build of ZXPSignCmd. macOS
+    # runners are slower than Ubuntu but this workflow only fires once per
+    # release tag, so cost is negligible.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Restore signing cert from secret
+        env:
+          P12_B64: ${{ secrets.ZXP_CERT_P12_BASE64 }}
+          P12_PW:  ${{ secrets.ZXP_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p .tools
+          if [[ -z "${P12_B64:-}" || -z "${P12_PW:-}" ]]; then
+            echo "!! Missing ZXP_CERT_P12_BASE64 / ZXP_CERT_PASSWORD secrets — falling back to a fresh self-signed cert."
+            echo "   First-run editors must have PlayerDebugMode enabled (already required for dev installs)."
+          else
+            echo "$P12_B64" | base64 -d > .tools/blitzkrieg.p12
+          fi
+
+      - name: Build + sign .zxp
+        env:
+          P12_PW: ${{ secrets.ZXP_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          chmod +x scripts/build-zxp.sh
+          if [[ -f .tools/blitzkrieg.p12 && -n "${P12_PW:-}" ]]; then
+            ./scripts/build-zxp.sh dist/blitzkrieg.zxp .tools/blitzkrieg.p12 "$P12_PW"
+          else
+            ./scripts/build-zxp.sh dist/blitzkrieg.zxp
+          fi
+          ls -la dist/
+
+      - name: Attach .zxp to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/blitzkrieg.zxp
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          body: |
+            Blitzkrieg AE panel installer.
+
+            ### Install
+            1. Download `blitzkrieg.zxp` below.
+            2. Open it with the [Anastasiy ZXP Installer](https://install.anastasiy.com/) (free) — or any CEP-aware installer.
+            3. Restart After Effects.
+
+            ### Recover from a stuck auto-update
+            If your panel is stuck on "Auto-updating to vX… panel will reload automatically", click **Reinstall manually** in the panel banner (or visit this page directly), download the .zxp, and reinstall. After installing this signed build, future OTA bumps are silent again.
