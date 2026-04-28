@@ -58,7 +58,7 @@ jobs:
 
           echo "new_version=$new" >> "$GITHUB_OUTPUT"
 
-      - name: Commit + push bump
+      - name: Commit + push bump + tag
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
@@ -67,5 +67,10 @@ jobs:
             echo "No version changes to commit"
             exit 0
           fi
-          git commit -m "chore(release): v${{ steps.bump.outputs.new_version }} [skip-bump]"
+          new="${{ steps.bump.outputs.new_version }}"
+          git commit -m "chore(release): v${new} [skip-bump]"
+          # Tag the bump commit so release-zxp.yml fires on `push: tags: 'v*'`
+          # and attaches the signed installer to a GitHub Release.
+          git tag "v${new}"
           git push
+          git push origin "v${new}"

@@ -197,6 +197,44 @@ Detailed documentation lives in the Obsidian Brain vault at `~/Documents/Brain/`
 <!-- MANUAL -->
 ## Custom Notes
 
-Add project-specific notes here. This section is never auto-modified.
+### OTA stuck-update recovery (Phase 1+2 of fix/ota-stuck-recovery-2026-04-28)
+
+Three protections guard against a hung "Auto-updating to vX…" banner:
+
+1. **120 s watchdog** in `js/main.js`: any movement on `setUpdateBannerStatus` resets the deadline; total silence for 120 s trips `_failUpdate`.
+2. **Persistent failed-record** at `localStorage["blitzkrieg_update_failed"]`: `{version, attempts, lastError, ts}`. Survives panel reload so a broken release does not auto-retry every 30 min indefinitely.
+3. **Stuck banner** after `MAX_UPDATE_ATTEMPTS = 3` failures: shows "Reinstall manually" (opens `ZXP_DOWNLOAD_URL`) + "Try anyway" (clears record, retries).
+
+Console helpers exposed on `window`:
+- `__blitzCheckForUpdates()` — clears failure record + force-checks now
+- `__blitzClearUpdateFailure()` — wipes the record only
+- `__blitzGetUpdateFailure()` — read current record
+- `__blitzInstallUpdate(version, fileList)` — manually trigger install
+
+Telemetry events: `update_check`, `update_started`, `update_completed`, `update_failed`, `update_stuck`.
+
+### .zxp release pipeline
+
+`auto-version-bump.yml` pushes `v<X.Y.Z>` tag after every patch bump → `release-zxp.yml` builds a signed `.zxp` and attaches it to a GitHub Release. Asset URL is stable: `https://github.com/dominatemedia1/Blitzkrieg-by-Dominatemedia/releases/latest/download/blitzkrieg.zxp`. This URL is hardcoded into `js/main.js` as `ZXP_DOWNLOAD_URL`.
+
+**Local build:** `./scripts/build-zxp.sh` — first run downloads `ZXPSignCmd` to `.tools/` and generates a self-signed cert at `.tools/blitzkrieg-selfsigned.p12` with password `blitzkrieg`. Output: `dist/blitzkrieg.zxp`.
+
+**CI signing cert:** stored as repo secrets `ZXP_CERT_P12_BASE64` (base64-encoded .p12) and `ZXP_CERT_PASSWORD`. Generate once with:
+```bash
+./scripts/build-zxp.sh                     # produces .tools/blitzkrieg-selfsigned.p12
+base64 -i .tools/blitzkrieg-selfsigned.p12 # paste into ZXP_CERT_P12_BASE64
+# password is the third arg or the literal "blitzkrieg" if you used the default
+```
+If secrets are missing the workflow falls back to a fresh self-signed cert per build — installs require `defaults write com.adobe.CSXS.11 PlayerDebugMode 1` (already required for dev installs). For production-grade installs without PlayerDebugMode, replace the self-signed cert with one from a CA Adobe trusts.
+
+### Editor recovery checklist (panel stuck on auto-update)
+
+1. Click **Reinstall manually** in the banner.
+2. Browser opens to the latest GitHub Release.
+3. Download `blitzkrieg.zxp`.
+4. Quit AE → install via Anastasiy ZXP Installer (free) → reopen AE.
+5. After this, every future OTA bump is silent.
+
+If banner is missing: in DevTools console (Help → Debug Extension), run `__blitzClearUpdateFailure(); __blitzCheckForUpdates();` to force a fresh attempt.
 
 <!-- END MANUAL -->

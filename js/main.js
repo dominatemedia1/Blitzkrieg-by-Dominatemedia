@@ -5861,11 +5861,59 @@
     }
 
     var _updateInProgress = false;
-    var _lastFailedVersion = null; // skip auto-retry for a version that already failed this session
+    var _updateWatchdog = null; // setTimeout handle — fires _failUpdate if the install hangs silently
+
+    // Persistent failed-version record. Survives panel reload so a release that
+    // fails to install (e.g. UTF-8 mangle, network blocked, ZXP host bug) does
+    // NOT auto-retry every 30 min indefinitely. After MAX_UPDATE_ATTEMPTS the
+    // editor is shown a manual-reinstall banner instead.
+    //   { version: '1.2.7', attempts: 2, lastError: '...', ts: 1730000000000 }
+    var FAILED_RECORD_KEY = 'blitzkrieg_update_failed';
+    var MAX_UPDATE_ATTEMPTS = 3;
+    var INSTALL_WATCHDOG_MS = 120000; // banner can never silently spin past this
+    // Stable redirect URL — Phase 3 GitHub Action attaches blitzkrieg.zxp to a
+    // Release tagged v<version> on every push. /releases/latest/download/<asset>
+    // always resolves to the freshest signed installer.
+    var ZXP_DOWNLOAD_URL = 'https://github.com/dominatemedia1/Blitzkrieg-by-Dominatemedia/releases/latest/download/blitzkrieg.zxp';
+
+    function loadFailedRecord() {
+        try { return JSON.parse(localStorage.getItem(FAILED_RECORD_KEY) || 'null'); }
+        catch (e) { return null; }
+    }
+    function saveFailedRecord(rec) {
+        try { localStorage.setItem(FAILED_RECORD_KEY, JSON.stringify(rec)); } catch (e) {}
+    }
+    function clearFailedRecord() {
+        try { localStorage.removeItem(FAILED_RECORD_KEY); } catch (e) {}
+    }
+    function recordFailedAttempt(version, errMsg) {
+        var rec = loadFailedRecord();
+        if (!rec || rec.version !== version) {
+            rec = { version: version, attempts: 1, lastError: errMsg || '', ts: Date.now() };
+        } else {
+            rec.attempts = (rec.attempts || 0) + 1;
+            rec.lastError = errMsg || '';
+            rec.ts = Date.now();
+        }
+        saveFailedRecord(rec);
+        return rec;
+    }
+
+    function _kickWatchdog(version) {
+        if (_updateWatchdog) clearTimeout(_updateWatchdog);
+        _updateWatchdog = setTimeout(function() {
+            _updateWatchdog = null;
+            if (_updateInProgress) _failUpdate(version, 'install hung past ' + Math.round(INSTALL_WATCHDOG_MS / 1000) + 's');
+        }, INSTALL_WATCHDOG_MS);
+    }
+    function _clearWatchdog() {
+        if (_updateWatchdog) { clearTimeout(_updateWatchdog); _updateWatchdog = null; }
+    }
 
     function _removeUpdateBanner() {
         var existing = document.getElementById('blitz-update-banner');
         if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
+        _clearWatchdog();
     }
 
     function showUpdatingBanner(version) {
@@ -5875,6 +5923,7 @@
         var banner = document.createElement('div');
         banner.id = 'blitz-update-banner';
         banner.className = 'update-banner';
+        banner.dataset.version = version;
 
         var infoDiv = document.createElement('div');
         infoDiv.className = 'update-banner-info';
@@ -5891,11 +5940,17 @@
         infoDiv.appendChild(infoSpan);
         banner.appendChild(infoDiv);
         app.insertBefore(banner, app.firstChild);
+        _kickWatchdog(version);
     }
 
     function setUpdateBannerStatus(text) {
         var s = document.getElementById('blitz-update-status');
         if (s) s.textContent = '… ' + text;
+        // Movement = alive — push the deadline forward on every status change.
+        var banner = document.getElementById('blitz-update-banner');
+        if (banner && banner.dataset && banner.dataset.version) {
+            _kickWatchdog(banner.dataset.version);
+        }
     }
 
     function showUpdateErrorBanner(version, errMsg) {
@@ -5919,7 +5974,6 @@
         retry.style.cssText = 'margin-left:8px;padding:4px 10px;font-size:12px';
         retry.textContent = 'Retry';
         retry.onclick = function() {
-            _lastFailedVersion = null;
             _updateInProgress = false;
             checkForUpdates(true);
         };
@@ -5927,6 +5981,64 @@
         infoDiv.appendChild(msg);
         banner.appendChild(infoDiv);
         app.insertBefore(banner, app.firstChild);
+    }
+
+    // Sticky banner shown when a version has failed >= MAX_UPDATE_ATTEMPTS times.
+    // Surfaces a one-click manual reinstall path (Phase 3 GH Release ZXP) and a
+    // "Try anyway" escape hatch that resets the counter.
+    function showStuckBanner(version, errMsg) {
+        _removeUpdateBanner();
+        var app = document.getElementById('app');
+        if (!app) return;
+        var banner = document.createElement('div');
+        banner.id = 'blitz-update-banner';
+        banner.className = 'update-banner update-banner-error';
+
+        var infoDiv = document.createElement('div');
+        infoDiv.className = 'update-banner-info';
+        var icon = document.createElement('span');
+        icon.style.cssText = 'flex-shrink:0;width:16px;height:16px;display:inline-flex;align-items:center;justify-content:center';
+        icon.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM8 4.5v4M8 10.5v.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+        infoDiv.appendChild(icon);
+        var msg = document.createElement('span');
+        var detail = errMsg ? ' (last error: ' + errMsg + ')' : '';
+        msg.appendChild(document.createTextNode('Auto-update to v' + version + ' keeps failing' + detail + '. Reinstall manually to recover.'));
+
+        var reinstall = document.createElement('button');
+        reinstall.className = 'button-primary';
+        reinstall.style.cssText = 'margin-left:8px;padding:4px 10px;font-size:12px';
+        reinstall.textContent = 'Reinstall manually';
+        reinstall.onclick = function() {
+            try {
+                if (typeof cep !== 'undefined' && cep.util && cep.util.openURLInDefaultBrowser) {
+                    cep.util.openURLInDefaultBrowser(ZXP_DOWNLOAD_URL);
+                } else {
+                    window.open(ZXP_DOWNLOAD_URL, '_blank');
+                }
+            } catch (e) {
+                window.open(ZXP_DOWNLOAD_URL, '_blank');
+            }
+        };
+        msg.appendChild(reinstall);
+
+        var tryAnyway = document.createElement('button');
+        tryAnyway.className = 'button-secondary';
+        tryAnyway.style.cssText = 'margin-left:6px;padding:4px 10px;font-size:12px';
+        tryAnyway.textContent = 'Try anyway';
+        tryAnyway.onclick = function() {
+            clearFailedRecord();
+            _updateInProgress = false;
+            checkForUpdates(true);
+        };
+        msg.appendChild(tryAnyway);
+
+        infoDiv.appendChild(msg);
+        banner.appendChild(infoDiv);
+        app.insertBefore(banner, app.firstChild);
+
+        if (window.blitzkriegAnalytics) {
+            window.blitzkriegAnalytics.trackAccessChange(null, 'update_stuck', null);
+        }
     }
 
     function checkForUpdates(force) {
@@ -5943,9 +6055,19 @@
         }).then(function(manifest) {
             var remoteVersion = manifest && manifest.version;
             if (!remoteVersion || !isNewerVersion(remoteVersion, BLITZKRIEG_LOCAL_VERSION)) return;
-            if (!force && _lastFailedVersion === remoteVersion) {
-                // Avoid hammering the same broken version every 30 min
-                return;
+
+            // Persistent retry cap. Three failed installs of the SAME version
+            // means something is wrong on this machine that more retries won't
+            // fix — surface manual reinstall instead of looping forever.
+            var failed = loadFailedRecord();
+            if (failed && failed.version === remoteVersion && failed.attempts >= MAX_UPDATE_ATTEMPTS) {
+                if (force) {
+                    // User explicitly clicked Retry from the error banner — let them try.
+                } else {
+                    debugLog('Update v' + remoteVersion + ' suppressed: ' + failed.attempts + ' prior failures. Showing stuck banner.', 'warn');
+                    showStuckBanner(remoteVersion, failed.lastError);
+                    return;
+                }
             }
 
             var files = manifest.files || [];
@@ -6210,6 +6332,10 @@
                         if (window.blitzkriegAnalytics) {
                             window.blitzkriegAnalytics.trackAccessChange(null, 'update_completed', null);
                         }
+                        // Wipe the persistent failure record so the post-reload
+                        // panel boots with a clean slate.
+                        clearFailedRecord();
+                        _clearWatchdog();
                         setUpdateBannerStatus('reloading');
                         // CEP shares one ExtendScript context per extension — it survives
                         // panel reloads, so the just-written hostscript.jsx still points
@@ -6260,18 +6386,25 @@
         if (window.blitzkriegAnalytics) {
             window.blitzkriegAnalytics.trackAccessChange(null, 'update_failed', null);
         }
-        _lastFailedVersion = version;
+        _clearWatchdog();
+        var rec = recordFailedAttempt(version, errMsg);
         _updateInProgress = false;
-        showUpdateErrorBanner(version, errMsg);
+        if (rec.attempts >= MAX_UPDATE_ATTEMPTS) {
+            showStuckBanner(version, errMsg);
+        } else {
+            showUpdateErrorBanner(version, errMsg);
+        }
     }
 
     // Expose for banner button + manual retry from console
     window.__blitzInstallUpdate = installUpdate;
     window.__blitzCheckForUpdates = function() {
-        _lastFailedVersion = null;
+        clearFailedRecord();
         _updateInProgress = false;
         checkForUpdates(true);
     };
+    window.__blitzClearUpdateFailure = clearFailedRecord;
+    window.__blitzGetUpdateFailure = loadFailedRecord;
 
     /* --------- Cloud Thumbnail + Preview Generation --------- */
 
