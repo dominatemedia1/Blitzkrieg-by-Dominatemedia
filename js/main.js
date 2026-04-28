@@ -1054,10 +1054,12 @@
         var cancelBtn = document.getElementById('inline-new-category-cancel');
         if (!container || !toggleBtn || !form || !input || !saveBtn || !cancelBtn) return;
 
-        // Show only for admins
+        // Visible to any signed-in user — non-admins can create + rename
+        // categories (delete still admin-only). If the user lacks
+        // blitzkrieg_access the panel never renders, so getUser() is enough.
         function updateVisibility() {
-            var isAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
-            container.style.display = isAdmin ? '' : 'none';
+            var hasAccess = window.blitzkriegAuth && window.blitzkriegAuth.getUser && !!window.blitzkriegAuth.getUser();
+            container.style.display = hasAccess ? '' : 'none';
         }
         updateVisibility();
         // Re-check on auth changes
@@ -1090,9 +1092,8 @@
                 showToast(nameErr, true);
                 return;
             }
-            createCategory._running = true;
-            if (saveBtn) saveBtn.disabled = true;
-            // Check if category already exists
+            // Check if category already exists — do this BEFORE setting
+            // _running so a duplicate name doesn't soft-lock the form.
             var existing = allComps.some(function(c) { return c.category.toLowerCase() === name.toLowerCase(); });
             if (existing) {
                 showToast('Category "' + name + '" already exists.', true);
@@ -1105,6 +1106,8 @@
                 return;
             }
 
+            createCategory._running = true;
+            if (saveBtn) saveBtn.disabled = true;
             showToast('Creating category "' + name + '"...');
             // Upload a placeholder file to create the folder in Supabase storage
             var placeholder = new Blob([''], { type: 'text/plain' });
@@ -1301,10 +1304,12 @@
             }
         }
 
-        // Render categories in the sidebar — only admins see rename/delete buttons.
+        // Render categories in the sidebar — rename is open to any signed-in
+        // user (non-admins can re-organise), delete stays admin-only.
         // Pre-compute category counts in a single O(n) pass instead of O(categories × allComps)
         // (the previous nested filter was the dominant cost when re-rendering 248 comps).
         var sidebarIsAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
+        var sidebarSignedIn = window.blitzkriegAuth && window.blitzkriegAuth.getUser && !!window.blitzkriegAuth.getUser();
         var _categoryCounts = {};
         for (var _cci = 0; _cci < allComps.length; _cci++) {
             var _ccCat = allComps[_cci].category;
@@ -1314,15 +1319,18 @@
             var safeCat = escapeHTML(cat);
             var count = _categoryCounts[cat] || 0;
             var isActive = cat === activeCategory;
-            var actionBtns = sidebarIsAdmin ? (
-                '<div class="nav-item-actions">' +
-                    '<button class="nav-action-btn rename-category-btn" title="Rename category">' +
-                        '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>' +
-                    '</button>' +
-                    '<button class="nav-action-btn delete-category-btn" title="Delete category">' +
-                        '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>' +
-                    '</button>' +
-                '</div>'
+            var renameBtnHtml = sidebarSignedIn ? (
+                '<button class="nav-action-btn rename-category-btn" title="Rename category">' +
+                    '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>' +
+                '</button>'
+            ) : '';
+            var deleteBtnHtml = sidebarIsAdmin ? (
+                '<button class="nav-action-btn delete-category-btn" title="Delete category">' +
+                    '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>' +
+                '</button>'
+            ) : '';
+            var actionBtns = (renameBtnHtml || deleteBtnHtml) ? (
+                '<div class="nav-item-actions">' + renameBtnHtml + deleteBtnHtml + '</div>'
             ) : '';
             return '<div class="nav-item' + (isActive ? ' active' : '') + '" data-category="' + safeCat + '" draggable="false">' +
                 '<svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
@@ -2314,11 +2322,11 @@
         existingCategorySelect.disabled = categories.length === 0;
         if (categories.length === 0) { existingCategorySelect.innerHTML = '<option value="">No categories yet</option>'; }
         newCategoryInput.value = '';
-        // Only admins can create new categories
+        // Any signed-in user can create new categories (delete still admin-only)
         var newCatGroup = newCategoryInput.closest('.form-group');
         if (newCatGroup) {
-            var addIsAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
-            newCatGroup.style.display = addIsAdmin ? '' : 'none';
+            var addSignedIn = window.blitzkriegAuth && window.blitzkriegAuth.getUser && !!window.blitzkriegAuth.getUser();
+            newCatGroup.style.display = addSignedIn ? '' : 'none';
         }
         addCompModal.style.display = 'flex';
     }
@@ -2989,8 +2997,10 @@
      * Executes the category rename
      */
     function executeCategoryRename() {
-        if (!window.blitzkriegAuth || !window.blitzkriegAuth.isAdmin()) {
-            showToast('You do not have permission to rename categories.', true);
+        // Renaming is open to any signed-in user (storage RLS still enforces
+        // blitzkrieg_access). Delete stays admin-only further down.
+        if (!window.blitzkriegAuth || !window.blitzkriegAuth.getUser || !window.blitzkriegAuth.getUser()) {
+            showToast('Not signed in.', true);
             renameCategoryModal.style.display = 'none';
             return;
         }

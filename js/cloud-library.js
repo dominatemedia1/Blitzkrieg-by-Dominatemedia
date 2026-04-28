@@ -61,7 +61,11 @@
     // mutation (debounced). Subsequent cold loads (new users, cache-cleared
     // users) go from ~5s → <500ms.
     var MANIFEST_KEY = '_blitzkrieg_manifest.json';
-    var MANIFEST_TTL_MS = 30 * 60 * 1000; // 30 minutes — stale manifests trigger rebuild
+    // 5 min TTL — was 30 min, but submissions approved by admins or templates
+    // added outside the panel (Supabase dashboard, scripts) don't always trigger
+    // invalidateManifest(), so users could see a stale list for up to 30 min.
+    // Shorter TTL bounds drift without giving up the cold-load speedup.
+    var MANIFEST_TTL_MS = 5 * 60 * 1000;
 
     async function fetchManifest() {
         try {
