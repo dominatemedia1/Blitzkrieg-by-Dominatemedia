@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# publish-update.sh — Push current panel files to Supabase OTA bucket and bump
-# blitzkrieg_config.current_version so installed panels auto-update on next
-# auth-ready check (or 30-min recheck interval).
+# publish-update.sh — DEPRECATED as of v1.2.3.
+#
+# Panels now pull updates directly from GitHub raw (see version.json + the
+# `auto-version-bump.yml` workflow). Push to main = panels update. No publish
+# step needed.
+#
+# This script is kept as a fallback for emergencies (e.g. GitHub raw outage):
+# it mirrors the current files into the legacy Supabase OTA bucket.
 #
 # Usage: ./scripts/publish-update.sh <version>
 #   ./scripts/publish-update.sh 1.2.2

@@ -1,0 +1,13 @@
+{
+  "version": "1.2.3",
+  "files": [
+    "js/main.js",
+    "js/cloud-library.js",
+    "js/auth.js",
+    "js/analytics.js",
+    "js/telemetry.js",
+    "jsx/hostscript.jsx",
+    "CSS/style.css",
+    "index.html"
+  ]
+}

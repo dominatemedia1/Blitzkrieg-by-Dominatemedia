@@ -3,7 +3,7 @@
     'use strict';
 
     var csInterface = new CSInterface();
-    var BLITZKRIEG_LOCAL_VERSION = '1.2.2';
+    var BLITZKRIEG_LOCAL_VERSION = '1.2.3';
 
     // CEP bridge detection — window.__adobe_cep__ is the native bridge to ExtendScript.
     // csInterface.evalScript is always a function (prototype), but it THROWS if __adobe_cep__ is missing.
@@ -5819,7 +5819,24 @@
         }
     }
 
-    /* --------- OTA Live Update System --------- */
+    /* --------- OTA Live Update System (GitHub raw) --------- */
+
+    // Source of truth: a public GitHub repo. The panel polls
+    //   https://raw.githubusercontent.com/<owner>/<repo>/<branch>/version.json
+    // on auth-ready and every 30 min. If `version` is newer than this build's
+    // BLITZKRIEG_LOCAL_VERSION constant, all listed files are downloaded from
+    // the same repo+branch and written to the extension dir, then the panel
+    // reloads. Push to main = panels update. No publish step.
+    var GH_OWNER = 'dominatemedia1';
+    var GH_REPO  = 'Blitzkrieg-by-Dominatemedia';
+    var GH_BRANCH = 'main';
+    function ghRawUrl(path) {
+        // Cache-bust with a per-check timestamp so GitHub's CDN doesn't serve
+        // a stale version.json or stale file bytes (raw.githubusercontent.com
+        // caches for ~5 min).
+        return 'https://raw.githubusercontent.com/' + GH_OWNER + '/' + GH_REPO + '/' + GH_BRANCH + '/' + path
+            + '?_=' + Date.now();
+    }
 
     function isNewerVersion(remote, local) {
         var rParts = String(remote).split('.').map(Number);
@@ -5857,14 +5874,13 @@
     }
 
     function checkForUpdates() {
-        var sb = window.blitzkriegSupabase;
-        if (!sb) return;
         if (_updateInProgress) return;
 
-        sb.rpc('get_blitzkrieg_update_manifest').then(function(res) {
-            if (res.error || !res.data) return;
-            var manifest = res.data;
-            var remoteVersion = manifest.current_version;
+        fetch(ghRawUrl('version.json'), { cache: 'no-store' }).then(function(res) {
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            return res.json();
+        }).then(function(manifest) {
+            var remoteVersion = manifest && manifest.version;
             if (!remoteVersion || !isNewerVersion(remoteVersion, BLITZKRIEG_LOCAL_VERSION)) return;
 
             var files = manifest.files || [];
@@ -5873,7 +5889,7 @@
                 return;
             }
 
-            debugLog('Auto-updating: v' + BLITZKRIEG_LOCAL_VERSION + ' -> v' + remoteVersion + ' (' + files.length + ' files)', 'info');
+            debugLog('Auto-updating from GitHub: v' + BLITZKRIEG_LOCAL_VERSION + ' -> v' + remoteVersion + ' (' + files.length + ' files)', 'info');
             if (window.blitzkriegAnalytics) {
                 window.blitzkriegAnalytics.trackAccessChange(null, 'update_check', null);
             }
@@ -5882,7 +5898,7 @@
             showUpdatingBanner(remoteVersion);
             installUpdate(remoteVersion, files);
         }).catch(function(err) {
-            debugLog('Update check failed: ' + err.message, 'warn');
+            debugLog('Update check failed: ' + (err && err.message || err), 'warn');
         });
     }
 
@@ -5928,9 +5944,6 @@
             debugLog('No files in update manifest', 'warn');
             return;
         }
-
-        var sb = window.blitzkriegSupabase;
-        if (!sb) return;
 
         // SECURITY: client-side validation of update file paths. Reject anything
         // containing parent-directory traversal, absolute paths, or weird leading
@@ -5995,40 +6008,25 @@
                 }
 
                 var fileName = fileList[idx];
-                var storagePath = version + '/' + fileName;
 
-                // Download from Supabase Storage
-                sb.storage.from('blitzkrieg-updates').download(storagePath).then(function(res) {
-                    if (res.error) {
-                        debugLog('Download failed: ' + fileName + ' — ' + res.error.message, 'error');
-                        failed++;
+                // Download directly from GitHub raw — no Supabase publish step.
+                fetch(ghRawUrl(fileName), { cache: 'no-store' }).then(function(res) {
+                    if (!res.ok) throw new Error('HTTP ' + res.status);
+                    return res.text();
+                }).then(function(text) {
+                    var localPath = rootPath + separator + fileName.replace(/\//g, separator);
+                    writeFileViaCep(localPath, text, function(err) {
+                        if (err) {
+                            debugLog('Write failed: ' + fileName + ' — ' + err.message, 'error');
+                            failed++;
+                        } else {
+                            completed++;
+                            debugLog('Updated: ' + fileName + ' (' + completed + '/' + fileList.length + ')', 'info');
+                        }
                         processFile(idx + 1);
-                        return;
-                    }
-
-                    // Read blob as text
-                    var reader = new FileReader();
-                    reader.onload = function() {
-                        var localPath = rootPath + separator + fileName.replace(/\//g, separator);
-                        writeFileViaCep(localPath, reader.result, function(err) {
-                            if (err) {
-                                debugLog('Write failed: ' + fileName + ' — ' + err.message, 'error');
-                                failed++;
-                            } else {
-                                completed++;
-                                debugLog('Updated: ' + fileName + ' (' + completed + '/' + fileList.length + ')', 'info');
-                            }
-                            processFile(idx + 1);
-                        });
-                    };
-                    reader.onerror = function() {
-                        debugLog('Read failed: ' + fileName, 'error');
-                        failed++;
-                        processFile(idx + 1);
-                    };
-                    reader.readAsText(res.data);
+                    });
                 }).catch(function(err) {
-                    debugLog('Download error: ' + fileName + ' — ' + err.message, 'error');
+                    debugLog('Download error: ' + fileName + ' — ' + (err && err.message || err), 'error');
                     failed++;
                     processFile(idx + 1);
                 });
