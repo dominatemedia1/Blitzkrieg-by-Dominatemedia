@@ -875,13 +875,55 @@
             }
         });
 
-        // Refresh Library action
+        // Refresh Library action — uses forceReload() so a deliberate user
+        // click ALWAYS clears every cache layer (in-memory signed URLs,
+        // localStorage metadata, cloud manifest) and fetches fresh. This is
+        // the recovery path when the grid is undercounting templates.
         if (dropdownRefresh) {
             dropdownRefresh.addEventListener('click', function(e) {
                 e.preventDefault();
                 dropdownContainer.classList.remove('open');
-                loadLibrary();
-                showToast('Library refreshed.');
+                if (isLoading) {
+                    pendingLibraryReload = true;
+                    showToast('Already loading...');
+                    return;
+                }
+                showToast('Reloading library from cloud...');
+                isLoading = true;
+                showSpinner();
+                var t0 = Date.now();
+                // Drain any pendingLibraryReload that focus events queued
+                // while forceReload was running — without this the flag
+                // could get stuck `true` indefinitely (loadLibrary checks
+                // it inside its own success/fail handlers, which never
+                // run if loadLibrary itself isn't called).
+                function _drainPending() {
+                    if (pendingLibraryReload) {
+                        pendingLibraryReload = false;
+                        loadLibrary();
+                    }
+                }
+                window.cloudLibrary.forceReload().then(function (comps) {
+                    var elapsed = Date.now() - t0;
+                    debugLog('forceReload: ' + comps.length + ' templates in ' + elapsed + 'ms', 'success');
+                    allComps = comps;
+                    _invalidateCategoryCache();
+                    if (activeCategory === '__analytics') { renderCategories(); renderAnalyticsDashboard(); }
+                    else if (activeCategory.indexOf('__submissions_') === 0) { renderCategories(); renderSubmissionsGrid(activeCategory.replace('__submissions_', '')); }
+                    else if (activeCategory === '__review_pending') { renderCategories(); renderSubmissionsGrid('pending_review'); }
+                    else { renderUI(); }
+                    hideSpinner();
+                    isLoading = false;
+                    updateAdminBarLabel();
+                    showToast('Library reloaded — ' + comps.length + ' templates.');
+                    _drainPending();
+                }).catch(function (err) {
+                    debugLog('forceReload failed: ' + (err && err.message || err), 'error');
+                    showToast('Reload failed: ' + (err && err.message || 'unknown'), true);
+                    hideSpinner();
+                    isLoading = false;
+                    _drainPending();
+                });
             });
         }
 
@@ -7049,6 +7091,25 @@
         debugLog('Library changed (' + (detail.oldCount || '?') + ' -> ' + (detail.newCount || '?') + '), reloading grid', 'info');
         if (!isLoading) loadLibrary();
         else pendingLibraryReload = true;
+    });
+
+    // Surface category-list failures to the user. Without this, an editor whose
+    // bucket has a category that times out on Supabase storage just silently
+    // sees fewer templates than reality.
+    var _lastPartialToastTs = 0;
+    window.addEventListener('blitzkrieg-library-partial', function (e) {
+        var detail = e && e.detail || {};
+        var failed = detail.failedCategories || [];
+        if (!failed.length) return;
+        debugLog('Library PARTIAL load — categories failed: [' + failed.join(', ') + ']', 'error');
+        // Throttle: never show this toast more than once per 30s.
+        var now = Date.now();
+        if (now - _lastPartialToastTs < 30000) return;
+        _lastPartialToastTs = now;
+        var label = failed.length === 1
+            ? 'Category "' + failed[0] + '" failed to load'
+            : failed.length + ' categories failed to load: ' + failed.join(', ');
+        showToast(label + '. Click Refresh Library to retry.', true);
     });
 
     // expose some internals for inline calls (keeps compatibility)
