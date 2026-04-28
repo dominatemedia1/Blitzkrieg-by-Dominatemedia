@@ -31,16 +31,14 @@ mkdir -p "$REPO_ROOT/.tools" "$(dirname "$OUT_ZXP")"
 # ---- 1. Acquire ZXPSignCmd ----------------------------------------------------
 ZXP_TOOL="$REPO_ROOT/.tools/ZXPSignCmd"
 if [[ ! -x "$ZXP_TOOL" ]]; then
-  echo "==> Downloading ZXPSignCmd..."
+  echo "==> Downloading ZXPSignCmd 4.1.3..."
   case "$(uname -s)" in
     Darwin)
-      URL="https://github.com/Adobe-CEP/CEP-Resources/raw/master/ZXPSignCMD/4.1.1/mac64/ZXPSignCmd"
-      ;;
-    Linux)
-      URL="https://github.com/Adobe-CEP/CEP-Resources/raw/master/ZXPSignCMD/4.1.1/linux64/ZXPSignCmd"
+      URL="https://github.com/Adobe-CEP/CEP-Resources/raw/master/ZXPSignCMD/4.1.3/macOS/ZXPSignCmd"
       ;;
     *)
-      echo "!! Unsupported OS: $(uname -s). Provide ZXPSignCmd at $ZXP_TOOL manually." >&2
+      # Adobe never shipped a Linux build of ZXPSignCmd; CI must run on macOS.
+      echo "!! ZXPSignCmd has no Linux binary. Run on macOS (use 'runs-on: macos-latest' in CI)." >&2
       exit 1
       ;;
   esac

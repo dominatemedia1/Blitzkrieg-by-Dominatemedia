@@ -21,7 +21,10 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # macOS only — Adobe never shipped a Linux build of ZXPSignCmd. macOS
+    # runners are slower than Ubuntu but this workflow only fires once per
+    # release tag, so cost is negligible.
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
         with:
