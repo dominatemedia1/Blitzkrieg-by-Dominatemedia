@@ -3972,6 +3972,19 @@ body.debug-panel-open #app {
     color: var(--text-primary);
 }
 
+.update-banner.update-banner-error {
+    background: rgba(248, 113, 113, 0.08);
+    border-color: var(--error);
+}
+
+.update-banner.update-banner-error .update-banner-info {
+    color: var(--error);
+}
+
+.update-banner.update-banner-error svg {
+    color: var(--error);
+}
+
 @keyframes blitz-spin {
     to { transform: rotate(360deg); }
 }

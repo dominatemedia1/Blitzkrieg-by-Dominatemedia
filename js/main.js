@@ -5861,10 +5861,17 @@
     }
 
     var _updateInProgress = false;
+    var _lastFailedVersion = null; // skip auto-retry for a version that already failed this session
+
+    function _removeUpdateBanner() {
+        var existing = document.getElementById('blitz-update-banner');
+        if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
+    }
 
     function showUpdatingBanner(version) {
+        _removeUpdateBanner();
         var app = document.getElementById('app');
-        if (!app || document.getElementById('blitz-update-banner')) return;
+        if (!app) return;
         var banner = document.createElement('div');
         banner.id = 'blitz-update-banner';
         banner.className = 'update-banner';
@@ -5877,14 +5884,58 @@
         var strongVer = document.createElement('strong');
         strongVer.textContent = 'v' + version;
         infoSpan.appendChild(strongVer);
-        infoSpan.appendChild(document.createTextNode('… panel will reload automatically.'));
+        var statusSpan = document.createElement('span');
+        statusSpan.id = 'blitz-update-status';
+        statusSpan.textContent = '… preparing.';
+        infoSpan.appendChild(statusSpan);
         infoDiv.appendChild(infoSpan);
         banner.appendChild(infoDiv);
         app.insertBefore(banner, app.firstChild);
     }
 
-    function checkForUpdates() {
+    function setUpdateBannerStatus(text) {
+        var s = document.getElementById('blitz-update-status');
+        if (s) s.textContent = '… ' + text;
+    }
+
+    function showUpdateErrorBanner(version, errMsg) {
+        _removeUpdateBanner();
+        var app = document.getElementById('app');
+        if (!app) return;
+        var banner = document.createElement('div');
+        banner.id = 'blitz-update-banner';
+        banner.className = 'update-banner update-banner-error';
+
+        var infoDiv = document.createElement('div');
+        infoDiv.className = 'update-banner-info';
+        var icon = document.createElement('span');
+        icon.style.cssText = 'flex-shrink:0;width:16px;height:16px;display:inline-flex;align-items:center;justify-content:center';
+        icon.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM8 4.5v4M8 10.5v.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+        infoDiv.appendChild(icon);
+        var msg = document.createElement('span');
+        msg.appendChild(document.createTextNode('Update to v' + version + ' failed: ' + errMsg + ' '));
+        var retry = document.createElement('button');
+        retry.className = 'button-secondary';
+        retry.style.cssText = 'margin-left:8px;padding:4px 10px;font-size:12px';
+        retry.textContent = 'Retry';
+        retry.onclick = function() {
+            _lastFailedVersion = null;
+            _updateInProgress = false;
+            checkForUpdates(true);
+        };
+        msg.appendChild(retry);
+        infoDiv.appendChild(msg);
+        banner.appendChild(infoDiv);
+        app.insertBefore(banner, app.firstChild);
+    }
+
+    function checkForUpdates(force) {
         if (_updateInProgress) return;
+        // Don't pound user with retries during stash/generate — they're writing to disk too
+        if (typeof stashInProgress !== 'undefined' && stashInProgress) {
+            debugLog('Update check deferred: stash/generate in progress', 'info');
+            return;
+        }
 
         fetch(ghRawUrl('version.json'), { cache: 'no-store' }).then(function(res) {
             if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -5892,6 +5943,10 @@
         }).then(function(manifest) {
             var remoteVersion = manifest && manifest.version;
             if (!remoteVersion || !isNewerVersion(remoteVersion, BLITZKRIEG_LOCAL_VERSION)) return;
+            if (!force && _lastFailedVersion === remoteVersion) {
+                // Avoid hammering the same broken version every 30 min
+                return;
+            }
 
             var files = manifest.files || [];
             if (!files.length) {
@@ -5915,59 +5970,151 @@
     // Recheck for updates every 30 minutes — covers long-running sessions where
     // the editor leaves AE open all day. First check still fires on auth-ready.
     function startUpdateChecker() {
-        checkForUpdates();
-        setInterval(checkForUpdates, 30 * 60 * 1000);
+        checkForUpdates(false);
+        setInterval(function() { checkForUpdates(false); }, 30 * 60 * 1000);
     }
 
-    /**
-     * Write a text file to the extension directory via cep.fs (preferred) or ExtendScript fallback.
-     * For JS/CSS text files — no base64 needed.
-     */
-    function writeFileViaCep(filePath, content, callback) {
-        // Try cep.fs first (text mode — UTF8)
+    // UTF-8 safe text -> base64. btoa() throws on non-Latin1; this preserves
+    // every byte of the JS/JSX/CSS source including em dashes, smart quotes,
+    // emoji, etc. Without this, cep.fs.writeFile in default text mode silently
+    // mangles non-ASCII bytes and the panel runs corrupted code after reload.
+    function utf8ToBase64(str) {
         try {
-            if (typeof cep !== 'undefined' && cep.fs && cep.fs.writeFile) {
-                var res = cep.fs.writeFile(filePath, content);
-                if (res && res.err === 0) {
-                    callback(null);
+            return btoa(unescape(encodeURIComponent(str)));
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // Fetch with retry + timeout. Returns a Promise<string> of the response body.
+    function fetchTextWithRetry(url, attempts, timeoutMs) {
+        attempts = attempts || 3;
+        timeoutMs = timeoutMs || 30000;
+        var attempt = 0;
+        return new Promise(function(resolve, reject) {
+            function tryOnce() {
+                attempt++;
+                var didTimeout = false;
+                var timer = setTimeout(function() {
+                    didTimeout = true;
+                    if (attempt < attempts) {
+                        setTimeout(tryOnce, 500 * attempt);
+                    } else {
+                        reject(new Error('timeout after ' + attempts + ' attempts'));
+                    }
+                }, timeoutMs);
+                fetch(url, { cache: 'no-store' }).then(function(res) {
+                    if (!res.ok) throw new Error('HTTP ' + res.status);
+                    return res.text();
+                }).then(function(text) {
+                    if (didTimeout) return;
+                    clearTimeout(timer);
+                    resolve(text);
+                }).catch(function(err) {
+                    if (didTimeout) return;
+                    clearTimeout(timer);
+                    if (attempt < attempts) {
+                        setTimeout(tryOnce, 500 * attempt);
+                    } else {
+                        reject(err);
+                    }
+                });
+            }
+            tryOnce();
+        });
+    }
+
+    // Write text file via cep.fs in base64 mode. Avoids encoding corruption
+    // and gives a clean error code when permission is denied. Resolves with
+    // null on success, Error on failure.
+    function writeFileViaCepBase64(filePath, content) {
+        return new Promise(function(resolve) {
+            try {
+                if (typeof cep === 'undefined' || !cep.fs || !cep.fs.writeFile || !cep.encoding || typeof cep.encoding.Base64 === 'undefined') {
+                    resolve(new Error('cep.fs unavailable'));
                     return;
                 }
-            }
-        } catch (e) {
-            // Fall through to ExtendScript
-        }
-
-        // ExtendScript fallback
-        var safeContent = escapeForExtendScript(content);
-        var safePath = escapeForExtendScript(filePath);
-        safeEvalScript('writeUpdateFile("' + safePath + '", "' + safeContent + '")', function(r) {
-            if (r && r.indexOf('error') === -1) {
-                callback(null);
-            } else {
-                callback(new Error('ExtendScript write failed: ' + r));
+                var b64 = utf8ToBase64(content);
+                if (b64 === null) {
+                    resolve(new Error('utf8 base64 encode failed'));
+                    return;
+                }
+                var res = cep.fs.writeFile(filePath, b64, cep.encoding.Base64);
+                if (res && res.err === 0) {
+                    resolve(null);
+                } else {
+                    resolve(new Error('cep.fs.writeFile err=' + (res && res.err)));
+                }
+            } catch (e) {
+                resolve(new Error('cep.fs threw: ' + e.message));
             }
         });
+    }
+
+    // Move a staged file to its final destination via ExtendScript.
+    function moveStagedFile(srcPath, dstPath) {
+        return new Promise(function(resolve) {
+            var safeSrc = escapeForExtendScript(srcPath);
+            var safeDst = escapeForExtendScript(dstPath);
+            safeEvalScript('moveUpdateFile("' + safeSrc + '", "' + safeDst + '")', function(r) {
+                if (r === 'ok') resolve(null);
+                else resolve(new Error('move failed: ' + r));
+            });
+        });
+    }
+
+    function deleteStagingDir(stagingPath) {
+        return new Promise(function(resolve) {
+            var safe = escapeForExtendScript(stagingPath);
+            safeEvalScript('deleteUpdateDir("' + safe + '")', function(r) {
+                resolve(r === 'ok' ? null : new Error(String(r)));
+            });
+        });
+    }
+
+    function mkdirP(dirPath) {
+        return new Promise(function(resolve) {
+            var safe = escapeForExtendScript(dirPath);
+            safeEvalScript('mkdirUnderRoot("' + safe + '")', function(r) {
+                resolve(r === 'ok' ? null : new Error(String(r)));
+            });
+        });
+    }
+
+    // Build the set of staging subdirs needed for a list of relative file paths.
+    function _stagingSubdirs(stagingRoot, separator, fileList) {
+        var dirs = {};
+        dirs[stagingRoot] = true;
+        for (var i = 0; i < fileList.length; i++) {
+            var rel = fileList[i].replace(/\//g, separator);
+            var parts = rel.split(separator);
+            parts.pop(); // drop filename
+            var acc = stagingRoot;
+            for (var j = 0; j < parts.length; j++) {
+                acc = acc + separator + parts[j];
+                dirs[acc] = true;
+            }
+        }
+        // Sorted shortest-first so parents are created before children.
+        return Object.keys(dirs).sort(function(a, b) { return a.length - b.length; });
     }
 
     function installUpdate(version, fileList) {
         if (!fileList || fileList.length === 0) {
             debugLog('No files in update manifest', 'warn');
+            _updateInProgress = false;
+            _removeUpdateBanner();
             return;
         }
 
-        // SECURITY: client-side validation of update file paths. Reject anything
-        // containing parent-directory traversal, absolute paths, or weird leading
-        // chars. The hostscript writeUpdateFile() also enforces this server-side
-        // (defense in depth) but failing fast in JS gives a clearer error.
+        // SECURITY: client-side validation of update file paths.
         var ALLOWED_UPDATE_EXT = /\.(js|css|html|htm|jsx|json|svg|xml)$/i;
         var validFiles = [];
         for (var vfi = 0; vfi < fileList.length; vfi++) {
             var fname = fileList[vfi];
             if (typeof fname !== 'string' || !fname) continue;
-            // No traversal, no absolute paths, no UNC, no Windows drive letters
             if (fname.indexOf('..') !== -1 || fname.charAt(0) === '/' || fname.charAt(0) === '\\') continue;
             if (/^[a-zA-Z]:[\\\/]/.test(fname)) continue;
-            // Allow-list extensions only
             if (!ALLOWED_UPDATE_EXT.test(fname)) continue;
             validFiles.push(fname);
         }
@@ -5975,7 +6122,7 @@
             debugLog('Update rejected ' + (fileList.length - validFiles.length) + ' file(s) with invalid paths/extensions', 'warn');
         }
         if (validFiles.length === 0) {
-            debugLog('No valid files in update manifest after path validation', 'error');
+            _failUpdate(version, 'no valid files');
             return;
         }
         fileList = validFiles;
@@ -5985,69 +6132,146 @@
             window.blitzkriegAnalytics.trackAccessChange(null, 'update_started', null);
         }
 
-        // Get extension root path from ExtendScript
         safeEvalScript('getExtensionRootPath()', function(rootPath) {
             if (!rootPath || rootPath === 'EvalScript error.' || rootPath === 'undefined' ||
                 rootPath.indexOf('ERROR:') === 0) {
-                debugLog('Cannot determine extension root path: ' + (rootPath || 'empty'), 'error');
-                if (window.blitzkriegAnalytics) {
-                    window.blitzkriegAnalytics.trackAccessChange(null, 'update_failed', null);
-                }
+                _failUpdate(version, 'cannot resolve extension root');
                 return;
             }
 
             var separator = rootPath.indexOf('\\') >= 0 ? '\\' : '/';
-            var completed = 0;
-            var failed = 0;
+            var stagingDirName = '.update-staging-' + version + '-' + Date.now();
+            var stagingRoot = rootPath + separator + stagingDirName;
 
-            function processFile(idx) {
-                if (idx >= fileList.length) {
-                    if (failed > 0) {
-                        debugLog('Update partially failed: ' + failed + '/' + fileList.length + ' files failed', 'error');
-                        if (window.blitzkriegAnalytics) {
-                            window.blitzkriegAnalytics.trackAccessChange(null, 'update_failed', null);
-                        }
-                    } else {
-                        debugLog('Update to v' + version + ' complete! Reloading panel...', 'success');
-                        if (window.blitzkriegAnalytics) {
-                            window.blitzkriegAnalytics.trackAccessChange(null, 'update_completed', null);
-                        }
-                        setTimeout(function() { location.reload(); }, 500);
-                    }
+            // Phase 0: pre-create all staging subdirs (cep.fs.writeFile won't
+            // create parents, and bailing per-file would leave half-staged
+            // garbage on disk).
+            setUpdateBannerStatus('preparing');
+            var dirs = _stagingSubdirs(stagingRoot, separator, fileList);
+            var dirIdx = 0;
+            function nextDir() {
+                if (dirIdx >= dirs.length) {
+                    stageOne(0);
                     return;
                 }
-
-                var fileName = fileList[idx];
-
-                // Download directly from GitHub raw — no Supabase publish step.
-                fetch(ghRawUrl(fileName), { cache: 'no-store' }).then(function(res) {
-                    if (!res.ok) throw new Error('HTTP ' + res.status);
-                    return res.text();
-                }).then(function(text) {
-                    var localPath = rootPath + separator + fileName.replace(/\//g, separator);
-                    writeFileViaCep(localPath, text, function(err) {
-                        if (err) {
-                            debugLog('Write failed: ' + fileName + ' — ' + err.message, 'error');
-                            failed++;
-                        } else {
-                            completed++;
-                            debugLog('Updated: ' + fileName + ' (' + completed + '/' + fileList.length + ')', 'info');
-                        }
-                        processFile(idx + 1);
-                    });
-                }).catch(function(err) {
-                    debugLog('Download error: ' + fileName + ' — ' + (err && err.message || err), 'error');
-                    failed++;
-                    processFile(idx + 1);
+                mkdirP(dirs[dirIdx++]).then(function(err) {
+                    if (err) {
+                        deleteStagingDir(stagingRoot).then(function() {
+                            _failUpdate(version, 'mkdir failed: ' + err.message);
+                        });
+                        return;
+                    }
+                    nextDir();
                 });
             }
 
-            processFile(0);
+            // Phase 1: download + write each file to staging path
+            var downloaded = 0;
+            var stagedPaths = []; // {staging, final}
+
+            function stageOne(idx) {
+                if (idx === 0) setUpdateBannerStatus('downloading 0/' + fileList.length);
+                if (idx >= fileList.length) {
+                    // Phase 2: atomic move into place
+                    setUpdateBannerStatus('installing');
+                    moveAll(0);
+                    return;
+                }
+                var fileName = fileList[idx];
+                var stagingPath = stagingRoot + separator + fileName.replace(/\//g, separator);
+                var finalPath = rootPath + separator + fileName.replace(/\//g, separator);
+                fetchTextWithRetry(ghRawUrl(fileName), 3, 30000).then(function(text) {
+                    return writeFileViaCepBase64(stagingPath, text);
+                }).then(function(err) {
+                    if (err) {
+                        // Bail entire update — atomic semantics
+                        deleteStagingDir(stagingRoot).then(function() {
+                            _failUpdate(version, 'write failed for ' + fileName + ': ' + err.message);
+                        });
+                        return;
+                    }
+                    downloaded++;
+                    stagedPaths.push({ staging: stagingPath, final: finalPath, name: fileName });
+                    setUpdateBannerStatus('downloading ' + downloaded + '/' + fileList.length);
+                    debugLog('Staged: ' + fileName + ' (' + downloaded + '/' + fileList.length + ')', 'info');
+                    stageOne(idx + 1);
+                }).catch(function(err) {
+                    deleteStagingDir(stagingRoot).then(function() {
+                        _failUpdate(version, 'download failed for ' + fileName + ': ' + (err && err.message || err));
+                    });
+                });
+            }
+
+            function moveAll(idx) {
+                if (idx >= stagedPaths.length) {
+                    // Cleanup: remove now-empty staging dir
+                    deleteStagingDir(stagingRoot).then(function() {
+                        debugLog('Update to v' + version + ' complete! Reloading panel.', 'success');
+                        if (window.blitzkriegAnalytics) {
+                            window.blitzkriegAnalytics.trackAccessChange(null, 'update_completed', null);
+                        }
+                        setUpdateBannerStatus('reloading');
+                        // CEP shares one ExtendScript context per extension — it survives
+                        // panel reloads, so the just-written hostscript.jsx still points
+                        // at the OLD function definitions until we $.evalFile() it.
+                        // Without this re-eval, the next OTA cycle would call
+                        // mkdirUnderRoot/moveUpdateFile and get ReferenceError.
+                        var jsxPath = rootPath + separator + 'jsx' + separator + 'hostscript.jsx';
+                        var safeJsx = escapeForExtendScript(jsxPath);
+                        safeEvalScript('$.evalFile(File("' + safeJsx + '").fsName)', function() {
+                            // Cache-bust reload — change URL so CEF treats this as a fresh
+                            // page load rather than potentially serving cached resources.
+                            // The version-stamped script srcs in index.html (auto-bumped by
+                            // CI) handle the inner-resource cache busting.
+                            setTimeout(function() {
+                                try {
+                                    var base = window.location.pathname || 'index.html';
+                                    window.location.replace(base + '?_v=' + version + '&_t=' + Date.now());
+                                } catch (e) {
+                                    window.location.reload();
+                                }
+                            }, 300);
+                        });
+                    });
+                    return;
+                }
+                var entry = stagedPaths[idx];
+                moveStagedFile(entry.staging, entry.final).then(function(err) {
+                    if (err) {
+                        // Move failed mid-way. Best effort: continue moving the rest
+                        // but flag overall failure. The next OTA check will retry.
+                        debugLog('Move failed: ' + entry.name + ' — ' + err.message, 'error');
+                        deleteStagingDir(stagingRoot).then(function() {
+                            _failUpdate(version, 'move failed for ' + entry.name + ': ' + err.message);
+                        });
+                        return;
+                    }
+                    debugLog('Installed: ' + entry.name, 'info');
+                    moveAll(idx + 1);
+                });
+            }
+
+            nextDir();
         });
     }
 
-    // Expose for banner button
+    function _failUpdate(version, errMsg) {
+        debugLog('Update v' + version + ' failed: ' + errMsg, 'error');
+        if (window.blitzkriegAnalytics) {
+            window.blitzkriegAnalytics.trackAccessChange(null, 'update_failed', null);
+        }
+        _lastFailedVersion = version;
+        _updateInProgress = false;
+        showUpdateErrorBanner(version, errMsg);
+    }
+
+    // Expose for banner button + manual retry from console
     window.__blitzInstallUpdate = installUpdate;
+    window.__blitzCheckForUpdates = function() {
+        _lastFailedVersion = null;
+        _updateInProgress = false;
+        checkForUpdates(true);
+    };
 
     /* --------- Cloud Thumbnail + Preview Generation --------- */
 
