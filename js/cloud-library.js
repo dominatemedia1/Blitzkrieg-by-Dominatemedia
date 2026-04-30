@@ -87,6 +87,11 @@
     // getDiagnostics() can report what actually happened on the last load.
     var _lastLoad = { ts: 0, source: null, durationMs: 0, count: 0, partial: false, failedCategories: [] };
 
+    // Coalesces concurrent background refreshes (Tier 1 fast-path can fire
+    // multiple refreshes within seconds when focus events stack up — alt-tab
+    // away and back, panel re-shows, etc.).
+    var _bgRefreshInFlight = false;
+
     function _listWithTimeout(folder, opts, timeoutMs) {
         timeoutMs = timeoutMs || LIST_TIMEOUT_MS;
         var listPromise = sb.storage.from(BUCKET).list(folder, opts || {});
@@ -737,7 +742,7 @@
         if (allFolderEntries.length === 0) {
             _log('fetchAllMetadata: no comp folders → returning empty (took ' + (Date.now() - t0) + 'ms)', 'warn');
             var emptyOut = [];
-            if (failedCategoryNames.length > 0) emptyOut._failedCategories = failedCategoryNames;
+            if (failedCategoryNames.length > 0) emptyOut._failedCategories = failedCategoryNames.slice();
             return emptyOut;
         }
 
@@ -791,7 +796,7 @@
         // (publishing a missing-Shaz manifest would silently undercount every
         // other editor for the manifest's lifetime).
         if (hasCategoryFailures) {
-            metadataResults._failedCategories = failedCategoryNames;
+            metadataResults._failedCategories = failedCategoryNames.slice();
             _log('fetchAllMetadata: ' + failedCategoryNames.length + ' categories FAILED to list: [' + failedCategoryNames.join(', ') + ']. Caller MUST merge with stale cache or skip writes.', 'error');
             _dispatchCustom('blitzkrieg-library-partial', {
                 failedCategories: failedCategoryNames.slice(),
@@ -852,7 +857,12 @@
             // in effect — a category-list timeout already happened recently
             // and we don't want to repeat the slow path every 60s while the
             // upstream is down. Grace expires after 60s by default.
-            if ((ageMs >= BACKGROUND_REFRESH_TTL || hasNulls) && !partialUntilFresh) {
+            // Also skip if a refresh is already in flight: focus events fire
+            // 2-3 times per alt-tab, and without the guard each one kicked
+            // off its own fetchManifest + fetchAllMetadata + uploadManifest
+            // — last-write-wins on the cache, redundant network.
+            if ((ageMs >= BACKGROUND_REFRESH_TTL || hasNulls) && !partialUntilFresh && !_bgRefreshInFlight) {
+                _bgRefreshInFlight = true;
                 // Prefer the cloud manifest for the refresh too — it's still 1 req
                 // vs hundreds. Fall through to fetchAllMetadata if manifest is missing.
                 fetchManifest().then(function (manifest) {
@@ -886,6 +896,10 @@
                     });
                 }).catch(function (err) {
                     _log('listTemplates: background refresh failed: ' + (err && err.message || err), 'warn');
+                }).then(function () {
+                    _bgRefreshInFlight = false;
+                }, function () {
+                    _bgRefreshInFlight = false;
                 });
             } else {
                 _log('listTemplates: skipped background refresh (' + (partialUntilFresh ? 'in partial-grace window' : 'cache age ' + Math.round(ageMs / 1000) + 's < TTL') + ')', 'info');
@@ -914,8 +928,10 @@
 
             // If manifest was stale, kick off a background refresh so the
             // NEXT load (and other editors fetching this manifest) get fresh
-            // data. Refuse to overwrite on partial fetch.
-            if (manifest._stale) {
+            // data. Refuse to overwrite on partial fetch. Coalesce with
+            // any other in-flight refresh to avoid duplicate slow-path scans.
+            if (manifest._stale && !_bgRefreshInFlight) {
+                _bgRefreshInFlight = true;
                 fetchAllMetadata().then(function (freshMeta) {
                     if (freshMeta && freshMeta._failedCategories && freshMeta._failedCategories.length > 0) {
                         _log('listTemplates: stale-manifest background refresh PARTIAL — leaving manifest untouched. Failed: [' + freshMeta._failedCategories.join(', ') + ']', 'warn');
@@ -927,6 +943,10 @@
                     _maybeNotifyChange(manifest.folders, freshMeta);
                 }).catch(function (err) {
                     _log('listTemplates: stale-manifest background refresh failed: ' + (err && err.message || err), 'warn');
+                }).then(function () {
+                    _bgRefreshInFlight = false;
+                }, function () {
+                    _bgRefreshInFlight = false;
                 });
             }
 
@@ -970,11 +990,11 @@
     function getDiagnostics() {
         var cache = getCachedMetadata();
         var sigCache = _signedUrlCache;
-        var manifestCacheState = (typeof _manifestCache !== 'undefined' && _manifestCache) ? {
-            ts: _manifestCache.ts || 0,
-            ageMs: _manifestCache.ts ? Date.now() - _manifestCache.ts : null,
-            folderCount: (_manifestCache.folders && _manifestCache.folders.length) || 0
-        } : null;
+        // The manifest is downloaded fresh from cloud each fetchManifest()
+        // call — there is no in-memory cache var, so no field to expose.
+        // (A previous draft referenced an undeclared `_manifestCache`; the
+        // typeof guard kept it from throwing but it always returned null,
+        // making diagnostics misleading. Field removed.)
         return {
             version: (typeof window !== 'undefined' && window.BLITZKRIEG_LOCAL_VERSION) || null,
             now: Date.now(),
@@ -984,7 +1004,10 @@
                 source: _lastLoad.source,
                 durationMs: _lastLoad.durationMs,
                 count: _lastLoad.count,
-                partial: _lastLoad.partial,
+                // Reflect actual cache state, not "loaded during grace window"
+                // — the latter flips back to false 60s after the partial
+                // load, even if the failed-categories list is still set.
+                partial: !!cache && Array.isArray(cache.failedCategories) && cache.failedCategories.length > 0,
                 failedCategories: _lastLoad.failedCategories
             },
             metaCache: cache ? {
@@ -996,7 +1019,6 @@
                 failedCategories: (cache.failedCategories || []).slice(),
                 nullMetadataCount: (cache.folders || []).filter(function(f) { return !f || f.metadata == null; }).length
             } : null,
-            manifestMemCache: manifestCacheState,
             signedUrlCache: sigCache ? {
                 ageMs: Date.now() - _signedUrlCacheTime,
                 ttlMs: SIGNED_URL_CACHE_TTL,

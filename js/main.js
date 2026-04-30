@@ -153,8 +153,20 @@
     // bridge (hostscript.jsx threw before responding, ExtendScript engine
     // wedged, etc.), the panel was previously pinned `stashInProgress=true`
     // forever and all focus-triggered loadLibrary calls were silently
-    // suppressed. Watchdog auto-clears the flag after 90s.
+    // suppressed. Watchdog auto-clears the flag after a per-op timeout.
+    //
+    // Per-op timeouts: imports of multi-GB AEPs with hundreds of nested
+    // precomps routinely take 2-5 minutes — a 90s clear would let
+    // focus-triggered loadLibrary fire mid-import and trigger the exact
+    // race the flag was designed to prevent. Stash/preview-gen finish in
+    // <30s in practice; imports get a 10-minute budget.
     var _stashWatchdogTimer = null;
+    var _STASH_WATCHDOG_BY_OP = {
+        'import': 600000,                // 10 min — large AEP imports
+        'generatePreviewFrames': 120000, // 2 min — frame render
+        'stash': 90000,                  // 90s default
+        'unknown': 90000
+    };
     function setStashInProgress(val, label) {
         stashInProgress = !!val;
         if (_stashWatchdogTimer) {
@@ -162,13 +174,15 @@
             _stashWatchdogTimer = null;
         }
         if (val) {
+            var key = label || 'unknown';
+            var timeoutMs = _STASH_WATCHDOG_BY_OP[key] || _STASH_WATCHDOG_BY_OP['unknown'];
             _stashWatchdogTimer = setTimeout(function () {
                 if (stashInProgress) {
-                    debugLog('stashInProgress watchdog fired — clearing flag (op: ' + (label || 'unknown') + ' did not return after 90s)', 'warn');
+                    debugLog('stashInProgress watchdog fired — clearing flag (op: ' + key + ' did not return after ' + Math.round(timeoutMs / 1000) + 's)', 'warn');
                     setStashInProgress(false);
                 }
                 _stashWatchdogTimer = null;
-            }, 90000);
+            }, timeoutMs);
         }
     }
     var bulkSelectedIds = new Set(); // Track selected items for bulk operations
@@ -2540,10 +2554,18 @@
                         // an .insert() with a stale user_id orphans the
                         // submission record (RLS rejects future updates by
                         // the actual logged-in user).
-                        var currentUser = window.blitzkriegAuth.getUser();
-                        if (!currentUser || currentUser.id !== userId) {
+                        // Use the LIVE JWT via sb.auth.getUser() — the cached
+                        // window.blitzkriegAuth.getUser() may not reflect a
+                        // rotation that happened during upload, so the cached
+                        // check would pass while .insert() actually carries a
+                        // different access_token in its Authorization header.
+                        var liveUserResult = await sb.auth.getUser();
+                        var liveUser = liveUserResult && liveUserResult.data && liveUserResult.data.user;
+                        if (!liveUser || liveUser.id !== userId) {
                             throw new Error('Auth session changed during upload — please log in again and resubmit.');
                         }
+                        // Pin to the live JWT id so insert() carries it.
+                        userId = liveUser.id;
 
                         // Create submission record
                         var submissionName = (files.metadata && (files.metadata.displayName || files.metadata.name)) || files.folderName;
@@ -6184,13 +6206,20 @@
                     }
                 }, timeoutMs);
                 fetch(url, { cache: 'no-store' }).then(function(res) {
-                    // 404 short-circuit — a deleted file won't come back; burning
-                    // 3 retries (and 3 30s timeouts on the total budget) just
-                    // delays the inevitable failure and starves the watchdog.
-                    if (res.status === 404) {
-                        var notFoundErr = new Error('HTTP 404 (file removed)');
-                        notFoundErr.status = 404;
-                        throw notFoundErr;
+                    // 4xx short-circuit (except 408/425/429 which are
+                    // legitimately retryable). 403 (token revoked, repo gone
+                    // private), 404 (file removed), 410 (gone), 451 (legal
+                    // takedown), 400 (malformed URL) won't come back from a
+                    // retry — burning 3 retries × 30s timeout just delays
+                    // the inevitable failure and starves the watchdog. The
+                    // retryable 4xx codes (408 timeout, 425 too-early, 429
+                    // rate-limit) DO benefit from backoff.
+                    if (res.status >= 400 && res.status < 500 &&
+                        res.status !== 408 && res.status !== 425 && res.status !== 429) {
+                        var permErr = new Error('HTTP ' + res.status + ' (permanent)');
+                        permErr.status = res.status;
+                        permErr.permanent = true;
+                        throw permErr;
                     }
                     if (!res.ok) throw new Error('HTTP ' + res.status);
                     return res.text();
@@ -6201,7 +6230,7 @@
                 }).catch(function(err) {
                     if (didTimeout) return;
                     clearTimeout(timer);
-                    if (err && err.status === 404) {
+                    if (err && err.permanent) {
                         reject(err);
                         return;
                     }
