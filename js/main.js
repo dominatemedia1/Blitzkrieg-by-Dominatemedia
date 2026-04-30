@@ -221,6 +221,13 @@
             div.className = 'log-entry';
             div.innerHTML = '<span class="log-time">' + timeStr + '</span><span class="log-' + level + '">' + escapeHTML(String(message)) + '</span>';
             debugLogContent.appendChild(div);
+            // Cap the live DOM at MAX_LOG_ENTRIES too — the in-memory array
+            // already rotates via shift() above, but the DOM grew unbounded
+            // when the panel was open during long sessions, leaking memory
+            // and slowing the panel to a crawl after a few thousand entries.
+            while (debugLogContent.children.length > MAX_LOG_ENTRIES) {
+                debugLogContent.removeChild(debugLogContent.firstChild);
+            }
             debugLogContent.scrollTop = debugLogContent.scrollHeight;
         }
 
@@ -6128,23 +6135,41 @@
     }
 
     // Fetch with retry + timeout. Returns a Promise<string> of the response body.
+    // Backoff is exponential with jitter: min(30s, 500ms * 2^attempt) + random
+    // up to 500ms. The previous linear `500 * attempt` schedule, combined with
+    // every panel checking GitHub raw on the same 30-min interval, produced a
+    // thundering herd post-version-bump that could trigger GitHub's 60-req/IP/h
+    // rate limit. 404 responses short-circuit (no point retrying a deleted file).
     function fetchTextWithRetry(url, attempts, timeoutMs) {
         attempts = attempts || 3;
         timeoutMs = timeoutMs || 30000;
         var attempt = 0;
         return new Promise(function(resolve, reject) {
+            function _scheduleRetry() {
+                var base = Math.min(30000, 500 * Math.pow(2, attempt));
+                var jitter = Math.random() * 500;
+                setTimeout(tryOnce, base + jitter);
+            }
             function tryOnce() {
                 attempt++;
                 var didTimeout = false;
                 var timer = setTimeout(function() {
                     didTimeout = true;
                     if (attempt < attempts) {
-                        setTimeout(tryOnce, 500 * attempt);
+                        _scheduleRetry();
                     } else {
                         reject(new Error('timeout after ' + attempts + ' attempts'));
                     }
                 }, timeoutMs);
                 fetch(url, { cache: 'no-store' }).then(function(res) {
+                    // 404 short-circuit — a deleted file won't come back; burning
+                    // 3 retries (and 3 30s timeouts on the total budget) just
+                    // delays the inevitable failure and starves the watchdog.
+                    if (res.status === 404) {
+                        var notFoundErr = new Error('HTTP 404 (file removed)');
+                        notFoundErr.status = 404;
+                        throw notFoundErr;
+                    }
                     if (!res.ok) throw new Error('HTTP ' + res.status);
                     return res.text();
                 }).then(function(text) {
@@ -6154,8 +6179,12 @@
                 }).catch(function(err) {
                     if (didTimeout) return;
                     clearTimeout(timer);
+                    if (err && err.status === 404) {
+                        reject(err);
+                        return;
+                    }
                     if (attempt < attempts) {
-                        setTimeout(tryOnce, 500 * attempt);
+                        _scheduleRetry();
                     } else {
                         reject(err);
                     }

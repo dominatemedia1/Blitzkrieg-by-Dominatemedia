@@ -62,9 +62,15 @@ if [[ ! -x "$ZXP_TOOL" ]]; then
 fi
 
 # ---- 2. Ensure signing cert exists -------------------------------------------
+# `-validityDays 1825` (~5 years) — ZXPSignCmd's default is 1 year. Without
+# this, the dev cert silently expires; the next CI release-zxp run cannot
+# sign and panels stay stuck on the last build until someone notices and
+# rotates the secret. 5 years matches the CEP signing best-practice and
+# ensures the GitHub Actions cert (when missing secrets cause a fresh
+# self-sign) doesn't bake in a 1-year time bomb.
 if [[ ! -f "$CERT_P12" ]]; then
   echo "==> No cert at $CERT_P12 — generating self-signed (dev only)..."
-  "$ZXP_TOOL" -selfSignedCert US CA "Dominate Media" "Blitzkrieg" "$CERT_PW" "$CERT_P12" >/dev/null
+  "$ZXP_TOOL" -selfSignedCert US CA "Dominate Media" "Blitzkrieg" "$CERT_PW" "$CERT_P12" -validityDays 1825 >/dev/null
 fi
 
 # ---- 3. Stage files for packaging --------------------------------------------

@@ -72,10 +72,32 @@
 
     function saveQueue(queue) {
         try {
-            // Cap queue at 50 entries to prevent localStorage bloat
-            if (queue.length > 50) queue = queue.slice(-50);
+            // Cap queue at 50 entries to prevent localStorage bloat. The
+            // previous version dropped the oldest silently. Log the drop
+            // count so we can see in analytics how often this is happening
+            // (sustained drops mean either the edge fn is down, the user's
+            // network is hostile, or we need a bigger cap).
+            if (queue.length > 50) {
+                var dropped = queue.length - 50;
+                queue = queue.slice(-50);
+                _log('queue cap reached, dropped ' + dropped + ' oldest payloads', 'warn');
+            }
             localStorage.setItem(QUEUE_KEY, JSON.stringify(queue));
         } catch (e) {}
+    }
+
+    // Force a Supabase session refresh, then re-read the access_token from
+    // localStorage. Returns a Promise resolving to the new token (or null).
+    // Used after a 401 from the sync endpoint so the next attempt has fresh
+    // credentials before queueing.
+    function _refreshTokenAndRead() {
+        var sb = window.blitzkriegSupabase;
+        if (!sb || !sb.auth || !sb.auth.refreshSession) return Promise.resolve(null);
+        return sb.auth.refreshSession().then(function () {
+            return getAuthToken();
+        }, function () {
+            return null;
+        });
     }
 
     function clearQueue() {
@@ -204,25 +226,16 @@
 
     // ---- Sync ----
 
-    function sendPayload(payload, callback) {
-        var token = getAuthToken();
-        if (!token) {
-            var queue = loadQueue();
-            queue.push(payload);
-            saveQueue(queue);
-            if (callback) callback(false);
-            return;
-        }
-
+    function _sendOnce(payload, token, onResult) {
+        // Single XHR attempt. onResult(status) where status is 'ok' (2xx),
+        // 'unauthorized' (401), 'error' (any other failure). Caller decides
+        // whether to retry on 'unauthorized' or queue on 'error'.
         var xhr = new XMLHttpRequest();
         var timedOut = false;
         var timer = setTimeout(function () {
             timedOut = true;
-            xhr.abort();
-            var queue = loadQueue();
-            queue.push(payload);
-            saveQueue(queue);
-            if (callback) callback(false);
+            try { xhr.abort(); } catch (e) {}
+            onResult('error');
         }, 10000);
 
         xhr.open('POST', SYNC_ENDPOINT, true);
@@ -233,13 +246,13 @@
             if (xhr.readyState !== 4 || timedOut) return;
             clearTimeout(timer);
             if (xhr.status >= 200 && xhr.status < 300) {
-                if (callback) callback(true);
+                onResult('ok');
+            } else if (xhr.status === 401) {
+                _log('Telemetry sync HTTP 401 — token may be expired', 'warn');
+                onResult('unauthorized');
             } else {
                 _log('Telemetry sync failed: HTTP ' + xhr.status, 'warn');
-                var queue = loadQueue();
-                queue.push(payload);
-                saveQueue(queue);
-                if (callback) callback(false);
+                onResult('error');
             }
         };
 
@@ -247,11 +260,52 @@
             xhr.send(JSON.stringify(payload));
         } catch (e) {
             clearTimeout(timer);
-            var queue = loadQueue();
-            queue.push(payload);
-            saveQueue(queue);
+            onResult('error');
+        }
+    }
+
+    function sendPayload(payload, callback) {
+        var token = getAuthToken();
+        if (!token) {
+            var q = loadQueue();
+            q.push(payload);
+            saveQueue(q);
+            if (callback) callback(false);
+            return;
+        }
+
+        function _queueAndDone() {
+            var q = loadQueue();
+            q.push(payload);
+            saveQueue(q);
             if (callback) callback(false);
         }
+
+        _sendOnce(payload, token, function (status) {
+            if (status === 'ok') {
+                if (callback) callback(true);
+                return;
+            }
+            if (status === 'unauthorized') {
+                // Token rotation race — refresh once and retry. After that,
+                // queue and let flushQueue try again next sync interval.
+                _refreshTokenAndRead().then(function (fresh) {
+                    if (!fresh) {
+                        _queueAndDone();
+                        return;
+                    }
+                    _sendOnce(payload, fresh, function (status2) {
+                        if (status2 === 'ok') {
+                            if (callback) callback(true);
+                        } else {
+                            _queueAndDone();
+                        }
+                    });
+                });
+                return;
+            }
+            _queueAndDone();
+        });
     }
 
     function flushQueue(callback) {
@@ -264,10 +318,10 @@
         // Keep queue in localStorage until all sends finish — only replace with remaining
         var remaining = [];
         var index = 0;
+        var refreshAttempted = false;
 
         function sendNext() {
             if (index >= queue.length) {
-                // All done — save only failed items (or clear if all succeeded)
                 if (remaining.length > 0) {
                     saveQueue(remaining);
                 } else {
@@ -277,33 +331,35 @@
                 return;
             }
             var payload = queue[index++];
-            var xhr = new XMLHttpRequest();
-            var timedOut = false;
-            var timer = setTimeout(function () {
-                timedOut = true;
-                xhr.abort();
-                remaining.push(payload);
-                sendNext();
-            }, 10000);
-
-            xhr.open('POST', SYNC_ENDPOINT, true);
-            xhr.setRequestHeader('Content-Type', 'application/json');
-            xhr.setRequestHeader('Authorization', 'Bearer ' + token);
-            xhr.onreadystatechange = function () {
-                if (xhr.readyState !== 4 || timedOut) return;
-                clearTimeout(timer);
-                if (xhr.status < 200 || xhr.status >= 300) {
-                    remaining.push(payload);
+            _sendOnce(payload, token, function (status) {
+                if (status === 'ok') {
+                    sendNext();
+                    return;
                 }
-                sendNext();
-            };
-            try {
-                xhr.send(JSON.stringify(payload));
-            } catch (e) {
-                clearTimeout(timer);
+                if (status === 'unauthorized' && !refreshAttempted) {
+                    // Refresh once for the WHOLE flush — every subsequent
+                    // payload uses the same fresh token. Avoids hammering
+                    // refreshSession on a 50-item queue with a fully expired
+                    // session.
+                    refreshAttempted = true;
+                    _refreshTokenAndRead().then(function (fresh) {
+                        if (fresh) token = fresh;
+                        // Retry this payload with new token (or queue if refresh failed).
+                        if (fresh) {
+                            _sendOnce(payload, fresh, function (status2) {
+                                if (status2 !== 'ok') remaining.push(payload);
+                                sendNext();
+                            });
+                        } else {
+                            remaining.push(payload);
+                            sendNext();
+                        }
+                    });
+                    return;
+                }
                 remaining.push(payload);
                 sendNext();
-            }
+            });
         }
         sendNext();
     }
