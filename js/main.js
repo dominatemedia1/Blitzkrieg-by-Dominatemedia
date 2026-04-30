@@ -2422,6 +2422,16 @@
                         // All uploads go through pending/approval flow
                         var userId = window.blitzkriegAuth.getUser().id;
                         var teamMember = window.blitzkriegAuth.getTeamMember();
+
+                        // Path traversal guard. files.folderName comes from
+                        // ExtendScript output — without this, a bug or malicious
+                        // input like "../production/foo" would write outside the
+                        // pending/ approval boundary, bypassing the review queue.
+                        // categoryName already validated at the top of executeAddComp.
+                        var folderErr = validateName(files.folderName);
+                        if (folderErr) {
+                            throw new Error('Invalid folder name from stash: ' + folderErr);
+                        }
                         var pendingBasePath = 'pending/' + userId + '/' + files.folderName;
                         var sb = window.blitzkriegSupabase;
 
@@ -2465,6 +2475,16 @@
                                     contentType: 'application/json',
                                     upsert: true,
                                 });
+                        }
+
+                        // Re-verify the user id between upload and insert. Long
+                        // upload sessions can cross a Supabase token rotation;
+                        // an .insert() with a stale user_id orphans the
+                        // submission record (RLS rejects future updates by
+                        // the actual logged-in user).
+                        var currentUser = window.blitzkriegAuth.getUser();
+                        if (!currentUser || currentUser.id !== userId) {
+                            throw new Error('Auth session changed during upload — please log in again and resubmit.');
                         }
 
                         // Create submission record
@@ -4099,13 +4119,16 @@
     }
 
     /**
-     * Approve a submission: copy files from pending to production, update DB
+     * Approve a submission via server-authoritative edge function. The
+     * client-side `isAdmin()` gate is UX-only (hides the button) — the edge
+     * function re-verifies the caller's `team_members.blitzkrieg_admin = true`
+     * from the JWT, performs the file move with rollback on partial failure,
+     * and gates the DB update on `status='pending'` to prevent TOCTOU
+     * dual-approvals.
      */
     function approveSubmission(submissionId) {
         var sb = window.blitzkriegSupabase;
         if (!sb || !window.blitzkriegAuth || !window.blitzkriegAuth.isAdmin()) return;
-        // Prevent double-submit: if this submission is already being processed,
-        // a second click would fire a parallel copy-delete pipeline and corrupt state.
         if (_submissionInFlight[submissionId]) {
             showToast('Already processing this submission...');
             return;
@@ -4115,124 +4138,44 @@
         showSpinner();
         showToast('Approving submission...');
 
-        // Clear the in-flight flag on every exit path
         function _approveDone() { delete _submissionInFlight[submissionId]; }
 
-        sb.from('blitzkrieg_template_submissions')
-            .select('*')
-            .eq('id', submissionId)
-            .single()
-            .then(function(res) {
-                if (res.error || !res.data) {
-                    hideSpinner();
-                    showToast('Submission not found.', true);
-                    _approveDone();
-                    return;
+        sb.functions.invoke('blitzkrieg-approve-submission', {
+            body: { submissionId: submissionId }
+        }).then(function (res) {
+            hideSpinner();
+            _approveDone();
+            if (res && res.error) {
+                // res.error.message is set by the SDK on non-2xx; res.data
+                // contains our edge fn's structured error if it was 4xx.
+                var detail = (res.data && res.data.error) || (res.error && res.error.message) || 'Unknown error';
+                var code = res.data && res.data.code;
+                if (code === 'already-processed') {
+                    showToast('That submission was already reviewed.', true);
+                } else if (code === 'not-admin') {
+                    showToast('Admin role required (server-side check).', true);
+                } else if (code === 'partial-move') {
+                    showToast('Approve failed mid-batch — DB unchanged. Click Approve to retry.', true);
+                } else {
+                    showToast('Approve failed: ' + detail, true);
                 }
-
-                var sub = res.data;
-
-                var pendingPath = sub.storage_path;
-                if (!pendingPath || typeof pendingPath !== 'string') {
-                    hideSpinner();
-                    showToast('Submission has no storage path — cannot approve.', true);
-                    _approveDone();
-                    return;
-                }
-                if (!sub.category || typeof sub.category !== 'string') {
-                    hideSpinner();
-                    showToast('Submission has no category — cannot approve.', true);
-                    _approveDone();
-                    return;
-                }
-                var productionPath = sub.category + '/' + pendingPath.split('/').pop();
-
-                // List files in the pending path (including preview subfolder)
-                sb.storage.from('blitzkrieg').list(pendingPath).then(async function(listRes) {
-                    if (listRes.error || !listRes.data || listRes.data.length === 0) {
-                        hideSpinner();
-                        showToast('No files found in pending path.', true);
-                        _approveDone();
-                        return;
-                    }
-
-                    // Collect top-level files
-                    var filesToCopy = listRes.data
-                        .filter(function(f) { return f.id !== null; })
-                        .map(function(f) { return { src: pendingPath + '/' + f.name, dest: productionPath + '/' + f.name }; });
-
-                    // Check for preview subfolder
-                    var subFolders = listRes.data.filter(function(f) { return f.id === null; });
-                    for (var si = 0; si < subFolders.length; si++) {
-                        var subName = subFolders[si].name;
-                        var subListRes = await sb.storage.from('blitzkrieg').list(pendingPath + '/' + subName);
-                        if (subListRes.data) {
-                            subListRes.data.filter(function(f) { return f.id !== null; }).forEach(function(f) {
-                                filesToCopy.push({
-                                    src: pendingPath + '/' + subName + '/' + f.name,
-                                    dest: productionPath + '/' + subName + '/' + f.name,
-                                });
-                            });
-                        }
-                    }
-
-                    var copyPromises = filesToCopy.map(function(entry) {
-                        return sb.storage.from('blitzkrieg').download(entry.src).then(function(dlRes) {
-                            if (dlRes.error) throw new Error('Download failed: ' + dlRes.error.message);
-                            return sb.storage.from('blitzkrieg').upload(entry.dest, dlRes.data, {
-                                upsert: true,
-                            });
-                        }).then(function(upRes) {
-                            if (upRes.error) throw new Error('Upload failed: ' + upRes.error.message);
-                            return sb.storage.from('blitzkrieg').remove([entry.src]);
-                        });
-                    });
-
-                    Promise.all(copyPromises).then(function() {
-                        // Update submission record
-                        return sb.from('blitzkrieg_template_submissions')
-                            .update({
-                                status: 'approved',
-                                reviewer_id: window.blitzkriegAuth.getUser().id,
-                                reviewed_at: new Date().toISOString(),
-                                approved_storage_path: productionPath,
-                            })
-                            .eq('id', submissionId);
-                    }).then(function(updateRes) {
-                        hideSpinner();
-                        if (updateRes.error) {
-                            showToast('Files moved but DB update failed: ' + updateRes.error.message, true);
-                        } else {
-                            showToast('Submission approved and published!');
-                            window.cloudLibrary.invalidateCache();
-                            loadSubmissionCounts();
-                            // Re-render whatever submission view is currently active
-                            if (activeCategory === '__review_pending') {
-                                renderSubmissionsGrid('pending_review');
-                            } else if (activeCategory.indexOf('__submissions_') === 0) {
-                                renderSubmissionsGrid(activeCategory.replace('__submissions_', ''));
-                            } else {
-                                renderSubmissionsGrid('pending_review');
-                            }
-                        }
-                        _approveDone();
-                    }).catch(function(err) {
-                        hideSpinner();
-                        showToast('Approve failed: ' + err.message, true);
-                        _approveDone();
-                    });
-                }).catch(function(listErr) {
-                    // inner list().then() rejection — network failure during pending listing
-                    hideSpinner();
-                    showToast('Approve failed to list files: ' + (listErr && listErr.message || listErr), true);
-                    _approveDone();
-                });
-            }).catch(function(outerErr) {
-                // outer select().single() rejection — network failure fetching the submission
-                hideSpinner();
-                showToast('Approve failed: ' + (outerErr && outerErr.message || outerErr), true);
-                _approveDone();
-            });
+                return;
+            }
+            showToast('Submission approved and published!');
+            window.cloudLibrary.invalidateCache();
+            loadSubmissionCounts();
+            if (activeCategory === '__review_pending') {
+                renderSubmissionsGrid('pending_review');
+            } else if (activeCategory.indexOf('__submissions_') === 0) {
+                renderSubmissionsGrid(activeCategory.replace('__submissions_', ''));
+            } else {
+                renderSubmissionsGrid('pending_review');
+            }
+        }, function (err) {
+            hideSpinner();
+            _approveDone();
+            showToast('Approve failed: ' + (err && err.message || err), true);
+        });
     }
 
     /**
@@ -4245,7 +4188,9 @@
     }
 
     /**
-     * Execute rejection with notes
+     * Execute rejection via server-authoritative edge function. Same threat
+     * model as approve — client-side `isAdmin()` is UX-only; the edge fn
+     * re-verifies admin role from the JWT and gates on `status='pending'`.
      */
     function executeRejectSubmission(submissionId, notes) {
         var sb = window.blitzkriegSupabase;
@@ -4259,20 +4204,23 @@
         rejectSubmissionModal.style.display = 'none';
         showSpinner();
 
-        sb.from('blitzkrieg_template_submissions')
-            .update({
-                status: 'rejected',
-                reviewer_id: window.blitzkriegAuth.getUser().id,
-                reviewer_notes: notes || '',
-                reviewed_at: new Date().toISOString(),
-            })
-            .eq('id', submissionId)
+        sb.functions.invoke('blitzkrieg-reject-submission', {
+            body: { submissionId: submissionId, notes: notes || '' }
+        })
             .then(function(res) {
                 hideSpinner();
                 pendingRejectId = null;
                 delete _submissionInFlight[submissionId];
-                if (res.error) {
-                    showToast('Rejection failed: ' + res.error.message, true);
+                if (res && res.error) {
+                    var detail = (res.data && res.data.error) || (res.error && res.error.message) || 'Unknown error';
+                    var code = res.data && res.data.code;
+                    if (code === 'already-processed') {
+                        showToast('That submission was already reviewed.', true);
+                    } else if (code === 'not-admin') {
+                        showToast('Admin role required (server-side check).', true);
+                    } else {
+                        showToast('Rejection failed: ' + detail, true);
+                    }
                 } else {
                     showToast('Submission rejected.');
                     loadSubmissionCounts();
