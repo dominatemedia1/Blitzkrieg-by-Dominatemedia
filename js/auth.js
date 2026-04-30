@@ -78,18 +78,39 @@
                 .maybeSingle();
 
             if (emailResult.data) {
-                // Auto-link user_id for future lookups (SECURITY DEFINER function bypasses RLS)
-                sb.rpc('link_blitzkrieg_user_id').then(function () {
-                    console.log('Auto-linked user_id to team member');
-                }).catch(function () {
-                    // Non-critical — next login will retry
-                });
-
+                // Auto-link user_id for future lookups (SECURITY DEFINER bypasses RLS).
+                // Retry-with-backoff because if the RPC silently fails (RPC not yet
+                // deployed, network blip, transient permission error), the user
+                // is stuck in email-fallback limbo every login. Three attempts
+                // at 0, 1.5s, 4.5s — then surface a debug log so we can see
+                // recurring failures in telemetry.
+                _linkUserIdWithRetry(0);
                 return emailResult.data;
             }
         }
 
         return null;
+    }
+
+    function _linkUserIdWithRetry(attempt) {
+        var sb = window.blitzkriegSupabase;
+        if (!sb) return;
+        sb.rpc('link_blitzkrieg_user_id').then(function (res) {
+            if (res && res.error) throw res.error;
+            if (attempt > 0) console.log('Auto-linked user_id to team member (attempt ' + (attempt + 1) + ')');
+            else console.log('Auto-linked user_id to team member');
+        }).catch(function (err) {
+            if (attempt < 2) {
+                var delay = 1500 * Math.pow(3, attempt); // 1.5s, 4.5s
+                setTimeout(function () { _linkUserIdWithRetry(attempt + 1); }, delay);
+            } else {
+                // Surface to debug log for visibility — without this the team
+                // member may be stuck in email-fallback every login forever.
+                if (typeof window._blitzLog === 'function') {
+                    window._blitzLog('link_blitzkrieg_user_id RPC failed after 3 attempts: ' + (err && err.message || err), 'warn');
+                }
+            }
+        });
     }
 
     // Main auth check — called on plugin load and after login

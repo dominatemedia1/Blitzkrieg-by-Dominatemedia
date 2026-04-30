@@ -3,7 +3,7 @@
     'use strict';
 
     var csInterface = new CSInterface();
-    var BLITZKRIEG_LOCAL_VERSION = '1.2.8';
+    var BLITZKRIEG_LOCAL_VERSION = '1.3.0';
 
     // CEP bridge detection — window.__adobe_cep__ is the native bridge to ExtendScript.
     // csInterface.evalScript is always a function (prototype), but it THROWS if __adobe_cep__ is missing.
@@ -145,6 +145,29 @@
     var isLoading = false; // Prevents race conditions in async operations
     var pendingLibraryReload = false; // Deferred reload when loadLibrary is called while isLoading
     var stashInProgress = false; // Suppresses focus-triggered loads during stash/generate operations
+
+    // Watchdog: if a stash/generate operation never returns from the CEP
+    // bridge (hostscript.jsx threw before responding, ExtendScript engine
+    // wedged, etc.), the panel was previously pinned `stashInProgress=true`
+    // forever and all focus-triggered loadLibrary calls were silently
+    // suppressed. Watchdog auto-clears the flag after 90s.
+    var _stashWatchdogTimer = null;
+    function setStashInProgress(val, label) {
+        stashInProgress = !!val;
+        if (_stashWatchdogTimer) {
+            clearTimeout(_stashWatchdogTimer);
+            _stashWatchdogTimer = null;
+        }
+        if (val) {
+            _stashWatchdogTimer = setTimeout(function () {
+                if (stashInProgress) {
+                    debugLog('stashInProgress watchdog fired — clearing flag (op: ' + (label || 'unknown') + ' did not return after 90s)', 'warn');
+                    setStashInProgress(false);
+                }
+                _stashWatchdogTimer = null;
+            }, 90000);
+        }
+    }
     var bulkSelectedIds = new Set(); // Track selected items for bulk operations
     var bulkMode = false; // Whether bulk selection mode is active
 
@@ -198,6 +221,13 @@
             div.className = 'log-entry';
             div.innerHTML = '<span class="log-time">' + timeStr + '</span><span class="log-' + level + '">' + escapeHTML(String(message)) + '</span>';
             debugLogContent.appendChild(div);
+            // Cap the live DOM at MAX_LOG_ENTRIES too — the in-memory array
+            // already rotates via shift() above, but the DOM grew unbounded
+            // when the panel was open during long sessions, leaking memory
+            // and slowing the panel to a crawl after a few thousand entries.
+            while (debugLogContent.children.length > MAX_LOG_ENTRIES) {
+                debugLogContent.removeChild(debugLogContent.firstChild);
+            }
             debugLogContent.scrollTop = debugLogContent.scrollHeight;
         }
 
@@ -1255,65 +1285,21 @@
         var categories = {};
         allComps.forEach(function(c) { categories[c.category] = (categories[c.category] || 0) + 1; });
         Object.keys(categories).sort().forEach(function(cat) { debugLog('  ' + cat + ': ' + categories[cat], 'info'); });
-        var libraryPath = getLibraryPath();
-        if (!libraryPath) {
-            return;
-        }
-        debugLog('Running diagnostics for: ' + libraryPath, 'info');
-        debugLog('Platform: ' + navigator.platform + ' | UserAgent: ' + navigator.userAgent.substring(0, 80), 'info');
-        var safePath = escapeForExtendScript(libraryPath);
-
-        // First test: can we even call ExtendScript?
+        // Cloud-mode panel: skip the local-FS scan branch entirely. Stale
+        // localStorage `ae_asset_stash_path` from earlier installs would
+        // otherwise drive `debugLibrary("J:\\")` and dump the user's
+        // $RECYCLE.BIN, System Volume Information, and PROJECTS contents
+        // into the debug log + telemetry pipeline.
+        try { localStorage.removeItem('ae_asset_stash_path'); } catch (eRm) {}
+        // Quick ExtendScript availability ping (no path argument — no FS walk).
         safeEvalScript('typeof getStashedComps', function(typeResult) {
             debugLog('ExtendScript function check: typeof getStashedComps = "' + typeResult + '"', typeResult === 'function' ? 'success' : 'error');
-
             if (typeResult !== 'function') {
                 debugLog('CRITICAL: hostscript.jsx functions not loaded! ExtendScript may have a syntax error.', 'error');
-                // Try to get the actual error
                 safeEvalScript('try { eval("getStashedComps"); "ok"; } catch(e) { e.toString(); }', function(errResult) {
                     debugLog('ExtendScript error detail: ' + errResult, 'error');
                 });
-                return;
             }
-
-            // Run the full diagnostic
-            safeEvalScript('debugLibrary("' + safePath + '")', function(result) {
-                try {
-                    var cleaned = result.replace(/^\ufeff/, '').replace(/\0/g, '').trim();
-                    var info = JSON.parse(cleaned);
-                    debugLog('Diagnostics result:', 'info');
-                    debugLog('  Platform: ' + (info.platform || 'unknown'), 'info');
-                    debugLog('  AE Version: ' + (info.aeVersion || 'unknown'), 'info');
-                    debugLog('  Library exists: ' + info.exists, info.exists ? 'success' : 'error');
-                    debugLog('  Resolved path: ' + (info.resolvedPath || 'N/A'), 'info');
-                    debugLog('  Total items in folder: ' + (info.totalItems || 0), 'info');
-                    if (info.categories) {
-                        debugLog('  Categories found: ' + info.categories.length, info.categories.length > 0 ? 'success' : 'warn');
-                        for (var ci = 0; ci < info.categories.length; ci++) {
-                            var cat = info.categories[ci];
-                            debugLog('    [' + cat.name + '] - ' + cat.compFolders.length + ' comp folders', 'info');
-                            for (var cj = 0; cj < cat.compFolders.length; cj++) {
-                                var cmp = cat.compFolders[cj];
-                                if (!cmp.isTemplate) {
-                                    // Non-template folder (assets, presets, plugins, fonts, grouping folders)
-                                    debugLog('      ' + cmp.name + ' - non-template folder (skipped) Files:[' + cmp.files.slice(0, 5).join(', ') + (cmp.files.length > 5 ? ', ... +' + (cmp.files.length - 5) + ' more' : '') + ']', 'info');
-                                } else {
-                                    var status = cmp.hasAep ? 'OK' : 'MISSING .aep!';
-                                    debugLog('      ' + cmp.name + ' - AEP:' + cmp.hasAep + ' Meta:' + cmp.hasMetadata + ' Thumb:' + cmp.hasThumbnail + ' Files:[' + cmp.files.join(', ') + '] ' + status, cmp.hasAep ? 'success' : 'error');
-                                }
-                            }
-                        }
-                    }
-                    if (info.errors && info.errors.length > 0) {
-                        for (var ei = 0; ei < info.errors.length; ei++) {
-                            debugLog('  ERROR: ' + info.errors[ei], 'error');
-                        }
-                    }
-                } catch (e) {
-                    debugLog('Failed to parse diagnostics: ' + e.toString(), 'error');
-                    debugLog('Raw diagnostic result: ' + (result ? result.substring(0, 500) : '(null)'), 'error');
-                }
-            });
         });
     }
     // Expose to window
@@ -2290,9 +2276,9 @@
         showToast('Generating preview for "' + compName + '"...');
 
         var safePath = escapeForExtendScript(aepPath);
-        stashInProgress = true;
+        setStashInProgress(true, 'generatePreviewFrames');
         safeEvalScript('generatePreviewFrames("' + safePath + '")', function(result) {
-            stashInProgress = false;
+            setStashInProgress(false);
             hideSpinner();
             if (!result) {
                 showToast('Unexpected error generating preview.', true);
@@ -2312,6 +2298,12 @@
                     // by libraryPath, which is now ignored).
                     setTimeout(function() { loadLibrary(); }, 800);
                 }
+            } else if (result.indexOf('RESTORE-FAILED') === 0) {
+                // The hostscript could not reopen the user's working project
+                // after preview gen — AE is now showing a temp comp. Loud
+                // toast + log so the user knows to reopen manually.
+                debugLog('Preview gen restore failed: ' + result, 'error');
+                showToast(result.replace(/^RESTORE-FAILED:\s*/, ''), true);
             } else {
                 showToast(result, true);
             }
@@ -2335,18 +2327,18 @@
         if (!comp) { comp = { storagePath: storagePath, name: compName }; }
 
         showSpinner();
-        stashInProgress = true;
+        setStashInProgress(true);
         showToast('Generating thumbnail + preview for "' + compName + '"...');
 
         generateCloudThumbnail(comp).then(function() {
-            stashInProgress = false;
+            setStashInProgress(false);
             hideSpinner();
             showToast('Thumbnail + preview generated for "' + compName + '"!');
             // Invalidate cache and reload to pick up new thumb + preview frames
             window.cloudLibrary.invalidateCache();
             loadLibrary();
         }).catch(function(err) {
-            stashInProgress = false;
+            setStashInProgress(false);
             hideSpinner();
             showToast('Failed to generate: ' + err.message, true);
         });
@@ -2389,7 +2381,7 @@
         }
 
         addCompModal.style.display = 'none';
-        stashInProgress = true;
+        setStashInProgress(true);
         showSpinner();
         showToast('Submitting composition for review...');
 
@@ -2401,7 +2393,7 @@
                     var parsed = JSON.parse(result);
                     if (parsed.result && parsed.result.indexOf('Error') === 0) {
                         showToast(parsed.result, true);
-                        stashInProgress = false;
+                        setStashInProgress(false);
                         hideSpinner();
                         return;
                     }
@@ -2422,6 +2414,16 @@
                         // All uploads go through pending/approval flow
                         var userId = window.blitzkriegAuth.getUser().id;
                         var teamMember = window.blitzkriegAuth.getTeamMember();
+
+                        // Path traversal guard. files.folderName comes from
+                        // ExtendScript output — without this, a bug or malicious
+                        // input like "../production/foo" would write outside the
+                        // pending/ approval boundary, bypassing the review queue.
+                        // categoryName already validated at the top of executeAddComp.
+                        var folderErr = validateName(files.folderName);
+                        if (folderErr) {
+                            throw new Error('Invalid folder name from stash: ' + folderErr);
+                        }
                         var pendingBasePath = 'pending/' + userId + '/' + files.folderName;
                         var sb = window.blitzkriegSupabase;
 
@@ -2467,6 +2469,16 @@
                                 });
                         }
 
+                        // Re-verify the user id between upload and insert. Long
+                        // upload sessions can cross a Supabase token rotation;
+                        // an .insert() with a stale user_id orphans the
+                        // submission record (RLS rejects future updates by
+                        // the actual logged-in user).
+                        var currentUser = window.blitzkriegAuth.getUser();
+                        if (!currentUser || currentUser.id !== userId) {
+                            throw new Error('Auth session changed during upload — please log in again and resubmit.');
+                        }
+
                         // Create submission record
                         var submissionName = (files.metadata && (files.metadata.displayName || files.metadata.name)) || files.folderName;
                         if (submissionName && submissionName.length > 255) submissionName = submissionName.substring(0, 255);
@@ -2503,7 +2515,7 @@
                                 totalBytes
                             );
                         }
-                        stashInProgress = false;
+                        setStashInProgress(false);
                         hideSpinner();
                         loadSubmissionCounts();
 
@@ -2520,7 +2532,7 @@
                 } catch (err) {
                     debugLog('Upload error: ' + err.message, 'error');
                     showToast('Failed to submit template: ' + err.message, true);
-                    stashInProgress = false;
+                    setStashInProgress(false);
                     hideSpinner();
                     // Clean up the temp stash dir we created — without this, every
                     // failed upload leaks a full comp bundle (AEP + frames + metadata)
@@ -2929,7 +2941,7 @@
         // Cloud import path
         if (storagePath && window.cloudLibrary) {
             showSpinner();
-            stashInProgress = true; // Block focus-triggered loadLibrary during import
+            setStashInProgress(true, 'import'); // Block focus-triggered loadLibrary during import
             showToast('Downloading template...');
             debugLog('IMPORT: starting cloud import for ' + storagePath);
 
@@ -2970,9 +2982,9 @@
                     });
                 });
             }).then(function() {
-                stashInProgress = false;
+                setStashInProgress(false);
             }, function (err) {
-                stashInProgress = false;
+                setStashInProgress(false);
                 hideSpinner();
                 debugLog('IMPORT FAIL: ' + err.message, 'error');
                 showToast('Import failed: ' + err.message, true);
@@ -2987,12 +2999,12 @@
         }
 
         showSpinner();
-        stashInProgress = true; // Block focus-triggered loadLibrary during import
+        setStashInProgress(true, 'import'); // Block focus-triggered loadLibrary during import
         var safePath = escapeForExtendScript(aepPath);
         var safeDisplayName = _trackComp ? escapeForExtendScript(_trackComp.name) : '';
 
         safeEvalScript('importComp("' + safePath + '","' + safeDisplayName + '")', function (result) {
-            stashInProgress = false;
+            setStashInProgress(false);
             hideSpinner();
             if (!result) {
                 showToast('Unexpected error importing.', true);
@@ -4099,13 +4111,16 @@
     }
 
     /**
-     * Approve a submission: copy files from pending to production, update DB
+     * Approve a submission via server-authoritative edge function. The
+     * client-side `isAdmin()` gate is UX-only (hides the button) — the edge
+     * function re-verifies the caller's `team_members.blitzkrieg_admin = true`
+     * from the JWT, performs the file move with rollback on partial failure,
+     * and gates the DB update on `status='pending'` to prevent TOCTOU
+     * dual-approvals.
      */
     function approveSubmission(submissionId) {
         var sb = window.blitzkriegSupabase;
         if (!sb || !window.blitzkriegAuth || !window.blitzkriegAuth.isAdmin()) return;
-        // Prevent double-submit: if this submission is already being processed,
-        // a second click would fire a parallel copy-delete pipeline and corrupt state.
         if (_submissionInFlight[submissionId]) {
             showToast('Already processing this submission...');
             return;
@@ -4115,124 +4130,44 @@
         showSpinner();
         showToast('Approving submission...');
 
-        // Clear the in-flight flag on every exit path
         function _approveDone() { delete _submissionInFlight[submissionId]; }
 
-        sb.from('blitzkrieg_template_submissions')
-            .select('*')
-            .eq('id', submissionId)
-            .single()
-            .then(function(res) {
-                if (res.error || !res.data) {
-                    hideSpinner();
-                    showToast('Submission not found.', true);
-                    _approveDone();
-                    return;
+        sb.functions.invoke('blitzkrieg-approve-submission', {
+            body: { submissionId: submissionId }
+        }).then(function (res) {
+            hideSpinner();
+            _approveDone();
+            if (res && res.error) {
+                // res.error.message is set by the SDK on non-2xx; res.data
+                // contains our edge fn's structured error if it was 4xx.
+                var detail = (res.data && res.data.error) || (res.error && res.error.message) || 'Unknown error';
+                var code = res.data && res.data.code;
+                if (code === 'already-processed') {
+                    showToast('That submission was already reviewed.', true);
+                } else if (code === 'not-admin') {
+                    showToast('Admin role required (server-side check).', true);
+                } else if (code === 'partial-move') {
+                    showToast('Approve failed mid-batch — DB unchanged. Click Approve to retry.', true);
+                } else {
+                    showToast('Approve failed: ' + detail, true);
                 }
-
-                var sub = res.data;
-
-                var pendingPath = sub.storage_path;
-                if (!pendingPath || typeof pendingPath !== 'string') {
-                    hideSpinner();
-                    showToast('Submission has no storage path — cannot approve.', true);
-                    _approveDone();
-                    return;
-                }
-                if (!sub.category || typeof sub.category !== 'string') {
-                    hideSpinner();
-                    showToast('Submission has no category — cannot approve.', true);
-                    _approveDone();
-                    return;
-                }
-                var productionPath = sub.category + '/' + pendingPath.split('/').pop();
-
-                // List files in the pending path (including preview subfolder)
-                sb.storage.from('blitzkrieg').list(pendingPath).then(async function(listRes) {
-                    if (listRes.error || !listRes.data || listRes.data.length === 0) {
-                        hideSpinner();
-                        showToast('No files found in pending path.', true);
-                        _approveDone();
-                        return;
-                    }
-
-                    // Collect top-level files
-                    var filesToCopy = listRes.data
-                        .filter(function(f) { return f.id !== null; })
-                        .map(function(f) { return { src: pendingPath + '/' + f.name, dest: productionPath + '/' + f.name }; });
-
-                    // Check for preview subfolder
-                    var subFolders = listRes.data.filter(function(f) { return f.id === null; });
-                    for (var si = 0; si < subFolders.length; si++) {
-                        var subName = subFolders[si].name;
-                        var subListRes = await sb.storage.from('blitzkrieg').list(pendingPath + '/' + subName);
-                        if (subListRes.data) {
-                            subListRes.data.filter(function(f) { return f.id !== null; }).forEach(function(f) {
-                                filesToCopy.push({
-                                    src: pendingPath + '/' + subName + '/' + f.name,
-                                    dest: productionPath + '/' + subName + '/' + f.name,
-                                });
-                            });
-                        }
-                    }
-
-                    var copyPromises = filesToCopy.map(function(entry) {
-                        return sb.storage.from('blitzkrieg').download(entry.src).then(function(dlRes) {
-                            if (dlRes.error) throw new Error('Download failed: ' + dlRes.error.message);
-                            return sb.storage.from('blitzkrieg').upload(entry.dest, dlRes.data, {
-                                upsert: true,
-                            });
-                        }).then(function(upRes) {
-                            if (upRes.error) throw new Error('Upload failed: ' + upRes.error.message);
-                            return sb.storage.from('blitzkrieg').remove([entry.src]);
-                        });
-                    });
-
-                    Promise.all(copyPromises).then(function() {
-                        // Update submission record
-                        return sb.from('blitzkrieg_template_submissions')
-                            .update({
-                                status: 'approved',
-                                reviewer_id: window.blitzkriegAuth.getUser().id,
-                                reviewed_at: new Date().toISOString(),
-                                approved_storage_path: productionPath,
-                            })
-                            .eq('id', submissionId);
-                    }).then(function(updateRes) {
-                        hideSpinner();
-                        if (updateRes.error) {
-                            showToast('Files moved but DB update failed: ' + updateRes.error.message, true);
-                        } else {
-                            showToast('Submission approved and published!');
-                            window.cloudLibrary.invalidateCache();
-                            loadSubmissionCounts();
-                            // Re-render whatever submission view is currently active
-                            if (activeCategory === '__review_pending') {
-                                renderSubmissionsGrid('pending_review');
-                            } else if (activeCategory.indexOf('__submissions_') === 0) {
-                                renderSubmissionsGrid(activeCategory.replace('__submissions_', ''));
-                            } else {
-                                renderSubmissionsGrid('pending_review');
-                            }
-                        }
-                        _approveDone();
-                    }).catch(function(err) {
-                        hideSpinner();
-                        showToast('Approve failed: ' + err.message, true);
-                        _approveDone();
-                    });
-                }).catch(function(listErr) {
-                    // inner list().then() rejection — network failure during pending listing
-                    hideSpinner();
-                    showToast('Approve failed to list files: ' + (listErr && listErr.message || listErr), true);
-                    _approveDone();
-                });
-            }).catch(function(outerErr) {
-                // outer select().single() rejection — network failure fetching the submission
-                hideSpinner();
-                showToast('Approve failed: ' + (outerErr && outerErr.message || outerErr), true);
-                _approveDone();
-            });
+                return;
+            }
+            showToast('Submission approved and published!');
+            window.cloudLibrary.invalidateCache();
+            loadSubmissionCounts();
+            if (activeCategory === '__review_pending') {
+                renderSubmissionsGrid('pending_review');
+            } else if (activeCategory.indexOf('__submissions_') === 0) {
+                renderSubmissionsGrid(activeCategory.replace('__submissions_', ''));
+            } else {
+                renderSubmissionsGrid('pending_review');
+            }
+        }, function (err) {
+            hideSpinner();
+            _approveDone();
+            showToast('Approve failed: ' + (err && err.message || err), true);
+        });
     }
 
     /**
@@ -4245,7 +4180,9 @@
     }
 
     /**
-     * Execute rejection with notes
+     * Execute rejection via server-authoritative edge function. Same threat
+     * model as approve — client-side `isAdmin()` is UX-only; the edge fn
+     * re-verifies admin role from the JWT and gates on `status='pending'`.
      */
     function executeRejectSubmission(submissionId, notes) {
         var sb = window.blitzkriegSupabase;
@@ -4259,20 +4196,23 @@
         rejectSubmissionModal.style.display = 'none';
         showSpinner();
 
-        sb.from('blitzkrieg_template_submissions')
-            .update({
-                status: 'rejected',
-                reviewer_id: window.blitzkriegAuth.getUser().id,
-                reviewer_notes: notes || '',
-                reviewed_at: new Date().toISOString(),
-            })
-            .eq('id', submissionId)
+        sb.functions.invoke('blitzkrieg-reject-submission', {
+            body: { submissionId: submissionId, notes: notes || '' }
+        })
             .then(function(res) {
                 hideSpinner();
                 pendingRejectId = null;
                 delete _submissionInFlight[submissionId];
-                if (res.error) {
-                    showToast('Rejection failed: ' + res.error.message, true);
+                if (res && res.error) {
+                    var detail = (res.data && res.data.error) || (res.error && res.error.message) || 'Unknown error';
+                    var code = res.data && res.data.code;
+                    if (code === 'already-processed') {
+                        showToast('That submission was already reviewed.', true);
+                    } else if (code === 'not-admin') {
+                        showToast('Admin role required (server-side check).', true);
+                    } else {
+                        showToast('Rejection failed: ' + detail, true);
+                    }
                 } else {
                     showToast('Submission rejected.');
                     loadSubmissionCounts();
@@ -6151,23 +6091,41 @@
     }
 
     // Fetch with retry + timeout. Returns a Promise<string> of the response body.
+    // Backoff is exponential with jitter: min(30s, 500ms * 2^attempt) + random
+    // up to 500ms. The previous linear `500 * attempt` schedule, combined with
+    // every panel checking GitHub raw on the same 30-min interval, produced a
+    // thundering herd post-version-bump that could trigger GitHub's 60-req/IP/h
+    // rate limit. 404 responses short-circuit (no point retrying a deleted file).
     function fetchTextWithRetry(url, attempts, timeoutMs) {
         attempts = attempts || 3;
         timeoutMs = timeoutMs || 30000;
         var attempt = 0;
         return new Promise(function(resolve, reject) {
+            function _scheduleRetry() {
+                var base = Math.min(30000, 500 * Math.pow(2, attempt));
+                var jitter = Math.random() * 500;
+                setTimeout(tryOnce, base + jitter);
+            }
             function tryOnce() {
                 attempt++;
                 var didTimeout = false;
                 var timer = setTimeout(function() {
                     didTimeout = true;
                     if (attempt < attempts) {
-                        setTimeout(tryOnce, 500 * attempt);
+                        _scheduleRetry();
                     } else {
                         reject(new Error('timeout after ' + attempts + ' attempts'));
                     }
                 }, timeoutMs);
                 fetch(url, { cache: 'no-store' }).then(function(res) {
+                    // 404 short-circuit — a deleted file won't come back; burning
+                    // 3 retries (and 3 30s timeouts on the total budget) just
+                    // delays the inevitable failure and starves the watchdog.
+                    if (res.status === 404) {
+                        var notFoundErr = new Error('HTTP 404 (file removed)');
+                        notFoundErr.status = 404;
+                        throw notFoundErr;
+                    }
                     if (!res.ok) throw new Error('HTTP ' + res.status);
                     return res.text();
                 }).then(function(text) {
@@ -6177,8 +6135,12 @@
                 }).catch(function(err) {
                     if (didTimeout) return;
                     clearTimeout(timer);
+                    if (err && err.status === 404) {
+                        reject(err);
+                        return;
+                    }
                     if (attempt < attempts) {
-                        setTimeout(tryOnce, 500 * attempt);
+                        _scheduleRetry();
                     } else {
                         reject(err);
                     }
@@ -6997,7 +6959,7 @@
         try { localStorage.setItem('blitzkrieg_thumb_blacklist', JSON.stringify(thumbBlacklist)); } catch(e) {}
 
         showSpinner();
-        stashInProgress = true;
+        setStashInProgress(true);
         var processed = 0;
         var succeeded = 0;
         var failed = 0;
@@ -7019,7 +6981,7 @@
 
         function processNext() {
             if (processed >= total) {
-                stashInProgress = false;
+                setStashInProgress(false);
                 generateAllMissingThumbnails._running = false;
                 hideSpinner();
                 var bar = document.getElementById('generate-progress-bar');

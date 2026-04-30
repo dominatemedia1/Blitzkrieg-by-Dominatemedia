@@ -65,8 +65,47 @@
     // added outside the panel (Supabase dashboard, scripts) don't always trigger
     // invalidateManifest(), so users could see a stale list for up to 30 min.
     // Shorter TTL bounds drift without giving up the cold-load speedup.
+    // Stale manifests are still served (stale-while-revalidate) — the TTL only
+    // controls whether the caller treats the manifest as "fresh enough to skip
+    // background refresh" vs "use this immediately + refresh in the background".
     var MANIFEST_TTL_MS = 5 * 60 * 1000;
 
+    // Per-call timeout for `sb.storage.from(BUCKET).list(...)`. Supabase server
+    // timeout is ~30s — far too long when one bad category times out 3× through
+    // the retry wrapper (~92s of dead air). 8s per attempt + 1s/2s linear backoff
+    // caps total per-category cost at ~28s instead of 92s.
+    var LIST_TIMEOUT_MS = 8000;
+
+    function _listWithTimeout(folder, opts, timeoutMs) {
+        timeoutMs = timeoutMs || LIST_TIMEOUT_MS;
+        var listPromise = sb.storage.from(BUCKET).list(folder, opts || {});
+        var timeoutPromise = new Promise(function (_, reject) {
+            setTimeout(function () {
+                reject(new Error('List timed out after ' + timeoutMs + 'ms'));
+            }, timeoutMs);
+        });
+        return Promise.race([listPromise, timeoutPromise]);
+    }
+
+    // CEP 8/9 fallback for `new CustomEvent(name, {detail})` — old Chromium
+    // missing the constructor. Single helper instead of try/catch duplicated
+    // at every dispatch site.
+    function _dispatchCustom(name, detail) {
+        try {
+            window.dispatchEvent(new CustomEvent(name, { detail: detail }));
+        } catch (e) {
+            try {
+                var ev = document.createEvent('CustomEvent');
+                ev.initCustomEvent(name, false, false, detail || {});
+                window.dispatchEvent(ev);
+            } catch (e2) {}
+        }
+    }
+
+    // Returns {manifest, age, stale} — caller decides what to do with stale
+    // manifests. Stale-while-revalidate: cold load can render the stale
+    // manifest immediately and kick off a background refresh, instead of
+    // falling through to the 5-30s slow path.
     async function fetchManifest() {
         try {
             var res = await sb.storage.from(BUCKET).download(MANIFEST_KEY);
@@ -75,11 +114,13 @@
             var manifest = JSON.parse(text);
             if (!manifest || !Array.isArray(manifest.folders)) return null;
             var age = Date.now() - (manifest.ts || 0);
-            if (age > MANIFEST_TTL_MS) {
-                _log('fetchManifest: stale (age ' + Math.round(age / 1000) + 's > TTL)', 'info');
-                return null;
+            manifest._age = age;
+            manifest._stale = age > MANIFEST_TTL_MS;
+            if (manifest._stale) {
+                _log('fetchManifest: STALE-WHILE-REVALIDATE (age ' + Math.round(age / 1000) + 's > TTL ' + Math.round(MANIFEST_TTL_MS / 1000) + 's)', 'info');
+            } else {
+                _log('fetchManifest: loaded ' + manifest.folders.length + ' entries (age ' + Math.round(age / 1000) + 's)', 'success');
             }
-            _log('fetchManifest: loaded ' + manifest.folders.length + ' entries (age ' + Math.round(age / 1000) + 's)', 'success');
             return manifest;
         } catch (e) {
             _log('fetchManifest error: ' + (e && e.message || e), 'warn');
@@ -161,18 +202,7 @@
         }
         if (!changed) return;
         _log('library changed: ' + oldCount + ' -> ' + newCount + ' (set differs), notifying UI', 'info');
-        try {
-            window.dispatchEvent(new CustomEvent('blitzkrieg-library-changed', {
-                detail: { oldCount: oldCount, newCount: newCount }
-            }));
-        } catch (e) {
-            // CEP 8/9 fallback — CustomEvent constructor missing in old Chromium
-            try {
-                var ev = document.createEvent('CustomEvent');
-                ev.initCustomEvent('blitzkrieg-library-changed', false, false, { oldCount: oldCount, newCount: newCount });
-                window.dispatchEvent(ev);
-            } catch (e2) {}
-        }
+        _dispatchCustom('blitzkrieg-library-changed', { oldCount: oldCount, newCount: newCount });
     }
 
     // Debounced manifest invalidation — rapid successive mutations (bulk delete,
@@ -203,44 +233,77 @@
     }
 
     /**
-     * Save metadata to localStorage
+     * Save metadata to localStorage. opts.partialUntilTs marks the cache as
+     * "good enough until this timestamp" so the next listTemplates() avoids
+     * re-running the slow path for ~60s after a partial fetch (see #3 in the
+     * fix-wave plan — stops the user from being punished with a 160s reload
+     * every time Shaz times out).
+     *
+     * No length-equality short-circuit. The previous heuristic could silently
+     * skip a real change (e.g. one template renamed in place — same payload
+     * length, different content). Always write; the 5-15ms blocking cost is
+     * negligible vs the user-visible bug of stale grid state.
      */
-    // Track the last-written payload hash so identical repeat writes are skipped.
-    // localStorage.setItem on a ~200KB JSON blob blocks the main thread for 5-20ms
-    // and used to fire every focus event after the background-refresh landed with
-    // unchanged data.
-    var _lastMetaWriteLen = -1;
-    function setCachedMetadata(metadataResults) {
+    function setCachedMetadata(metadataResults, opts) {
+        opts = opts || {};
         var payload;
         try {
-            payload = JSON.stringify({
-                ts: Date.now(),
-                folders: metadataResults,
-            });
+            var obj = { ts: Date.now(), folders: metadataResults };
+            if (opts.partialUntilTs) obj.partialUntilTs = opts.partialUntilTs;
+            if (opts.failedCategories) obj.failedCategories = opts.failedCategories;
+            payload = JSON.stringify(obj);
         } catch (sErr) {
             _log('setCachedMetadata: stringify failed: ' + (sErr && sErr.message || sErr), 'warn');
             return;
         }
-        // Cheap heuristic: skip the write if the length exactly matches the
-        // previous payload (almost always implies identical content for our
-        // use case where metadata.json rarely changes between loads).
-        if (payload.length === _lastMetaWriteLen) {
-            try {
-                var existing = localStorage.getItem(META_CACHE_KEY);
-                if (existing && existing.length === payload.length) {
-                    return; // very likely identical; skip the expensive write
-                }
-            } catch (gErr) {}
-        }
         try {
             localStorage.setItem(META_CACHE_KEY, payload);
-            // Only update the cached length AFTER a successful write — otherwise
-            // a quota-exceeded failure would mark the cache as "in sync" with a
-            // payload that was never persisted.
-            _lastMetaWriteLen = payload.length;
         } catch (e) {
             _log('setCachedMetadata: localStorage write failed: ' + (e && e.message || e), 'warn');
         }
+    }
+
+    /**
+     * Merge stale cache folders with a fresh fetch where some categories
+     * failed. For each failed category, keep the stale entries (if any).
+     * For each success category, take ONLY fresh entries (drops deletes).
+     * Also keeps any stale entries whose category isn't represented at all
+     * in fresh (defensive — shouldn't happen but cheap to guard).
+     */
+    function _mergePartialFolders(staleFolders, freshFolders, failedCategoryNames) {
+        if (!Array.isArray(failedCategoryNames) || failedCategoryNames.length === 0) {
+            return freshFolders || [];
+        }
+        var failedSet = {};
+        for (var i = 0; i < failedCategoryNames.length; i++) failedSet[failedCategoryNames[i]] = 1;
+
+        // Collect successful categories from fresh: any category that has at
+        // least one entry AND isn't in failedSet.
+        var successCats = {};
+        var freshByCat = {};
+        var fresh = freshFolders || [];
+        for (var fi = 0; fi < fresh.length; fi++) {
+            var ff = fresh[fi];
+            if (!ff || !ff.categoryName) continue;
+            if (!freshByCat[ff.categoryName]) freshByCat[ff.categoryName] = [];
+            freshByCat[ff.categoryName].push(ff);
+            if (!failedSet[ff.categoryName]) successCats[ff.categoryName] = 1;
+        }
+
+        var merged = [];
+        // Take fresh entries for success categories.
+        Object.keys(successCats).forEach(function (cat) {
+            var arr = freshByCat[cat];
+            for (var i = 0; i < arr.length; i++) merged.push(arr[i]);
+        });
+        // Take stale entries for failed categories.
+        var stale = staleFolders || [];
+        for (var si = 0; si < stale.length; si++) {
+            var sf = stale[si];
+            if (!sf || !sf.categoryName) continue;
+            if (failedSet[sf.categoryName]) merged.push(sf);
+        }
+        return merged;
     }
 
     /**
@@ -249,9 +312,24 @@
      */
     function invalidateCache() {
         try { localStorage.removeItem(META_CACHE_KEY); } catch (e) {}
-        _lastMetaWriteLen = -1;
         _signedUrlCache = null;
         _signedUrlCacheTime = 0;
+        invalidateManifest();
+    }
+
+    /**
+     * Surgical signed-URL cache invalidation for single-template mutations
+     * (rename, single delete, single move). Avoids re-signing all 290+ URLs
+     * just because one template changed.
+     */
+    function invalidateCacheForPath(storagePath) {
+        if (_signedUrlCache && storagePath && _signedUrlCache[storagePath]) {
+            delete _signedUrlCache[storagePath];
+        }
+        // Local cache + cloud manifest still need to be rebuilt — the changed
+        // template's metadata.json may have changed, and the manifest needs
+        // to reflect rename/delete events.
+        try { localStorage.removeItem(META_CACHE_KEY); } catch (e) {}
         invalidateManifest();
     }
 
@@ -446,7 +524,7 @@
         var page = 0;
         var label = folder === '' ? 'root' : '"' + folder + '"';
         while (page < maxPages) {
-            var res = await sb.storage.from(BUCKET).list(folder, {
+            var res = await _listWithTimeout(folder, {
                 limit: PAGE,
                 offset: offset,
                 sortBy: opts && opts.sortBy ? opts.sortBy : { column: 'name', order: 'asc' },
@@ -528,12 +606,16 @@
             return [];
         }
 
-        // Step 2: List ALL category comp folders in parallel — paginated.
-        // CRITICAL: per-category retry. A single Supabase storage list timeout
-        // for one category used to silently drop ALL templates in that
-        // category (and worse, the published manifest got rebuilt without
-        // them, poisoning every editor's cache for up to 5 min).
-        _log('fetchAllMetadata: listing ' + categories.length + ' category folders in parallel...', 'info');
+        // Steps 2+3: STREAMING category-list + metadata download. Categories
+        // are listed in parallel; as each category list resolves, its folder
+        // entries are pushed onto a shared queue that a fixed worker pool
+        // (CONCURRENCY=50) is already draining. A single 90-second Shaz
+        // retry no longer blocks Dominate Media's 115 metadata downloads
+        // from starting — the slow-path total time becomes
+        //   max(slowest category list, total metadata time / CONCURRENCY)
+        // instead of (slowest category list) + (total metadata / CONCURRENCY).
+        _log('fetchAllMetadata: listing ' + categories.length + ' category folders in parallel (streaming metadata)...', 'info');
+
         async function listCategoryWithRetry(catName, maxAttempts) {
             maxAttempts = maxAttempts || 3;
             var attempts = 0;
@@ -552,55 +634,16 @@
             }
             throw lastErr;
         }
-        var categoryResults = await Promise.all(
-            categories.map(function (cat) {
-                return listCategoryWithRetry(cat.name).then(function (items) {
-                    return { category: cat.name, data: items };
-                }).catch(function (err) {
-                    _log('fetchAllMetadata: listing category "' + cat.name + '" FAILED after retries: ' + (err && err.message || err), 'error');
-                    return { category: cat.name, data: [], error: err };
-                });
-            })
-        );
 
-        // Track which categories failed so the caller can decide whether to
-        // overwrite the cache + manifest (no) or render partial results (ok
-        // for this session, but don't persist a poisoned snapshot).
-        var failedCategoryNames = categoryResults
-            .filter(function(r) { return r.error; })
-            .map(function(r) { return r.category; });
-
-        var allFolderEntries = [];
-        categoryResults.forEach(function (catResult) {
-            if (catResult.error || !catResult.data) return;
-            var compFolders = catResult.data.filter(function (item) { return item.id === null; });
-            _log('fetchAllMetadata: "' + catResult.category + '" → ' + compFolders.length + ' comp folders', 'info');
-            compFolders.forEach(function (folder) {
-                allFolderEntries.push({ categoryName: catResult.category, folderName: folder.name });
-            });
-        });
-
-        _log('fetchAllMetadata: ' + allFolderEntries.length + ' total comp folders, downloading metadata...', 'info');
-
-        if (allFolderEntries.length === 0) {
-            _log('fetchAllMetadata: no comp folders → returning empty (took ' + (Date.now() - t0) + 'ms)', 'warn');
-            var emptyOut = [];
-            if (failedCategoryNames.length > 0) emptyOut._failedCategories = failedCategoryNames;
-            return emptyOut;
-        }
-
-        // Step 3: Download all metadata.json files using a concurrency-limited
-        // worker pool. The previous version ran SEQUENTIAL WAVES of 50-parallel
-        // requests, so 248 templates = 5 waves = ~5 seconds (every wave waited
-        // for its slowest request before starting the next). A worker pool keeps
-        // 50 requests in flight continuously, so the total time drops from
-        // ~5×slowest to ~total/50 ≈ 1.5-2 seconds for the same 248 templates.
-        var CONCURRENCY = 50;
-        var metadataResults = new Array(allFolderEntries.length);
-        var nextIdx = 0;
+        var allFolderEntries = []; // grows as each category list resolves
+        var metadataResults = [];  // 1:1 with allFolderEntries by push order
+        var queueIdx = 0;          // next entry the worker pool should claim
+        var listingDone = false;
+        var failedCategoryNames = [];
 
         function downloadOne(idx) {
             var entry = allFolderEntries[idx];
+            if (!entry) return Promise.resolve();
             var metaPath = entry.categoryName + '/' + entry.folderName + '/metadata.json';
             return sb.storage.from(BUCKET).download(metaPath).then(function (res) {
                 if (res.error) {
@@ -623,15 +666,50 @@
         }
 
         async function worker() {
-            while (nextIdx < allFolderEntries.length) {
-                var myIdx = nextIdx++;
-                await downloadOne(myIdx);
+            while (true) {
+                if (queueIdx < allFolderEntries.length) {
+                    var myIdx = queueIdx++;
+                    await downloadOne(myIdx);
+                } else if (listingDone) {
+                    return;
+                } else {
+                    // Wait briefly for more entries — categories still listing.
+                    await new Promise(function(r) { setTimeout(r, 50); });
+                }
             }
         }
 
+        var CONCURRENCY = 50;
         var workers = [];
         for (var w = 0; w < CONCURRENCY; w++) workers.push(worker());
+
+        // Producer: list categories in parallel, push entries onto queue as
+        // each one resolves. Track failures separately. Once ALL category
+        // list promises have settled, set listingDone so workers can exit.
+        var listPromises = categories.map(function (cat) {
+            return listCategoryWithRetry(cat.name).then(function (items) {
+                var compFolders = items.filter(function (item) { return item.id === null; });
+                _log('fetchAllMetadata: "' + cat.name + '" → ' + compFolders.length + ' comp folders (streaming)', 'info');
+                for (var fi = 0; fi < compFolders.length; fi++) {
+                    allFolderEntries.push({ categoryName: cat.name, folderName: compFolders[fi].name });
+                }
+            }).catch(function (err) {
+                _log('fetchAllMetadata: listing category "' + cat.name + '" FAILED after retries: ' + (err && err.message || err), 'error');
+                failedCategoryNames.push(cat.name);
+            });
+        });
+        await Promise.all(listPromises);
+        listingDone = true;
         await Promise.all(workers);
+
+        _log('fetchAllMetadata: ' + allFolderEntries.length + ' total comp folders downloaded', 'info');
+
+        if (allFolderEntries.length === 0) {
+            _log('fetchAllMetadata: no comp folders → returning empty (took ' + (Date.now() - t0) + 'ms)', 'warn');
+            var emptyOut = [];
+            if (failedCategoryNames.length > 0) emptyOut._failedCategories = failedCategoryNames;
+            return emptyOut;
+        }
 
         // Retry pass for transient failures. A single 503 / network blip
         // during the first sweep used to permanently null that template
@@ -679,22 +757,17 @@
         }
 
         // Attach the failed-category list to the result so the caller can
-        // refuse to overwrite the cache + manifest with a poisoned snapshot.
+        // refuse to overwrite the cache + manifest with a POISONED snapshot
+        // (publishing a missing-Shaz manifest would silently undercount every
+        // other editor for the manifest's lifetime).
         if (hasCategoryFailures) {
             metadataResults._failedCategories = failedCategoryNames;
-            _log('fetchAllMetadata: ' + failedCategoryNames.length + ' categories FAILED to list: [' + failedCategoryNames.join(', ') + ']. Caller MUST skip cache + manifest write.', 'error');
-            // Emit user-facing event so main.js can surface a toast/banner.
-            try {
-                window.dispatchEvent(new CustomEvent('blitzkrieg-library-partial', {
-                    detail: { failedCategories: failedCategoryNames.slice(), withMeta: withMeta, total: metadataResults.length }
-                }));
-            } catch (e) {
-                try {
-                    var ev = document.createEvent('CustomEvent');
-                    ev.initCustomEvent('blitzkrieg-library-partial', false, false, { failedCategories: failedCategoryNames.slice(), withMeta: withMeta, total: metadataResults.length });
-                    window.dispatchEvent(ev);
-                } catch (e2) {}
-            }
+            _log('fetchAllMetadata: ' + failedCategoryNames.length + ' categories FAILED to list: [' + failedCategoryNames.join(', ') + ']. Caller MUST merge with stale cache or skip writes.', 'error');
+            _dispatchCustom('blitzkrieg-library-partial', {
+                failedCategories: failedCategoryNames.slice(),
+                withMeta: withMeta,
+                total: metadataResults.length
+            });
         }
 
         return metadataResults;
@@ -718,7 +791,8 @@
         if (cache && cache.folders && cache.folders.length > 0) {
             // FAST PATH: Use cached metadata, only sign fresh URLs (1 API call)
             var ageMs = Date.now() - (cache.ts || 0);
-            _log('listTemplates: FAST PATH — using cached metadata (' + cache.folders.length + ' entries, age: ' + Math.round(ageMs / 1000) + 's)', 'info');
+            var partialUntilFresh = cache.partialUntilTs && Date.now() < cache.partialUntilTs;
+            _log('listTemplates: FAST PATH — using cached metadata (' + cache.folders.length + ' entries, age: ' + Math.round(ageMs / 1000) + 's' + (partialUntilFresh ? ', partial-grace ' + Math.round((cache.partialUntilTs - Date.now()) / 1000) + 's' : '') + ')', 'info');
             var comps = await buildCompsFromMetadata(cache.folders);
             _log('listTemplates: FAST PATH complete — ' + comps.length + ' comps in ' + (Date.now() - t0) + 'ms', 'success');
 
@@ -743,25 +817,35 @@
                 _log('listTemplates: cache has null-metadata entries — forcing immediate refresh', 'warn');
             }
 
-            if (ageMs >= BACKGROUND_REFRESH_TTL || hasNulls) {
+            // Skip background refresh while the partial-grace window is still
+            // in effect — a category-list timeout already happened recently
+            // and we don't want to repeat the slow path every 60s while the
+            // upstream is down. Grace expires after 60s by default.
+            if ((ageMs >= BACKGROUND_REFRESH_TTL || hasNulls) && !partialUntilFresh) {
                 // Prefer the cloud manifest for the refresh too — it's still 1 req
                 // vs hundreds. Fall through to fetchAllMetadata if manifest is missing.
                 fetchManifest().then(function (manifest) {
-                    if (manifest && manifest.folders && !hasNulls) {
+                    if (manifest && manifest.folders && !manifest._stale && !hasNulls) {
                         setCachedMetadata(manifest.folders);
                         if (manifest.archives) listTemplates._archives = manifest.archives;
                         _log('listTemplates: background manifest refresh done (' + manifest.folders.length + ' entries)', 'info');
                         _maybeNotifyChange(staleFolders, manifest.folders);
                         return null;
                     }
-                    // Either no manifest, or our local cache had nulls and we want
-                    // to re-download metadata directly to fix them.
+                    // Either no manifest, manifest is stale, or our local cache
+                    // had nulls — re-fetch metadata directly to get the latest.
                     return fetchAllMetadata().then(function (freshMeta) {
-                        // Refuse to overwrite cache + manifest with a poisoned
-                        // snapshot when one or more category lists timed out.
-                        // Leave the existing cache alone — partial > poisoned.
                         if (freshMeta && freshMeta._failedCategories && freshMeta._failedCategories.length > 0) {
-                            _log('listTemplates: background refresh aborted — categories failed: [' + freshMeta._failedCategories.join(', ') + ']. Cache + manifest left untouched.', 'warn');
+                            // PARTIAL fetch: merge fresh non-failed with stale failed
+                            // entries, write back with a 60s partial-grace marker so
+                            // the next reload doesn't slow-path again immediately.
+                            var merged = _mergePartialFolders(staleFolders, freshMeta, freshMeta._failedCategories);
+                            setCachedMetadata(merged, {
+                                partialUntilTs: Date.now() + 60 * 1000,
+                                failedCategories: freshMeta._failedCategories.slice()
+                            });
+                            _log('listTemplates: background refresh PARTIAL — merged ' + merged.length + ' entries (failed cats: [' + freshMeta._failedCategories.join(', ') + ']). Manifest left untouched.', 'warn');
+                            _maybeNotifyChange(staleFolders, merged);
                             return;
                         }
                         setCachedMetadata(freshMeta);
@@ -773,7 +857,7 @@
                     _log('listTemplates: background refresh failed: ' + (err && err.message || err), 'warn');
                 });
             } else {
-                _log('listTemplates: skipped background refresh (cache age ' + Math.round(ageMs / 1000) + 's < TTL)', 'info');
+                _log('listTemplates: skipped background refresh (' + (partialUntilFresh ? 'in partial-grace window' : 'cache age ' + Math.round(ageMs / 1000) + 's < TTL') + ')', 'info');
             }
 
             // Also set archives from cache (may be slightly stale — fine for UI)
@@ -782,16 +866,38 @@
             return comps;
         }
 
-        // ----- Tier 2: Cloud manifest file -----
+        // ----- Tier 2: Cloud manifest file (stale-while-revalidate) -----
         // Try to download a single manifest.json instead of 248+ individual
-        // metadata.json files. Brings cold-load time from ~5s to <500ms.
+        // metadata.json files. Brings cold-load time from ~5s to <500ms even
+        // when manifest is hours stale (we serve it immediately and refresh
+        // in the background).
         var manifest = await fetchManifest();
         if (manifest && manifest.folders && manifest.folders.length > 0) {
-            _log('listTemplates: MANIFEST PATH — ' + manifest.folders.length + ' entries in ' + (Date.now() - t0) + 'ms', 'success');
+            var label = manifest._stale ? 'MANIFEST PATH (stale-while-revalidate)' : 'MANIFEST PATH';
+            _log('listTemplates: ' + label + ' — ' + manifest.folders.length + ' entries in ' + (Date.now() - t0) + 'ms', 'success');
             setCachedMetadata(manifest.folders);
             if (manifest.archives) listTemplates._archives = manifest.archives;
             var mComps = await buildCompsFromMetadata(manifest.folders);
-            _log('listTemplates: MANIFEST PATH complete — ' + mComps.length + ' comps in ' + (Date.now() - t0) + 'ms', 'success');
+            _log('listTemplates: ' + label + ' complete — ' + mComps.length + ' comps in ' + (Date.now() - t0) + 'ms', 'success');
+
+            // If manifest was stale, kick off a background refresh so the
+            // NEXT load (and other editors fetching this manifest) get fresh
+            // data. Refuse to overwrite on partial fetch.
+            if (manifest._stale) {
+                fetchAllMetadata().then(function (freshMeta) {
+                    if (freshMeta && freshMeta._failedCategories && freshMeta._failedCategories.length > 0) {
+                        _log('listTemplates: stale-manifest background refresh PARTIAL — leaving manifest untouched. Failed: [' + freshMeta._failedCategories.join(', ') + ']', 'warn');
+                        return;
+                    }
+                    setCachedMetadata(freshMeta);
+                    uploadManifest(freshMeta, listTemplates._archives || []);
+                    _log('listTemplates: stale-manifest background refresh done (' + freshMeta.length + ' entries)', 'info');
+                    _maybeNotifyChange(manifest.folders, freshMeta);
+                }).catch(function (err) {
+                    _log('listTemplates: stale-manifest background refresh failed: ' + (err && err.message || err), 'warn');
+                });
+            }
+
             return mComps;
         }
 
@@ -799,12 +905,20 @@
         _log('listTemplates: SLOW PATH — no cache, no manifest, full fetch...', 'info');
         var metadataResults = await fetchAllMetadata();
 
-        // Build comps from whatever we got so the user sees SOMETHING this
-        // session. But only persist to the cache + cloud manifest when the
-        // fetch was clean — otherwise we'd poison every other editor with a
-        // missing-category snapshot until the manifest TTL expires.
         if (metadataResults && metadataResults._failedCategories && metadataResults._failedCategories.length > 0) {
-            _log('listTemplates: SLOW PATH partial — refusing to write cache or publish manifest. Failed categories: [' + metadataResults._failedCategories.join(', ') + ']', 'warn');
+            // Slow-path partial: there's no stale to merge with (we got here
+            // because no cache existed). Write the partial result with a 60s
+            // grace marker — the user no longer pays the slow-path cost on
+            // every reload while Shaz is timing out. Manifest left untouched
+            // to avoid poisoning other editors.
+            var cleanResults = (metadataResults || []).filter(function(r) {
+                return r && r.metadata !== null && r.metadata !== undefined;
+            });
+            setCachedMetadata(cleanResults, {
+                partialUntilTs: Date.now() + 60 * 1000,
+                failedCategories: metadataResults._failedCategories.slice()
+            });
+            _log('listTemplates: SLOW PATH partial — wrote ' + cleanResults.length + ' entries with 60s grace. Manifest left untouched. Failed: [' + metadataResults._failedCategories.join(', ') + ']', 'warn');
         } else {
             setCachedMetadata(metadataResults);
             uploadManifest(metadataResults, listTemplates._archives || []);
@@ -971,7 +1085,7 @@
                 }
             }
         }
-        invalidateCache();
+        invalidateCacheForPath(storagePath);
     }
 
     // Rename a template (re-upload metadata with new displayName)
@@ -1002,7 +1116,7 @@
         if (uploadResult.error) {
             throw new Error('Failed to update metadata: ' + uploadResult.error.message);
         }
-        invalidateCache();
+        invalidateCacheForPath(storagePath);
     }
 
     // Rename a category (handles nested subfolders like preview/).
@@ -1091,42 +1205,45 @@
         invalidateCache();
     }
 
-    // Delete multiple templates at once (for bulk operations).
-    // Run deletions in PARALLEL with Promise.allSettled so a mid-batch failure
-    // doesn't leave the user with a confusing partial state — we report which
-    // succeeded and which failed instead of aborting on the first error.
-    async function deleteTemplates(storagePaths) {
-        var results = await Promise.allSettled(storagePaths.map(function(p) { return deleteTemplate(p); }));
+    // Worker-pool runner for bulk template ops. Caps in-flight Supabase
+    // requests at CONCURRENCY=10. The previous version did
+    // `Promise.allSettled(N)` which exploded into 100+ simultaneous calls,
+    // each of which did its own recursive `collectAllFiles` listing —
+    // 1000+ concurrent storage requests for a 100-template bulk delete.
+    // Triggers rate limits and timeout cascades.
+    async function _bulkRun(items, perItemFn, opName) {
+        var CONCURRENCY = 10;
+        var idx = 0;
         var failures = [];
-        for (var i = 0; i < results.length; i++) {
-            if (results[i].status === 'rejected') {
-                failures.push({ path: storagePaths[i], error: (results[i].reason && results[i].reason.message) || String(results[i].reason) });
+
+        async function worker() {
+            while (idx < items.length) {
+                var myIdx = idx++;
+                try {
+                    await perItemFn(items[myIdx]);
+                } catch (err) {
+                    failures.push({ item: items[myIdx], error: (err && err.message) || String(err) });
+                }
             }
         }
+
+        var workers = [];
+        for (var w = 0; w < CONCURRENCY; w++) workers.push(worker());
+        await Promise.all(workers);
+
         if (failures.length > 0) {
-            var msg = failures.length + '/' + storagePaths.length + ' template(s) failed to delete';
-            _log('deleteTemplates: ' + msg + ' — first failure: ' + failures[0].path + ': ' + failures[0].error, 'warn');
+            var msg = failures.length + '/' + items.length + ' template(s) failed to ' + opName;
+            _log(opName + 'Templates: ' + msg + ' — first failure: ' + failures[0].item + ': ' + failures[0].error, 'warn');
             throw new Error(msg);
         }
     }
 
-    // Move multiple templates to a new category (for bulk operations).
-    // Parallel + Promise.allSettled so partial failures are reported instead of
-    // aborting on the first failure (which would leave the user with a half-moved
-    // batch and no clear recovery path).
+    async function deleteTemplates(storagePaths) {
+        await _bulkRun(storagePaths, function (p) { return deleteTemplate(p); }, 'delete');
+    }
+
     async function moveTemplates(storagePaths, toCategory) {
-        var results = await Promise.allSettled(storagePaths.map(function(p) { return moveTemplate(p, toCategory); }));
-        var failures = [];
-        for (var i = 0; i < results.length; i++) {
-            if (results[i].status === 'rejected') {
-                failures.push({ path: storagePaths[i], error: (results[i].reason && results[i].reason.message) || String(results[i].reason) });
-            }
-        }
-        if (failures.length > 0) {
-            var msg = failures.length + '/' + storagePaths.length + ' template(s) failed to move';
-            _log('moveTemplates: ' + msg + ' — first failure: ' + failures[0].path + ': ' + failures[0].error, 'warn');
-            throw new Error(msg);
-        }
+        await _bulkRun(storagePaths, function (p) { return moveTemplate(p, toCategory); }, 'move');
     }
 
     // Move a single template from one category to another (handles nested subfolders)
@@ -1143,7 +1260,9 @@
                 throw new Error('Failed to move ' + oldPath + ': ' + moveResult.error.message);
             }
         }
-        invalidateCache();
+        // Both old and new paths changed — invalidate both keys.
+        invalidateCacheForPath(oldStoragePath);
+        invalidateCacheForPath(newBasePath);
 
         return newBasePath;
     }
@@ -1191,10 +1310,14 @@
     // slow path with no fallback, and if their slow paths also partial,
     // the manifest stays gone forever.
     async function forceReload() {
-        _log('forceReload: clearing local caches + slow-path fetch (bypass manifest)', 'info');
+        _log('forceReload: capturing stale, clearing caches, slow-path fetch (bypass manifest)', 'info');
+        // Capture the stale folders BEFORE wiping localStorage so a partial
+        // fetch can merge against them (otherwise forceReload during a
+        // chronic Supabase outage drops failed-category templates entirely).
+        var preExisting = getCachedMetadata();
+        var stale = preExisting && preExisting.folders ? preExisting.folders : [];
         _signedUrlCache = null;
         _signedUrlCacheTime = 0;
-        _lastMetaWriteLen = -1;
         try { localStorage.removeItem(META_CACHE_KEY); } catch (e) {}
 
         var fresh = await fetchAllMetadata();
@@ -1202,10 +1325,17 @@
         if (!fresh._failedCategories || fresh._failedCategories.length === 0) {
             setCachedMetadata(fresh);
             uploadManifest(fresh, listTemplates._archives);
-        } else {
-            _log('forceReload: partial fetch — leaving cache + manifest in their last good state', 'warn');
+            return await buildCompsFromMetadata(fresh);
         }
-        return await buildCompsFromMetadata(fresh);
+        // Partial: merge fresh non-failed with stale failed entries, write
+        // back with 60s grace marker so the user can keep working.
+        var merged = _mergePartialFolders(stale, fresh, fresh._failedCategories);
+        setCachedMetadata(merged, {
+            partialUntilTs: Date.now() + 60 * 1000,
+            failedCategories: fresh._failedCategories.slice()
+        });
+        _log('forceReload: PARTIAL — merged ' + merged.length + ' entries (failed: [' + fresh._failedCategories.join(', ') + ']). Manifest left untouched.', 'warn');
+        return await buildCompsFromMetadata(merged);
     }
 
     // Expose globally
@@ -1224,6 +1354,7 @@
         getArchives: getArchives,
         getArchiveDownloadUrl: getArchiveDownloadUrl,
         invalidateCache: invalidateCache,
+        invalidateCacheForPath: invalidateCacheForPath,
         forceReload: forceReload,
         signPreviewFrames: signPreviewFrames,
         signPaths: signPaths,
