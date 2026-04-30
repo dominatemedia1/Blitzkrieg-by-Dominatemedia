@@ -76,6 +76,10 @@
     // caps total per-category cost at ~28s instead of 92s.
     var LIST_TIMEOUT_MS = 8000;
 
+    // Diagnostic state — populated by listTemplates() at each tier exit so
+    // getDiagnostics() can report what actually happened on the last load.
+    var _lastLoad = { ts: 0, source: null, durationMs: 0, count: 0, partial: false, failedCategories: [] };
+
     function _listWithTimeout(folder, opts, timeoutMs) {
         timeoutMs = timeoutMs || LIST_TIMEOUT_MS;
         var listPromise = sb.storage.from(BUCKET).list(folder, opts || {});
@@ -795,6 +799,7 @@
             _log('listTemplates: FAST PATH — using cached metadata (' + cache.folders.length + ' entries, age: ' + Math.round(ageMs / 1000) + 's' + (partialUntilFresh ? ', partial-grace ' + Math.round((cache.partialUntilTs - Date.now()) / 1000) + 's' : '') + ')', 'info');
             var comps = await buildCompsFromMetadata(cache.folders);
             _log('listTemplates: FAST PATH complete — ' + comps.length + ' comps in ' + (Date.now() - t0) + 'ms', 'success');
+            _lastLoad = { ts: Date.now(), source: 'cache', durationMs: Date.now() - t0, count: comps.length, partial: !!partialUntilFresh, failedCategories: (cache.failedCategories || []).slice() };
 
             // TTL-gated background refresh — the previous version refreshed every
             // single fast-path call (i.e. on every focus event after cooldown), which
@@ -879,6 +884,7 @@
             if (manifest.archives) listTemplates._archives = manifest.archives;
             var mComps = await buildCompsFromMetadata(manifest.folders);
             _log('listTemplates: ' + label + ' complete — ' + mComps.length + ' comps in ' + (Date.now() - t0) + 'ms', 'success');
+            _lastLoad = { ts: Date.now(), source: manifest._stale ? 'manifest-stale' : 'manifest', durationMs: Date.now() - t0, count: mComps.length, partial: false, failedCategories: [] };
 
             // If manifest was stale, kick off a background refresh so the
             // NEXT load (and other editors fetching this manifest) get fresh
@@ -927,7 +933,57 @@
         // Sign URLs and build comps
         var comps2 = await buildCompsFromMetadata(metadataResults);
         _log('listTemplates: SLOW PATH complete — ' + comps2.length + ' comps in ' + (Date.now() - t0) + 'ms', comps2.length > 0 ? 'success' : 'warn');
+        var slowFailed = (metadataResults && metadataResults._failedCategories) ? metadataResults._failedCategories.slice() : [];
+        _lastLoad = { ts: Date.now(), source: 'slow-path', durationMs: Date.now() - t0, count: comps2.length, partial: slowFailed.length > 0, failedCategories: slowFailed };
         return comps2;
+    }
+
+    /**
+     * Snapshot of internal state for diagnostics. Pure read — no network.
+     */
+    function getDiagnostics() {
+        var cache = getCachedMetadata();
+        var sigCache = _signedUrlCache;
+        var manifestCacheState = (typeof _manifestCache !== 'undefined' && _manifestCache) ? {
+            ts: _manifestCache.ts || 0,
+            ageMs: _manifestCache.ts ? Date.now() - _manifestCache.ts : null,
+            folderCount: (_manifestCache.folders && _manifestCache.folders.length) || 0
+        } : null;
+        return {
+            version: (typeof window !== 'undefined' && window.BLITZKRIEG_LOCAL_VERSION) || null,
+            now: Date.now(),
+            lastLoad: {
+                ts: _lastLoad.ts,
+                ageMs: _lastLoad.ts ? Date.now() - _lastLoad.ts : null,
+                source: _lastLoad.source,
+                durationMs: _lastLoad.durationMs,
+                count: _lastLoad.count,
+                partial: _lastLoad.partial,
+                failedCategories: _lastLoad.failedCategories
+            },
+            metaCache: cache ? {
+                folderCount: (cache.folders && cache.folders.length) || 0,
+                ts: cache.ts || 0,
+                ageMs: cache.ts ? Date.now() - cache.ts : null,
+                partialUntilTs: cache.partialUntilTs || null,
+                partialGraceRemainingMs: cache.partialUntilTs ? (cache.partialUntilTs - Date.now()) : null,
+                failedCategories: (cache.failedCategories || []).slice(),
+                nullMetadataCount: (cache.folders || []).filter(function(f) { return !f || f.metadata == null; }).length
+            } : null,
+            manifestMemCache: manifestCacheState,
+            signedUrlCache: sigCache ? {
+                ageMs: Date.now() - _signedUrlCacheTime,
+                ttlMs: SIGNED_URL_CACHE_TTL,
+                pathCount: Object.keys(sigCache).length
+            } : null,
+            archives: (listTemplates._archives || []).length,
+            constants: {
+                LIST_TIMEOUT_MS: LIST_TIMEOUT_MS,
+                MANIFEST_TTL_MS: MANIFEST_TTL_MS,
+                SIGNED_URL_EXPIRY: SIGNED_URL_EXPIRY,
+                SIGNED_URL_CACHE_TTL: SIGNED_URL_CACHE_TTL
+            }
+        };
     }
 
     // Download a template's .aep file to a temp location for import
@@ -1358,5 +1414,6 @@
         forceReload: forceReload,
         signPreviewFrames: signPreviewFrames,
         signPaths: signPaths,
+        getDiagnostics: getDiagnostics,
     };
 })();

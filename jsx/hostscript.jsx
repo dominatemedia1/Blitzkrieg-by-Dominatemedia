@@ -222,26 +222,26 @@ JSON = {};
     };
 }());
 
-// Self-test: verify polyfill produces valid JSON (catches future regressions).
-// THROWS on failure — main.js's safeEvalScript catches this and surfaces a
-// toast, which is far better than silently corrupting every metadata.json
-// the panel writes for the rest of the AE session. Without the throw, every
-// stash, rename, generate, and submission upload landed JSON like `[{:,:}]`
-// in storage — invisible until the next library load, at which point the
-// retry pass and partial-load detection kick in but the cause is opaque.
+// Self-test: verify polyfill produces valid JSON. Logs failure but does NOT
+// throw — a thrown error here halts the entire hostscript.jsx top-level eval,
+// which leaves EVERY function (getStashedComps, generatePreviewFrames,
+// debugLibrary, etc.) undefined. Result: panel loads but nothing works,
+// debug button shows blank, generate is dead. Silent metadata corruption is
+// bad; total panel breakage is worse. Stash a flag so callers can probe.
+$.global.__blitzJsonPolyfillOk = true;
+$.global.__blitzJsonPolyfillStatus = 'ok';
 (function() {
     try {
         var _t = JSON.stringify({"a": "b", "n": 1, "x": null});
         if (_t.indexOf('"a"') === -1) {
-            var msg = "Blitzkrieg: CRITICAL - JSON.stringify polyfill self-test FAILED on AE " +
-                ((typeof AE_VERSION_INFO !== "undefined" && AE_VERSION_INFO.versionString) || "unknown") +
-                ", produced: " + _t;
-            $.writeln(msg);
-            throw new Error(msg);
+            $.global.__blitzJsonPolyfillOk = false;
+            $.global.__blitzJsonPolyfillStatus = 'self-test-failed: ' + _t;
+            $.writeln("Blitzkrieg: WARN - JSON.stringify polyfill self-test produced unexpected output: " + _t);
         }
     } catch (e) {
-        $.writeln("Blitzkrieg: CRITICAL - JSON.stringify self-test threw: " + e.toString());
-        throw e;
+        $.global.__blitzJsonPolyfillOk = false;
+        $.global.__blitzJsonPolyfillStatus = 'threw: ' + e.toString();
+        $.writeln("Blitzkrieg: WARN - JSON.stringify self-test threw: " + e.toString());
     }
 }());
 
