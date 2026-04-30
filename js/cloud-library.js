@@ -70,11 +70,18 @@
     // background refresh" vs "use this immediately + refresh in the background".
     var MANIFEST_TTL_MS = 5 * 60 * 1000;
 
-    // Per-call timeout for `sb.storage.from(BUCKET).list(...)`. Supabase server
-    // timeout is ~30s — far too long when one bad category times out 3× through
-    // the retry wrapper (~92s of dead air). 8s per attempt + 1s/2s linear backoff
-    // caps total per-category cost at ~28s instead of 92s.
-    var LIST_TIMEOUT_MS = 8000;
+    // Per-attempt list timeout — adaptive. 8s was too aggressive for slow
+    // networks (regional editors on high-latency links saw EVERY category
+    // time out at exactly 8000ms, manifest never refreshed, new uploads
+    // invisible). The Supabase server-side timeout is ~30s; we want to
+    // sit under that on the first try and grow on retries to forgive a
+    // single transient backend slowdown.
+    //   attempt 1 → 15s, attempt 2 → 30s, attempt 3 → 60s
+    // Worst case 3-attempt cost is 15+1+30+2+60 = 108s per failing category
+    // BUT a healthy category resolves in 1-2s so this only matters when the
+    // backend is genuinely failing for that prefix.
+    var LIST_TIMEOUT_BY_ATTEMPT = [15000, 30000, 60000];
+    var LIST_TIMEOUT_MS = LIST_TIMEOUT_BY_ATTEMPT[0]; // legacy alias for diagnostics
 
     // Diagnostic state — populated by listTemplates() at each tier exit so
     // getDiagnostics() can report what actually happened on the last load.
@@ -527,12 +534,13 @@
         var maxPages = 50; // Safety limit
         var page = 0;
         var label = folder === '' ? 'root' : '"' + folder + '"';
+        var pageTimeout = (opts && opts._timeoutMs) || undefined;
         while (page < maxPages) {
             var res = await _listWithTimeout(folder, {
                 limit: PAGE,
                 offset: offset,
                 sortBy: opts && opts.sortBy ? opts.sortBy : { column: 'name', order: 'asc' },
-            });
+            }, pageTimeout);
             if (res.error) {
                 _log('List FAILED for ' + label + ': ' + res.error.message + ' (status: ' + (res.status || 'unknown') + ')', 'error');
                 throw new Error('List failed for ' + label + ': ' + res.error.message);
@@ -625,14 +633,20 @@
             var attempts = 0;
             var lastErr;
             while (attempts < maxAttempts) {
+                var attemptIdx = attempts;
                 attempts++;
+                var attemptTimeout = LIST_TIMEOUT_BY_ATTEMPT[attemptIdx] || LIST_TIMEOUT_BY_ATTEMPT[LIST_TIMEOUT_BY_ATTEMPT.length - 1];
                 try {
-                    return await listAllPaginated(catName);
+                    return await listAllPaginated(catName, { _timeoutMs: attemptTimeout });
                 } catch (err) {
                     lastErr = err;
-                    _log('listCategory "' + catName + '" attempt ' + attempts + '/' + maxAttempts + ' failed: ' + (err && err.message || err), 'warn');
+                    _log('listCategory "' + catName + '" attempt ' + attempts + '/' + maxAttempts + ' (timeout ' + attemptTimeout + 'ms) failed: ' + (err && err.message || err), 'warn');
                     if (attempts < maxAttempts) {
-                        await new Promise(function(r) { setTimeout(r, 1000 * attempts); });
+                        // Jittered backoff: 1.5s, 3s + ±400ms. Slow networks
+                        // can recover within a couple of seconds; longer waits
+                        // just stretch the user's perceived load time.
+                        var backoff = 1500 * attempts + Math.floor(Math.random() * 400);
+                        await new Promise(function(r) { setTimeout(r, backoff); });
                     }
                 }
             }
@@ -687,21 +701,33 @@
         var workers = [];
         for (var w = 0; w < CONCURRENCY; w++) workers.push(worker());
 
-        // Producer: list categories in parallel, push entries onto queue as
-        // each one resolves. Track failures separately. Once ALL category
-        // list promises have settled, set listingDone so workers can exit.
-        var listPromises = categories.map(function (cat) {
-            return listCategoryWithRetry(cat.name).then(function (items) {
-                var compFolders = items.filter(function (item) { return item.id === null; });
-                _log('fetchAllMetadata: "' + cat.name + '" → ' + compFolders.length + ' comp folders (streaming)', 'info');
-                for (var fi = 0; fi < compFolders.length; fi++) {
-                    allFolderEntries.push({ categoryName: cat.name, folderName: compFolders[fi].name });
+        // Producer: list categories with capped parallelism. Listing all 4-10
+        // categories simultaneously hammered the Supabase storage backend
+        // and caused EVERY list call to time out at exactly 8s on slow
+        // (high-latency) networks — manifest never refreshed and new
+        // uploads stayed invisible. Cap at 2 in-flight at a time so a slow
+        // network has bandwidth headroom for each list to actually finish.
+        var LIST_CAT_CONCURRENCY = 2;
+        var catQueue = categories.slice();
+        async function listCatWorker() {
+            while (catQueue.length > 0) {
+                var cat = catQueue.shift();
+                if (!cat) break;
+                try {
+                    var items = await listCategoryWithRetry(cat.name);
+                    var compFolders = items.filter(function (item) { return item.id === null; });
+                    _log('fetchAllMetadata: "' + cat.name + '" → ' + compFolders.length + ' comp folders (streaming)', 'info');
+                    for (var fi = 0; fi < compFolders.length; fi++) {
+                        allFolderEntries.push({ categoryName: cat.name, folderName: compFolders[fi].name });
+                    }
+                } catch (err) {
+                    _log('fetchAllMetadata: listing category "' + cat.name + '" FAILED after retries: ' + (err && err.message || err), 'error');
+                    failedCategoryNames.push(cat.name);
                 }
-            }).catch(function (err) {
-                _log('fetchAllMetadata: listing category "' + cat.name + '" FAILED after retries: ' + (err && err.message || err), 'error');
-                failedCategoryNames.push(cat.name);
-            });
-        });
+            }
+        }
+        var listPromises = [];
+        for (var lcw = 0; lcw < LIST_CAT_CONCURRENCY; lcw++) listPromises.push(listCatWorker());
         await Promise.all(listPromises);
         listingDone = true;
         await Promise.all(workers);
@@ -979,6 +1005,7 @@
             archives: (listTemplates._archives || []).length,
             constants: {
                 LIST_TIMEOUT_MS: LIST_TIMEOUT_MS,
+                LIST_TIMEOUT_BY_ATTEMPT: LIST_TIMEOUT_BY_ATTEMPT.slice(),
                 MANIFEST_TTL_MS: MANIFEST_TTL_MS,
                 SIGNED_URL_EXPIRY: SIGNED_URL_EXPIRY,
                 SIGNED_URL_CACHE_TTL: SIGNED_URL_CACHE_TTL

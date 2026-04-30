@@ -1314,7 +1314,8 @@
                 if (d.signedUrlCache) {
                     debugLog('Signed URL cache: ' + d.signedUrlCache.pathCount + ' paths, age ' + Math.round(d.signedUrlCache.ageMs / 1000) + 's', 'info');
                 }
-                debugLog('Constants: list-timeout=' + d.constants.LIST_TIMEOUT_MS + 'ms, manifest-ttl=' + d.constants.MANIFEST_TTL_MS + 'ms', 'info');
+                var attemptSched = (d.constants.LIST_TIMEOUT_BY_ATTEMPT || [d.constants.LIST_TIMEOUT_MS]).join('/');
+                debugLog('Constants: list-timeout-schedule=' + attemptSched + 'ms, manifest-ttl=' + d.constants.MANIFEST_TTL_MS + 'ms', 'info');
             }
         } catch (diagErr) {
             debugLog('cloudLibrary.getDiagnostics threw: ' + diagErr.message, 'error');
