@@ -4,6 +4,9 @@
 
     var csInterface = new CSInterface();
     var BLITZKRIEG_LOCAL_VERSION = '1.3.1';
+    // Expose to other modules (cloud-library.js getDiagnostics, console probes)
+    // so users can copy-paste a version string when reporting bugs.
+    window.BLITZKRIEG_LOCAL_VERSION = BLITZKRIEG_LOCAL_VERSION;
 
     // CEP bridge detection — window.__adobe_cep__ is the native bridge to ExtendScript.
     // csInterface.evalScript is always a function (prototype), but it THROWS if __adobe_cep__ is missing.
@@ -1279,29 +1282,91 @@
      * Runs library diagnostics and logs detailed folder structure info to the debug log.
      */
     function runLibraryDiagnostics() {
-        debugLog('Diagnostics: Cloud library mode', 'info');
+        debugLog('=== Blitzkrieg Diagnostics ===', 'info');
+        debugLog('Panel version: ' + (typeof BLITZKRIEG_LOCAL_VERSION !== 'undefined' ? BLITZKRIEG_LOCAL_VERSION : 'unknown'), 'info');
+        debugLog('Mode: Cloud library', 'info');
         debugLog('CEP bridge: ' + (_hasCepBridge ? 'Available' : 'NOT available — import/generate disabled'), _hasCepBridge ? 'success' : 'error');
         debugLog('Templates loaded: ' + allComps.length, 'info');
         var categories = {};
         allComps.forEach(function(c) { categories[c.category] = (categories[c.category] || 0) + 1; });
         Object.keys(categories).sort().forEach(function(cat) { debugLog('  ' + cat + ': ' + categories[cat], 'info'); });
+
+        // Cloud library state — last load, cache age, manifest, partial-grace.
+        try {
+            if (window.cloudLibrary && typeof window.cloudLibrary.getDiagnostics === 'function') {
+                var d = window.cloudLibrary.getDiagnostics();
+                if (d.lastLoad && d.lastLoad.ts) {
+                    debugLog('Last load: ' + d.lastLoad.source + ' — ' + d.lastLoad.count + ' comps in ' + d.lastLoad.durationMs + 'ms (' + Math.round(d.lastLoad.ageMs / 1000) + 's ago)' + (d.lastLoad.partial ? ' [PARTIAL]' : ''), d.lastLoad.partial ? 'warn' : 'success');
+                    if (d.lastLoad.failedCategories.length > 0) {
+                        debugLog('  failed categories: [' + d.lastLoad.failedCategories.join(', ') + ']', 'warn');
+                    }
+                } else {
+                    debugLog('Last load: never', 'warn');
+                }
+                if (d.metaCache) {
+                    debugLog('localStorage meta cache: ' + d.metaCache.folderCount + ' folders, age ' + Math.round(d.metaCache.ageMs / 1000) + 's, nulls ' + d.metaCache.nullMetadataCount, 'info');
+                    if (d.metaCache.partialGraceRemainingMs !== null && d.metaCache.partialGraceRemainingMs > 0) {
+                        debugLog('  partial-grace remaining: ' + Math.round(d.metaCache.partialGraceRemainingMs / 1000) + 's, failed cats: [' + d.metaCache.failedCategories.join(', ') + ']', 'warn');
+                    }
+                } else {
+                    debugLog('localStorage meta cache: empty', 'warn');
+                }
+                if (d.signedUrlCache) {
+                    debugLog('Signed URL cache: ' + d.signedUrlCache.pathCount + ' paths, age ' + Math.round(d.signedUrlCache.ageMs / 1000) + 's', 'info');
+                }
+                debugLog('Constants: list-timeout=' + d.constants.LIST_TIMEOUT_MS + 'ms, manifest-ttl=' + d.constants.MANIFEST_TTL_MS + 'ms', 'info');
+            }
+        } catch (diagErr) {
+            debugLog('cloudLibrary.getDiagnostics threw: ' + diagErr.message, 'error');
+        }
+
+        // Update / OTA state
+        try {
+            if (typeof window.__blitzGetUpdateFailure === 'function') {
+                var uf = window.__blitzGetUpdateFailure();
+                if (uf) debugLog('Update failure record: v' + uf.version + ', attempts=' + uf.attempts + ', err=' + uf.lastError, 'warn');
+                else debugLog('Update failure record: none', 'success');
+            }
+        } catch (ufErr) {}
+
+        // Auth state
+        try {
+            if (window.blitzkriegAuth) {
+                var u = window.blitzkriegAuth.getUser();
+                var tm = window.blitzkriegAuth.getTeamMember();
+                debugLog('Auth: user=' + (u && u.email || 'none') + ', team_member=' + (tm && tm.full_name || 'none') + ', admin=' + window.blitzkriegAuth.isAdmin(), u ? 'success' : 'warn');
+            }
+        } catch (authErr) {}
+
         // Cloud-mode panel: skip the local-FS scan branch entirely. Stale
         // localStorage `ae_asset_stash_path` from earlier installs would
         // otherwise drive `debugLibrary("J:\\")` and dump the user's
         // $RECYCLE.BIN, System Volume Information, and PROJECTS contents
         // into the debug log + telemetry pipeline.
         try { localStorage.removeItem('ae_asset_stash_path'); } catch (eRm) {}
-        // Quick ExtendScript availability ping (no path argument — no FS walk).
+
+        // ExtendScript availability ping — also probe JSON polyfill status.
         safeEvalScript('typeof getStashedComps', function(typeResult) {
-            debugLog('ExtendScript function check: typeof getStashedComps = "' + typeResult + '"', typeResult === 'function' ? 'success' : 'error');
+            debugLog('ExtendScript: typeof getStashedComps = "' + typeResult + '"', typeResult === 'function' ? 'success' : 'error');
             if (typeResult !== 'function') {
-                debugLog('CRITICAL: hostscript.jsx functions not loaded! ExtendScript may have a syntax error.', 'error');
-                safeEvalScript('try { eval("getStashedComps"); "ok"; } catch(e) { e.toString(); }', function(errResult) {
-                    debugLog('ExtendScript error detail: ' + errResult, 'error');
-                });
+                debugLog('CRITICAL: hostscript.jsx functions not loaded — JSX file likely failed to eval. Check polyfill self-test.', 'error');
             }
+            // Probe the polyfill flag set inside hostscript.jsx top-level IIFE.
+            safeEvalScript('typeof $.global.__blitzJsonPolyfillStatus !== "undefined" ? $.global.__blitzJsonPolyfillStatus : "unknown"', function(jsonStatus) {
+                debugLog('JSON polyfill status: ' + jsonStatus, jsonStatus === 'ok' ? 'success' : 'warn');
+            });
+            safeEvalScript('typeof AE_VERSION_INFO !== "undefined" ? AE_VERSION_INFO.versionString : "unknown"', function(aeVer) {
+                debugLog('AE version: ' + aeVer, 'info');
+            });
         });
     }
+    // Small console helper that returns the diag snapshot as an object so
+    // power users can copy-paste it from DevTools.
+    window.__blitzDiagnostics = function() {
+        try {
+            return window.cloudLibrary && window.cloudLibrary.getDiagnostics ? window.cloudLibrary.getDiagnostics() : null;
+        } catch (e) { return { error: e.message }; }
+    };
     // Expose to window
     window.__blitzkriegDebug = runLibraryDiagnostics;
     window.__blitzkriegToggleDebug = toggleDebugLog;
