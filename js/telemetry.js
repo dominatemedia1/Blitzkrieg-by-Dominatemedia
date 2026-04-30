@@ -90,14 +90,32 @@
     // localStorage. Returns a Promise resolving to the new token (or null).
     // Used after a 401 from the sync endpoint so the next attempt has fresh
     // credentials before queueing.
+    //
+    // Coalesced: multiple concurrent 401s (e.g. flushQueue running in
+    // parallel with sendPayload) share a single in-flight refresh promise
+    // for ~5s. Without coalescing, N parallel sends each hit 401 and each
+    // call refreshSession(), spawning N parallel refresh round-trips that
+    // race against the same refresh-token row — Supabase honours one and
+    // rejects the rest as "refresh_token_already_used", which then flips
+    // the user to logged-out.
+    var _refreshInFlight = null;
+    var _refreshInFlightUntil = 0;
     function _refreshTokenAndRead() {
+        if (_refreshInFlight && Date.now() < _refreshInFlightUntil) return _refreshInFlight;
         var sb = window.blitzkriegSupabase;
         if (!sb || !sb.auth || !sb.auth.refreshSession) return Promise.resolve(null);
-        return sb.auth.refreshSession().then(function () {
+        _refreshInFlightUntil = Date.now() + 5000;
+        _refreshInFlight = sb.auth.refreshSession().then(function () {
             return getAuthToken();
         }, function () {
             return null;
+        }).then(function (token) {
+            // Hold the in-flight promise for the full 5s window so callers
+            // arriving slightly after the resolve still coalesce instead of
+            // spawning a second refresh.
+            return token;
         });
+        return _refreshInFlight;
     }
 
     function clearQueue() {
@@ -308,12 +326,25 @@
         });
     }
 
+    // Re-entry guard for flushQueue. Two parallel flushes (e.g. the
+    // periodic timer firing while a forced flush from beforeunload is in
+    // flight) would each loadQueue(), each fire N XHRs against the same
+    // entries, and the second saveQueue() would race the first — leaving
+    // bookkeeping inconsistent and shipping every event 2×.
+    var _flushing = false;
     function flushQueue(callback) {
+        if (_flushing) { if (callback) callback(); return; }
         var queue = loadQueue();
         if (queue.length === 0) { if (callback) callback(); return; }
 
         var token = getAuthToken();
         if (!token) { if (callback) callback(); return; }
+        _flushing = true;
+        var origCallback = callback;
+        callback = function () {
+            _flushing = false;
+            if (origCallback) origCallback();
+        };
 
         // Keep queue in localStorage until all sends finish — only replace with remaining
         var remaining = [];

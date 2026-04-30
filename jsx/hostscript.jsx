@@ -372,14 +372,17 @@ function normalizeFsPath(path) {
     // Only encode for Unix-style paths (macOS/Linux)
     // Windows paths start with a drive letter and are handled natively
     if (path.charAt(0) === '/') {
-        // Encode `%` FIRST so a folder named "50%OFF" doesn't get its
-        // literal `%` later interpreted as the start of a `%20` produced
-        // by space-encoding. Only encode `%` when NOT already followed by
-        // two hex digits (idempotent — running normalizeFsPath twice is a
-        // no-op). Then encode the URI-significant characters.
+        // Encode EVERY `%` to `%25` first. The previous "smart" regex
+        // `/%(?![0-9A-Fa-f]{2})/` skipped `%` followed by two hex digits to
+        // make the function idempotent — but a folder literally named
+        // `50%20DISCOUNT` then survived unchanged and ExtendScript's
+        // File()/Folder() constructor decoded `%20` as a space, looking up
+        // `50 DISCOUNT` and failing to find the folder. Idempotency is not
+        // worth that bug. Caller invariant: pass RAW filesystem paths only;
+        // do not call this function twice on the same string.
         // Do NOT use encodeURIComponent - it breaks non-ASCII chars in ExtendScript.
         return path
-            .replace(/%(?![0-9A-Fa-f]{2})/g, '%25')
+            .replace(/%/g, '%25')
             .replace(/ /g, '%20')
             .replace(/#/g, '%23')
             .replace(/\?/g, '%3F');

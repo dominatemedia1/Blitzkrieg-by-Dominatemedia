@@ -92,18 +92,31 @@
         return null;
     }
 
+    // In-flight guard. Without this, every validateSession() call (initial
+    // boot + reconnect retries + offline-screen retries) kicks a fresh
+    // 3-attempt RPC chain. Three rapid validateSession() calls within the
+    // 4.5s backoff window = 9 RPC calls hammering the same row. The flag
+    // is module-scoped (above the IIFE close) so concurrent invocations
+    // share state.
+    var _linkInFlight = false;
     function _linkUserIdWithRetry(attempt) {
+        if (attempt === 0) {
+            if (_linkInFlight) return;
+            _linkInFlight = true;
+        }
         var sb = window.blitzkriegSupabase;
-        if (!sb) return;
+        if (!sb) { _linkInFlight = false; return; }
         sb.rpc('link_blitzkrieg_user_id').then(function (res) {
             if (res && res.error) throw res.error;
             if (attempt > 0) console.log('Auto-linked user_id to team member (attempt ' + (attempt + 1) + ')');
             else console.log('Auto-linked user_id to team member');
+            _linkInFlight = false;
         }).catch(function (err) {
             if (attempt < 2) {
                 var delay = 1500 * Math.pow(3, attempt); // 1.5s, 4.5s
                 setTimeout(function () { _linkUserIdWithRetry(attempt + 1); }, delay);
             } else {
+                _linkInFlight = false;
                 // Surface to debug log for visibility — without this the team
                 // member may be stuck in email-fallback every login forever.
                 if (typeof window._blitzLog === 'function') {
