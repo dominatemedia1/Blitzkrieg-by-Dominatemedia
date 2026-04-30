@@ -145,6 +145,29 @@
     var isLoading = false; // Prevents race conditions in async operations
     var pendingLibraryReload = false; // Deferred reload when loadLibrary is called while isLoading
     var stashInProgress = false; // Suppresses focus-triggered loads during stash/generate operations
+
+    // Watchdog: if a stash/generate operation never returns from the CEP
+    // bridge (hostscript.jsx threw before responding, ExtendScript engine
+    // wedged, etc.), the panel was previously pinned `stashInProgress=true`
+    // forever and all focus-triggered loadLibrary calls were silently
+    // suppressed. Watchdog auto-clears the flag after 90s.
+    var _stashWatchdogTimer = null;
+    function setStashInProgress(val, label) {
+        stashInProgress = !!val;
+        if (_stashWatchdogTimer) {
+            clearTimeout(_stashWatchdogTimer);
+            _stashWatchdogTimer = null;
+        }
+        if (val) {
+            _stashWatchdogTimer = setTimeout(function () {
+                if (stashInProgress) {
+                    debugLog('stashInProgress watchdog fired — clearing flag (op: ' + (label || 'unknown') + ' did not return after 90s)', 'warn');
+                    setStashInProgress(false);
+                }
+                _stashWatchdogTimer = null;
+            }, 90000);
+        }
+    }
     var bulkSelectedIds = new Set(); // Track selected items for bulk operations
     var bulkMode = false; // Whether bulk selection mode is active
 
@@ -2290,9 +2313,9 @@
         showToast('Generating preview for "' + compName + '"...');
 
         var safePath = escapeForExtendScript(aepPath);
-        stashInProgress = true;
+        setStashInProgress(true, 'generatePreviewFrames');
         safeEvalScript('generatePreviewFrames("' + safePath + '")', function(result) {
-            stashInProgress = false;
+            setStashInProgress(false);
             hideSpinner();
             if (!result) {
                 showToast('Unexpected error generating preview.', true);
@@ -2312,6 +2335,12 @@
                     // by libraryPath, which is now ignored).
                     setTimeout(function() { loadLibrary(); }, 800);
                 }
+            } else if (result.indexOf('RESTORE-FAILED') === 0) {
+                // The hostscript could not reopen the user's working project
+                // after preview gen — AE is now showing a temp comp. Loud
+                // toast + log so the user knows to reopen manually.
+                debugLog('Preview gen restore failed: ' + result, 'error');
+                showToast(result.replace(/^RESTORE-FAILED:\s*/, ''), true);
             } else {
                 showToast(result, true);
             }
@@ -2335,18 +2364,18 @@
         if (!comp) { comp = { storagePath: storagePath, name: compName }; }
 
         showSpinner();
-        stashInProgress = true;
+        setStashInProgress(true);
         showToast('Generating thumbnail + preview for "' + compName + '"...');
 
         generateCloudThumbnail(comp).then(function() {
-            stashInProgress = false;
+            setStashInProgress(false);
             hideSpinner();
             showToast('Thumbnail + preview generated for "' + compName + '"!');
             // Invalidate cache and reload to pick up new thumb + preview frames
             window.cloudLibrary.invalidateCache();
             loadLibrary();
         }).catch(function(err) {
-            stashInProgress = false;
+            setStashInProgress(false);
             hideSpinner();
             showToast('Failed to generate: ' + err.message, true);
         });
@@ -2389,7 +2418,7 @@
         }
 
         addCompModal.style.display = 'none';
-        stashInProgress = true;
+        setStashInProgress(true);
         showSpinner();
         showToast('Submitting composition for review...');
 
@@ -2401,7 +2430,7 @@
                     var parsed = JSON.parse(result);
                     if (parsed.result && parsed.result.indexOf('Error') === 0) {
                         showToast(parsed.result, true);
-                        stashInProgress = false;
+                        setStashInProgress(false);
                         hideSpinner();
                         return;
                     }
@@ -2523,7 +2552,7 @@
                                 totalBytes
                             );
                         }
-                        stashInProgress = false;
+                        setStashInProgress(false);
                         hideSpinner();
                         loadSubmissionCounts();
 
@@ -2540,7 +2569,7 @@
                 } catch (err) {
                     debugLog('Upload error: ' + err.message, 'error');
                     showToast('Failed to submit template: ' + err.message, true);
-                    stashInProgress = false;
+                    setStashInProgress(false);
                     hideSpinner();
                     // Clean up the temp stash dir we created — without this, every
                     // failed upload leaks a full comp bundle (AEP + frames + metadata)
@@ -2949,7 +2978,7 @@
         // Cloud import path
         if (storagePath && window.cloudLibrary) {
             showSpinner();
-            stashInProgress = true; // Block focus-triggered loadLibrary during import
+            setStashInProgress(true, 'import'); // Block focus-triggered loadLibrary during import
             showToast('Downloading template...');
             debugLog('IMPORT: starting cloud import for ' + storagePath);
 
@@ -2990,9 +3019,9 @@
                     });
                 });
             }).then(function() {
-                stashInProgress = false;
+                setStashInProgress(false);
             }, function (err) {
-                stashInProgress = false;
+                setStashInProgress(false);
                 hideSpinner();
                 debugLog('IMPORT FAIL: ' + err.message, 'error');
                 showToast('Import failed: ' + err.message, true);
@@ -3007,12 +3036,12 @@
         }
 
         showSpinner();
-        stashInProgress = true; // Block focus-triggered loadLibrary during import
+        setStashInProgress(true, 'import'); // Block focus-triggered loadLibrary during import
         var safePath = escapeForExtendScript(aepPath);
         var safeDisplayName = _trackComp ? escapeForExtendScript(_trackComp.name) : '';
 
         safeEvalScript('importComp("' + safePath + '","' + safeDisplayName + '")', function (result) {
-            stashInProgress = false;
+            setStashInProgress(false);
             hideSpinner();
             if (!result) {
                 showToast('Unexpected error importing.', true);
@@ -6945,7 +6974,7 @@
         try { localStorage.setItem('blitzkrieg_thumb_blacklist', JSON.stringify(thumbBlacklist)); } catch(e) {}
 
         showSpinner();
-        stashInProgress = true;
+        setStashInProgress(true);
         var processed = 0;
         var succeeded = 0;
         var failed = 0;
@@ -6967,7 +6996,7 @@
 
         function processNext() {
             if (processed >= total) {
-                stashInProgress = false;
+                setStashInProgress(false);
                 generateAllMissingThumbnails._running = false;
                 hideSpinner();
                 var bar = document.getElementById('generate-progress-bar');

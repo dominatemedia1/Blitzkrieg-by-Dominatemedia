@@ -222,15 +222,26 @@ JSON = {};
     };
 }());
 
-// Self-test: verify polyfill produces valid JSON (catches future regressions)
+// Self-test: verify polyfill produces valid JSON (catches future regressions).
+// THROWS on failure — main.js's safeEvalScript catches this and surfaces a
+// toast, which is far better than silently corrupting every metadata.json
+// the panel writes for the rest of the AE session. Without the throw, every
+// stash, rename, generate, and submission upload landed JSON like `[{:,:}]`
+// in storage — invisible until the next library load, at which point the
+// retry pass and partial-load detection kick in but the cause is opaque.
 (function() {
     try {
         var _t = JSON.stringify({"a": "b", "n": 1, "x": null});
         if (_t.indexOf('"a"') === -1) {
-            $.writeln("Blitzkrieg: CRITICAL - JSON.stringify polyfill self-test FAILED: " + _t);
+            var msg = "Blitzkrieg: CRITICAL - JSON.stringify polyfill self-test FAILED on AE " +
+                ((typeof AE_VERSION_INFO !== "undefined" && AE_VERSION_INFO.versionString) || "unknown") +
+                ", produced: " + _t;
+            $.writeln(msg);
+            throw new Error(msg);
         }
     } catch (e) {
         $.writeln("Blitzkrieg: CRITICAL - JSON.stringify self-test threw: " + e.toString());
+        throw e;
     }
 }());
 
@@ -361,9 +372,17 @@ function normalizeFsPath(path) {
     // Only encode for Unix-style paths (macOS/Linux)
     // Windows paths start with a drive letter and are handled natively
     if (path.charAt(0) === '/') {
-        // Encode only URI-significant characters that appear in file paths
-        // Do NOT use encodeURIComponent - it breaks non-ASCII chars in ExtendScript
-        return path.replace(/ /g, '%20').replace(/#/g, '%23').replace(/\?/g, '%3F');
+        // Encode `%` FIRST so a folder named "50%OFF" doesn't get its
+        // literal `%` later interpreted as the start of a `%20` produced
+        // by space-encoding. Only encode `%` when NOT already followed by
+        // two hex digits (idempotent — running normalizeFsPath twice is a
+        // no-op). Then encode the URI-significant characters.
+        // Do NOT use encodeURIComponent - it breaks non-ASCII chars in ExtendScript.
+        return path
+            .replace(/%(?![0-9A-Fa-f]{2})/g, '%25')
+            .replace(/ /g, '%20')
+            .replace(/#/g, '%23')
+            .replace(/\?/g, '%3F');
     }
     return path;
 }
@@ -1281,10 +1300,18 @@ function stashSelectedComp(libraryPath, categoryName) {
                 );
                 if (isSystemPath) continue;
 
-                // Step 6: compute a unique destination filename inside (Footage)
+                // Step 6: compute a unique destination filename inside (Footage).
+                // Hard cap on iterations: a corrupted/read-only (Footage) folder
+                // makes every destFile.exists return true forever, hanging the
+                // stash. 9999 is generous (no normal stash needs that many
+                // collisions for one filename) and bounds the worst case.
                 var destFile = new File(buildPath(footageFolder, sourceFile.name));
                 var counter = 1;
+                var collisionGuard = 0;
                 while (destFile.exists) {
+                    if (++collisionGuard > 9999) {
+                        throw new Error("Stash aborted: filename collision loop exceeded 9999 iterations on " + sourceFile.name + " — (Footage) folder may be corrupt.");
+                    }
                     var nameParts = sourceFile.name.split('.');
                     var destExt = nameParts.length > 1 ? nameParts.pop() : '';
                     var destBase = nameParts.join('.') || sourceFile.name;
@@ -2217,8 +2244,15 @@ function generatePreviewFrames(aepPath) {
         }
 
         if (!mainComp) {
-            // Clean up imported item
-            if (importedItem) importedItem.remove();
+            // Clean up imported item — wrap in try/catch because AE may
+            // refuse the remove() if it's holding a reference (e.g. an
+            // active render or selection). Without the guard, the throw
+            // escapes the outer try and stashInProgress in main.js stays
+            // pinned `true` forever, freezing the panel until restart.
+            try { if (importedItem) importedItem.remove(); } catch (remErr) {
+                $.writeln("Blitzkrieg: Warning - importedItem.remove() failed: " + remErr.toString());
+            }
+            importedItem = null;
             return "Error: No composition found in the project file.";
         }
 
@@ -2284,16 +2318,36 @@ function generatePreviewFrames(aepPath) {
             }
         }
 
-        // Clean up - remove imported project
+        // Clean up - remove imported project. try/catch because a thrown
+        // remove() (AE rendering/holding refs) used to escape this whole
+        // function — main.js's safeEvalScript callback never fired, the
+        // stashInProgress flag stayed `true`, and the panel was wedged.
         if (importedItem) {
-            importedItem.remove();
+            try {
+                importedItem.remove();
+            } catch (remErr) {
+                $.writeln("Blitzkrieg: Warning - importedItem.remove() failed: " + remErr.toString());
+            }
+            importedItem = null;
         }
 
-        // Restore original project — suppress dialogs around open()
+        // Restore original project — suppress dialogs around open(). If the
+        // restore itself fails, surface that explicitly so the caller knows
+        // AE is now showing a temp comp instead of the user's working file.
+        var restoreFailed = false;
         if (originalProjectFile && originalProjectFile.exists) {
             try { app.beginSuppressDialogs(); } catch (sd) {}
-            try { app.open(originalProjectFile); } catch (opErr) {}
+            try {
+                app.open(originalProjectFile);
+            } catch (opErr) {
+                restoreFailed = true;
+                $.writeln("Blitzkrieg: ERROR restoring original project after preview gen: " + opErr.toString());
+            }
             try { app.endSuppressDialogs(false); } catch (ed) {}
+        }
+
+        if (restoreFailed) {
+            return "RESTORE-FAILED: Generated " + previewFrameCount + " preview frames but could not reopen your project. Open it manually from File > Open Recent.";
         }
 
         if (previewFrameCount > 0) {
@@ -2306,16 +2360,30 @@ function generatePreviewFrames(aepPath) {
         if (_genFrameDialogsSuppressed) {
             try { app.endSuppressDialogs(false); } catch (edErr) {}
         }
-        // Try to restore original project on error — suppress dialogs
+        // Best-effort cleanup of zombie import — a crash during preview gen
+        // used to leave the imported temp AEP attached to the project,
+        // accumulating across retries until AE OOM'd.
+        if (importedItem) {
+            try { importedItem.remove(); } catch (cleanupErr) {}
+            importedItem = null;
+        }
+        // Try to restore original project on error — suppress dialogs.
+        // If THIS fails too, surface explicitly so the user knows their
+        // working file is no longer the active project.
+        var errRestoreFailed = false;
         try { app.beginSuppressDialogs(); } catch (sd) {}
         try {
             if (originalProjectFile && originalProjectFile.exists) {
                 app.open(originalProjectFile);
             }
         } catch (restoreErr) {
+            errRestoreFailed = true;
             $.writeln("Blitzkrieg: Error restoring project: " + restoreErr.toString());
         }
         try { app.endSuppressDialogs(false); } catch (ed) {}
+        if (errRestoreFailed) {
+            return "RESTORE-FAILED: " + e.toString() + " (project restore also failed; open from File > Open Recent)";
+        }
         return "Error: " + e.toString();
     }
 }
