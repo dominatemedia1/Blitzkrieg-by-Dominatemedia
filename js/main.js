@@ -1285,65 +1285,21 @@
         var categories = {};
         allComps.forEach(function(c) { categories[c.category] = (categories[c.category] || 0) + 1; });
         Object.keys(categories).sort().forEach(function(cat) { debugLog('  ' + cat + ': ' + categories[cat], 'info'); });
-        var libraryPath = getLibraryPath();
-        if (!libraryPath) {
-            return;
-        }
-        debugLog('Running diagnostics for: ' + libraryPath, 'info');
-        debugLog('Platform: ' + navigator.platform + ' | UserAgent: ' + navigator.userAgent.substring(0, 80), 'info');
-        var safePath = escapeForExtendScript(libraryPath);
-
-        // First test: can we even call ExtendScript?
+        // Cloud-mode panel: skip the local-FS scan branch entirely. Stale
+        // localStorage `ae_asset_stash_path` from earlier installs would
+        // otherwise drive `debugLibrary("J:\\")` and dump the user's
+        // $RECYCLE.BIN, System Volume Information, and PROJECTS contents
+        // into the debug log + telemetry pipeline.
+        try { localStorage.removeItem('ae_asset_stash_path'); } catch (eRm) {}
+        // Quick ExtendScript availability ping (no path argument — no FS walk).
         safeEvalScript('typeof getStashedComps', function(typeResult) {
             debugLog('ExtendScript function check: typeof getStashedComps = "' + typeResult + '"', typeResult === 'function' ? 'success' : 'error');
-
             if (typeResult !== 'function') {
                 debugLog('CRITICAL: hostscript.jsx functions not loaded! ExtendScript may have a syntax error.', 'error');
-                // Try to get the actual error
                 safeEvalScript('try { eval("getStashedComps"); "ok"; } catch(e) { e.toString(); }', function(errResult) {
                     debugLog('ExtendScript error detail: ' + errResult, 'error');
                 });
-                return;
             }
-
-            // Run the full diagnostic
-            safeEvalScript('debugLibrary("' + safePath + '")', function(result) {
-                try {
-                    var cleaned = result.replace(/^\ufeff/, '').replace(/\0/g, '').trim();
-                    var info = JSON.parse(cleaned);
-                    debugLog('Diagnostics result:', 'info');
-                    debugLog('  Platform: ' + (info.platform || 'unknown'), 'info');
-                    debugLog('  AE Version: ' + (info.aeVersion || 'unknown'), 'info');
-                    debugLog('  Library exists: ' + info.exists, info.exists ? 'success' : 'error');
-                    debugLog('  Resolved path: ' + (info.resolvedPath || 'N/A'), 'info');
-                    debugLog('  Total items in folder: ' + (info.totalItems || 0), 'info');
-                    if (info.categories) {
-                        debugLog('  Categories found: ' + info.categories.length, info.categories.length > 0 ? 'success' : 'warn');
-                        for (var ci = 0; ci < info.categories.length; ci++) {
-                            var cat = info.categories[ci];
-                            debugLog('    [' + cat.name + '] - ' + cat.compFolders.length + ' comp folders', 'info');
-                            for (var cj = 0; cj < cat.compFolders.length; cj++) {
-                                var cmp = cat.compFolders[cj];
-                                if (!cmp.isTemplate) {
-                                    // Non-template folder (assets, presets, plugins, fonts, grouping folders)
-                                    debugLog('      ' + cmp.name + ' - non-template folder (skipped) Files:[' + cmp.files.slice(0, 5).join(', ') + (cmp.files.length > 5 ? ', ... +' + (cmp.files.length - 5) + ' more' : '') + ']', 'info');
-                                } else {
-                                    var status = cmp.hasAep ? 'OK' : 'MISSING .aep!';
-                                    debugLog('      ' + cmp.name + ' - AEP:' + cmp.hasAep + ' Meta:' + cmp.hasMetadata + ' Thumb:' + cmp.hasThumbnail + ' Files:[' + cmp.files.join(', ') + '] ' + status, cmp.hasAep ? 'success' : 'error');
-                                }
-                            }
-                        }
-                    }
-                    if (info.errors && info.errors.length > 0) {
-                        for (var ei = 0; ei < info.errors.length; ei++) {
-                            debugLog('  ERROR: ' + info.errors[ei], 'error');
-                        }
-                    }
-                } catch (e) {
-                    debugLog('Failed to parse diagnostics: ' + e.toString(), 'error');
-                    debugLog('Raw diagnostic result: ' + (result ? result.substring(0, 500) : '(null)'), 'error');
-                }
-            });
         });
     }
     // Expose to window
