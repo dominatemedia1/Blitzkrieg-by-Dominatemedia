@@ -3,7 +3,7 @@
     'use strict';
 
     var csInterface = new CSInterface();
-    var BLITZKRIEG_LOCAL_VERSION = '1.3.0';
+    var BLITZKRIEG_LOCAL_VERSION = '1.3.1';
     // Expose to other modules (cloud-library.js getDiagnostics, console probes)
     // so users can copy-paste a version string when reporting bugs.
     window.BLITZKRIEG_LOCAL_VERSION = BLITZKRIEG_LOCAL_VERSION;
