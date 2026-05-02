@@ -69,7 +69,10 @@
     // Stale manifests are still served (stale-while-revalidate) — the TTL only
     // controls whether the caller treats the manifest as "fresh enough to skip
     // background refresh" vs "use this immediately + refresh in the background".
-    var MANIFEST_TTL_MS = 5 * 60 * 1000;
+    // Full bucket scans are expensive once the library has hundreds of
+    // templates. Trust the manifest for an hour; admin mutations publish a
+    // fresh manifest immediately, and "Regenerate/Refresh" still forces a scan.
+    var MANIFEST_TTL_MS = 60 * 60 * 1000;
 
     // Per-attempt list timeout — adaptive. 8s was too aggressive for slow
     // networks (regional editors on high-latency links saw EVERY category
