@@ -3,7 +3,7 @@
     'use strict';
 
     var csInterface = new CSInterface();
-    var BLITZKRIEG_LOCAL_VERSION = '1.3.4';
+    var BLITZKRIEG_LOCAL_VERSION = '1.3.5';
     // Expose to other modules (cloud-library.js getDiagnostics, console probes)
     // so users can copy-paste a version string when reporting bugs.
     window.BLITZKRIEG_LOCAL_VERSION = BLITZKRIEG_LOCAL_VERSION;
@@ -395,6 +395,14 @@
                     var timeA = parseInt(a.uniqueId.split('_').pop()) || 0;
                     var timeB = parseInt(b.uniqueId.split('_').pop()) || 0;
                     return timeA - timeB;
+                });
+                break;
+            case 'preview-desc':
+                sorted.sort(function(a, b) {
+                    var ap = a.previewFrameCount > 0 ? 1 : 0;
+                    var bp = b.previewFrameCount > 0 ? 1 : 0;
+                    if (bp !== ap) return bp - ap;
+                    return a.name.localeCompare(b.name);
                 });
                 break;
             case 'duration-desc':
@@ -830,8 +838,15 @@
                     // Clear thumbnail blacklist
                     thumbBlacklist = {};
                     try { localStorage.removeItem('blitzkrieg_thumb_blacklist'); } catch(e) {}
-                    // Clear metadata cache
-                    window.cloudLibrary.invalidateCache();
+                    // Clear only this editor's local metadata/media caches.
+                    // Do not invalidate the shared cloud manifest from a UI
+                    // cache button; that can make every editor fall back to a
+                    // slow/partial storage scan.
+                    if (window.cloudLibrary.clearLocalCache) {
+                        window.cloudLibrary.clearLocalCache();
+                    } else {
+                        window.cloudLibrary.invalidateCache();
+                    }
                     showToast('Cache cleared. Reloading...');
                     loadLibrary();
                 });
@@ -1561,11 +1576,8 @@
                 entries.forEach(function(entry) {
                     if (entry.isIntersecting) {
                         var img = entry.target;
-                        if (img.dataset.src) {
-                            img.src = img.dataset.src;
-                            img.classList.remove('lazy-thumb');
-                            lazyLoadObserver.unobserve(img);
-                        }
+                        hydrateLazyThumbnail(img);
+                        lazyLoadObserver.unobserve(img);
                     }
                 });
             }, {
@@ -1772,10 +1784,13 @@
         var safeAepPath = escapeHTML(comp.aepPath || '');
         var safeStoragePath = escapeHTML(comp.storagePath || '');
         var safeName = escapeHTML(comp.name);
-        var thumbSrc = comp.thumbUrl || (comp.thumbPath ? pathToFileUrl(comp.thumbPath) : '');
+        var safeFolderName = escapeHTML(comp.folderName || '');
+        var isCloudThumb = !!(comp.storagePath && comp.thumbPath);
+        var isBlacklisted = comp.storagePath && thumbBlacklist[comp.storagePath];
+        var thumbSrc = comp.thumbUrl || (!isCloudThumb && comp.thumbPath ? pathToFileUrl(comp.thumbPath) : '');
         var thumbSrcAlt = comp.thumbUrlAlt || '';
         // Skip thumbnail if BOTH URLs previously 404'd
-        if (thumbSrc && comp.storagePath && thumbBlacklist[comp.storagePath]) {
+        if (thumbSrc && isBlacklisted) {
             thumbSrc = '';
             thumbSrcAlt = '';
         }
@@ -1790,7 +1805,6 @@
         var previewClass = hasPreview ? ' has-preview' : '';
 
         var isAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
-        var isBlacklisted = comp.storagePath && thumbBlacklist[comp.storagePath];
         var generatePreviewBtn = '';
         if (comp.storagePath && isAdmin && (!comp.thumbnailVerified || isBlacklisted)) {
             // Cloud template: admin can generate thumbnail (show when not verified or blacklisted)
@@ -1810,8 +1824,13 @@
         var placeholderHtml = '<div class="thumb-placeholder" style="background-color:' + placeholderColor + '"><span class="thumb-placeholder-initial">' + escapeHTML(nameInitial) + '</span></div>';
 
         var altAttr = safeThumbSrcAlt ? ' data-src-alt="' + safeThumbSrcAlt + '"' : '';
-        var thumbHtml = thumbSrc
-            ? '<img data-src="' + safeThumbSrc + '"' + altAttr + ' alt="Thumbnail" class="comp-thumbnail lazy-thumb" loading="lazy">' + placeholderHtml
+        var cloudThumbAttrs = '';
+        if (!thumbSrc && isCloudThumb && !isBlacklisted) {
+            cloudThumbAttrs = ' data-thumb-path="' + escapeHTML(comp.thumbPath) + '"';
+            if (comp.thumbPathAlt) cloudThumbAttrs += ' data-thumb-alt-path="' + escapeHTML(comp.thumbPathAlt) + '"';
+        }
+        var thumbHtml = thumbSrc || cloudThumbAttrs
+            ? '<img' + (thumbSrc ? ' data-src="' + safeThumbSrc + '"' : '') + altAttr + cloudThumbAttrs + ' alt="Thumbnail" class="comp-thumbnail lazy-thumb" loading="lazy">' + placeholderHtml
             : placeholderHtml;
 
         var isFav = isFavorite(comp.uniqueId);
@@ -1828,8 +1847,17 @@
         var previewCountAttr = comp.previewFrameCount ? ' data-preview-count="' + comp.previewFrameCount + '"' : '';
 
         var bulkCheckbox = isAdmin ? '<div class="bulk-select-checkbox" data-unique-id="' + safeUniqueId + '"></div>' : '';
+        var metaParts = [];
+        if (comp.category) metaParts.push('<span class="item-category" title="' + safeCategory + '">' + safeCategory + '</span>');
+        if (comp.duration) {
+            var durationLabel = comp.duration >= 60
+                ? Math.floor(comp.duration / 60) + 'm ' + Math.round(comp.duration % 60) + 's'
+                : Math.round(comp.duration) + 's';
+            metaParts.push('<span class="item-duration">' + escapeHTML(durationLabel) + '</span>');
+        }
+        var metaHtml = metaParts.length ? '<div class="item-meta">' + metaParts.join('') + '</div>' : '';
 
-        return '<div class="stash-item' + previewClass + favClass + '" data-unique-id="' + safeUniqueId + '" data-category="' + safeCategory + '" data-aep-path="' + safeAepPath + '" data-storage-path="' + safeStoragePath + '" data-name="' + safeName + '"' + previewDataAttr + durationAttr + previewCountAttr + ' draggable="true">' +
+        return '<div class="stash-item' + previewClass + favClass + '" data-unique-id="' + safeUniqueId + '" data-category="' + safeCategory + '" data-folder-name="' + safeFolderName + '" data-aep-path="' + safeAepPath + '" data-storage-path="' + safeStoragePath + '" data-name="' + safeName + '"' + previewDataAttr + durationAttr + previewCountAttr + ' draggable="true">' +
             bulkCheckbox +
             '<div class="item-actions">' +
                 '<button class="action-btn favorite-btn" title="' + favTitle + '"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="' + favFill + '" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg></button>' +
@@ -1842,9 +1870,23 @@
             '</div>' +
             '<div class="item-info">' +
                 '<p class="item-name" title="' + safeName + '">' + safeName + '</p>' +
+                metaHtml +
                 '<button class="import-btn"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg><span>Import</span></button>' +
             '</div>' +
         '</div>';
+    }
+
+    function buildSearchText(comp) {
+        if (comp._searchText) return comp._searchText;
+        var parts = [
+            comp.name || '',
+            comp.category || '',
+            comp.folderName || '',
+            comp.uniqueId || ''
+        ];
+        if (comp.duration) parts.push(Math.round(comp.duration) + 's');
+        comp._searchText = parts.join(' ').replace(/[_-]+/g, ' ').toLowerCase();
+        return comp._searchText;
     }
 
     function renderCompsGrid() {
@@ -1939,7 +1981,7 @@
                                   (activeCategory === 'Recent' && isRecent(comp.uniqueId)) ||
                                   (comp.category === activeCategory);
             // Filter by search — indexOf instead of ES6 .includes() for CEP 8/9 compat
-            var matchesSearch = !searchTerm || comp.name.toLowerCase().indexOf(searchTerm) !== -1;
+            var matchesSearch = !searchTerm || buildSearchText(comp).indexOf(searchTerm) !== -1;
             return matchesCategory && matchesSearch;
         }));
         if (filteredComps.length === 0) {
@@ -2002,6 +2044,80 @@
         }
     }
 
+    var _thumbSignQueue = [];
+    var _thumbSignTimer = null;
+
+    function queueThumbnailSigning(img) {
+        if (!img || img.dataset.thumbSigning === '1' || img.dataset.thumbSigned === '1') return;
+        if (!img.dataset.thumbPath || !window.cloudLibrary || !window.cloudLibrary.signPaths) return;
+        img.dataset.thumbSigning = '1';
+        _thumbSignQueue.push(img);
+        if (_thumbSignTimer) return;
+        _thumbSignTimer = setTimeout(flushThumbnailSigningQueue, 25);
+    }
+
+    function flushThumbnailSigningQueue() {
+        _thumbSignTimer = null;
+        var batch = _thumbSignQueue.splice(0, _thumbSignQueue.length);
+        var paths = [];
+        var seenPaths = {};
+        batch.forEach(function(img) {
+            if (!img || !img.parentElement) return;
+            if (img.dataset.thumbPath && !seenPaths[img.dataset.thumbPath]) {
+                seenPaths[img.dataset.thumbPath] = 1;
+                paths.push(img.dataset.thumbPath);
+            }
+            if (img.dataset.thumbAltPath && !seenPaths[img.dataset.thumbAltPath]) {
+                seenPaths[img.dataset.thumbAltPath] = 1;
+                paths.push(img.dataset.thumbAltPath);
+            }
+        });
+        if (paths.length === 0) return;
+
+        window.cloudLibrary.signPaths(paths).then(function(urlMap) {
+            batch.forEach(function(img) {
+                if (!img || !img.parentElement) return;
+                img.dataset.thumbSigning = '0';
+                img.dataset.thumbSigned = '1';
+                var primary = img.dataset.thumbPath ? urlMap[img.dataset.thumbPath] : '';
+                var alt = img.dataset.thumbAltPath ? urlMap[img.dataset.thumbAltPath] : '';
+                if (alt) img.dataset.srcAlt = alt;
+                if (primary) {
+                    img.src = primary;
+                    img.classList.remove('lazy-thumb');
+                } else if (alt) {
+                    img.src = alt;
+                    img.classList.remove('lazy-thumb');
+                } else {
+                    img.style.display = 'none';
+                    var placeholder = img.parentElement.querySelector('.thumb-placeholder');
+                    if (placeholder) placeholder.style.display = 'flex';
+                }
+            });
+        }).catch(function(err) {
+            debugLog('Thumbnail signing failed: ' + (err && err.message || err), 'warn');
+            batch.forEach(function(img) {
+                if (!img || !img.parentElement) return;
+                img.dataset.thumbSigning = '0';
+                img.style.display = 'none';
+                var placeholder = img.parentElement.querySelector('.thumb-placeholder');
+                if (placeholder) placeholder.style.display = 'flex';
+            });
+        });
+    }
+
+    function hydrateLazyThumbnail(img) {
+        if (!img) return;
+        if (img.dataset.src) {
+            img.src = img.dataset.src;
+            img.classList.remove('lazy-thumb');
+            return;
+        }
+        if (img.dataset.thumbPath) {
+            queueThumbnailSigning(img);
+        }
+    }
+
     /**
      * Set up lazy loading, preview hover, GIF hover, view tracking, and drag/drop
      * on cards within a container. Works for both initial render and appended batches.
@@ -2009,29 +2125,28 @@
      */
     function setupCardBehaviors(container) {
         // Lazy load thumbnails
-        var lazyThumbnails = container.querySelectorAll('.lazy-thumb:not([src])');
+        var lazyThumbnails = container.querySelectorAll('.lazy-thumb:not([data-lazy-bound])');
         var observer = getLazyLoadObserver();
 
         if (observer) {
             lazyThumbnails.forEach(function(img) {
-                observer.observe(img);
+                img.dataset.lazyBound = '1';
                 img.addEventListener('load', function() {
                     var placeholder = this.parentElement.querySelector('.thumb-placeholder');
                     if (placeholder) placeholder.style.display = 'none';
                 });
                 img.onerror = handleThumbError;
+                observer.observe(img);
             });
         } else {
             lazyThumbnails.forEach(function(img) {
-                if (img.dataset.src) {
-                    img.src = img.dataset.src;
-                    img.classList.remove('lazy-thumb');
-                }
+                img.dataset.lazyBound = '1';
                 img.addEventListener('load', function() {
                     var placeholder = this.parentElement.querySelector('.thumb-placeholder');
                     if (placeholder) placeholder.style.display = 'none';
                 });
                 img.onerror = handleThumbError;
+                hydrateLazyThumbnail(img);
             });
         }
 
@@ -2074,14 +2189,22 @@
                             clearTimeout(signingTimeout);
                             if (urls && urls.length > 0) {
                                 cachedFrameUrls = urls;
+                                item.dataset.previewFrames = JSON.stringify(urls);
+                                item.dataset.previewCount = String(urls.length);
                                 // Also cache on the comp object for reuse
                                 for (var ci = 0; ci < allComps.length; ci++) {
                                     if (allComps[ci].uniqueId === uniqueId) {
                                         allComps[ci].previewFrames = urls;
+                                        allComps[ci].previewFrameCount = urls.length;
                                         break;
                                     }
                                 }
                                 startPreviewAnimation(thumbnailContainer, urls, uniqueId, duration);
+                            } else {
+                                item.classList.remove('has-preview');
+                                item.classList.add('preview-missing');
+                                var indicator = thumbnailContainer.querySelector('.preview-indicator');
+                                if (indicator) indicator.setAttribute('title', 'Preview frames missing. Ask an admin to regenerate.');
                             }
                             signingInProgress = false;
                         }).catch(function() { clearTimeout(signingTimeout); signingInProgress = false; });
@@ -2536,11 +2659,22 @@
                                         upsert: true,
                                     });
                             });
-                            await Promise.all(frameUploads);
+                            var frameUploadResults = await Promise.all(frameUploads);
+                            for (var fur = 0; fur < frameUploadResults.length; fur++) {
+                                if (frameUploadResults[fur] && frameUploadResults[fur].error) {
+                                    throw new Error('Preview frame upload failed: ' + frameUploadResults[fur].error.message);
+                                }
+                            }
+                        }
+
+                        if (files.bundleFiles && files.bundleFiles.length > 0) {
+                            debugLog('Uploading ' + files.bundleFiles.length + ' collected bundle asset(s)...', 'info');
+                            await uploadBundleFilesLimited(pendingBasePath, files.bundleFiles);
                         }
 
                         // Upload metadata
                         if (files.metadata) {
+                            files.metadata.bundleAssetCount = files.bundleFiles ? files.bundleFiles.length : 0;
                             var metaBlob = new Blob([JSON.stringify(files.metadata)], { type: 'application/json' });
                             await sb.storage.from('blitzkrieg')
                                 .upload(pendingBasePath + '/metadata.json', metaBlob, {
@@ -2656,6 +2790,94 @@
         });
     }
 
+    function pathDirname(path) {
+        var idx = path.lastIndexOf('/');
+        return idx === -1 ? '' : path.substring(0, idx);
+    }
+
+    function normalizeBundleRelativePath(path) {
+        return String(path || '')
+            .replace(/\\/g, '/')
+            .replace(/^\/+/, '')
+            .replace(/\/+/g, '/');
+    }
+
+    function isSupportFile(relativePath, aepName) {
+        var rel = normalizeBundleRelativePath(relativePath);
+        var lower = rel.toLowerCase();
+        if (!rel || lower === '.ds_store' || lower.indexOf('/.ds_store') !== -1 || lower === '.emptyfolderplaceholder') return true;
+        if (lower === String(aepName || '').toLowerCase()) return true;
+        if (lower === 'metadata.json' || lower === 'comp.png' || lower === 'thumbnail.png' || lower === 'thumbnail.jpg') return true;
+        if (lower.indexOf('preview/') === 0) return true;
+        return false;
+    }
+
+    function contentTypeForLocalPath(path) {
+        var lower = String(path || '').toLowerCase();
+        if (/\.png$/.test(lower)) return 'image/png';
+        if (/\.(jpg|jpeg)$/.test(lower)) return 'image/jpeg';
+        if (/\.json$/.test(lower)) return 'application/json';
+        if (/\.txt$/.test(lower)) return 'text/plain';
+        if (/\.mp4$/.test(lower)) return 'video/mp4';
+        if (/\.mov$/.test(lower)) return 'video/quicktime';
+        if (/\.wav$/.test(lower)) return 'audio/wav';
+        if (/\.mp3$/.test(lower)) return 'audio/mpeg';
+        return 'application/octet-stream';
+    }
+
+    async function listFilesRecursiveAsync(rootPath, relPrefix) {
+        relPrefix = relPrefix || '';
+        var entries = await listDirAsync(rootPath + (relPrefix ? '/' + relPrefix : ''));
+        var files = [];
+        for (var i = 0; i < entries.length; i++) {
+            var raw = entries[i];
+            var isDir = raw.length > 0 && raw.charAt(raw.length - 1) === '/';
+            var name = raw.replace(/\/$/, '');
+            if (!name || name === '.' || name === '..' || name === '.DS_Store') continue;
+            var rel = normalizeBundleRelativePath(relPrefix ? (relPrefix + '/' + name) : name);
+            if (isDir) {
+                var nested = await listFilesRecursiveAsync(rootPath, rel);
+                files = files.concat(nested);
+            } else {
+                files.push(rel);
+            }
+        }
+        return files;
+    }
+
+    async function uploadBundleFilesLimited(basePath, bundleFiles) {
+        if (!bundleFiles || bundleFiles.length === 0) return;
+        if (window.cloudLibrary && window.cloudLibrary.uploadBundleFiles) {
+            await window.cloudLibrary.uploadBundleFiles(basePath, bundleFiles);
+            return;
+        }
+        var sb = window.blitzkriegSupabase;
+        var idx = 0;
+        var failures = [];
+        async function worker() {
+            while (idx < bundleFiles.length) {
+                var myIdx = idx++;
+                var f = bundleFiles[myIdx];
+                try {
+                    var res = await sb.storage.from('blitzkrieg')
+                        .upload(basePath + '/' + f.relativePath, f.blob, {
+                            contentType: f.contentType || contentTypeForLocalPath(f.relativePath),
+                            upsert: true,
+                        });
+                    if (res.error) failures.push({ path: f.relativePath, error: res.error.message });
+                } catch (e) {
+                    failures.push({ path: f.relativePath, error: (e && e.message) || String(e) });
+                }
+            }
+        }
+        var workers = [];
+        for (var wi = 0; wi < Math.min(6, bundleFiles.length); wi++) workers.push(worker());
+        await Promise.all(workers);
+        if (failures.length > 0) {
+            throw new Error('Asset upload failed for ' + failures[0].path + ': ' + failures[0].error);
+        }
+    }
+
     /**
      * Read stashed temp files from disk.
      * Fully async — uses evalScript for dir listing and readFileAsBlobAsync for reads.
@@ -2725,12 +2947,31 @@
             }
         }
 
+        // Read collected bundle assets such as (Footage)/... so cloud imports
+        // behave like the offline folder version instead of importing a lonely AEP.
+        var bundleFiles = [];
+        var allRelFiles = await listFilesRecursiveAsync(compDir, '');
+        for (var bf = 0; bf < allRelFiles.length; bf++) {
+            var relPath = normalizeBundleRelativePath(allRelFiles[bf]);
+            if (isSupportFile(relPath, aepName)) continue;
+            try {
+                bundleFiles.push({
+                    relativePath: relPath,
+                    blob: await readFileAsBlobAsync(compDir + '/' + relPath, contentTypeForLocalPath(relPath)),
+                    contentType: contentTypeForLocalPath(relPath)
+                });
+            } catch (assetErr) {
+                debugLog('Bundle asset read skipped (' + relPath + '): ' + (assetErr && assetErr.message || assetErr), 'warn');
+            }
+        }
+
         return {
             folderName: folderName,
             aepBlob: aepBlob,
             thumbnailBlob: thumbnailBlob,
             metadata: metadata,
             previewFrameBlobs: previewFrameBlobs,
+            bundleFiles: bundleFiles,
         };
     }
 
@@ -3033,14 +3274,14 @@
             showToast('Downloading template...');
             debugLog('IMPORT: starting cloud import for ' + storagePath);
 
+            var importTempDir = null;
             getTempDir().then(function(sysTempDir) {
                 debugLog('IMPORT: temp dir = ' + sysTempDir);
+                importTempDir = sysTempDir + '/blitzkrieg_import_' + Date.now() + '_' + Math.floor(Math.random() * 0x7fffffff).toString(36);
                 return window.cloudLibrary.downloadTemplate(storagePath);
             }).then(function(downloaded) {
-                debugLog('IMPORT: downloaded ' + downloaded.fileName + ' (' + (downloaded.blob.size / 1024).toFixed(0) + 'KB)');
-                var tempAepPath = _cachedTempDir + '/blitzkrieg_import_' + downloaded.fileName;
-                return writeBlobToFile(downloaded.blob, tempAepPath).then(function(writtenPath) {
-                    var aepDiskPath = writtenPath || tempAepPath;
+                debugLog('IMPORT: downloaded ' + downloaded.fileName + ' (' + (downloaded.blob.size / 1024).toFixed(0) + 'KB, assets: ' + ((downloaded.extraFiles && downloaded.extraFiles.length) || 0) + ')');
+                return writeDownloadedTemplateBundle(downloaded, importTempDir).then(function(aepDiskPath) {
                     debugLog('IMPORT: written to disk, calling importComp...');
                     return new Promise(function(resolve, reject) {
                         var safePath = escapeForExtendScript(aepDiskPath);
@@ -3048,12 +3289,12 @@
                         safeEvalScript('importComp("' + safePath + '","' + safeDisplayName + '")', function(result) {
                             // Delay cleanup so AE's scheduleTask can finish opening the comp
                             setTimeout(function() {
-                                try { safeEvalScript('(function(){ var f = new File("' + safePath + '"); if(f.exists) f.remove(); return "ok"; })()'); } catch(e) {}
-                            }, 2000);
+                                try { safeEvalScript('cleanupTempStash("' + escapeForExtendScript(importTempDir) + '")'); } catch(e) {}
+                            }, 5000);
 
                             if (result && result.indexOf('Success') === 0) {
                                 hideSpinner();
-                                showToast('Imported and opened in timeline!');
+                                showToast('Imported full bundle and opened in timeline!');
                                 if (uniqueId) addToRecent(uniqueId);
                                 if (window.blitzkriegAnalytics && _trackComp) {
                                     window.blitzkriegAnalytics.trackImport(_trackComp.name, _trackComp.category, storagePath);
@@ -3076,6 +3317,9 @@
                 hideSpinner();
                 debugLog('IMPORT FAIL: ' + err.message, 'error');
                 showToast('Import failed: ' + err.message, true);
+                if (importTempDir) {
+                    try { safeEvalScript('cleanupTempStash("' + escapeForExtendScript(importTempDir) + '")'); } catch(cleanErr) {}
+                }
             });
             return;
         }
@@ -4351,31 +4595,19 @@
                 showToast('Withdrawing submission...');
 
                 var sub = res.data;
-                // Delete files from pending storage. The old code referenced a
-                // non-existent `window.cloudLibrary.collectAllFilesForPath` via a
-                // ternary that always fell through — fixed to a single straightforward
-                // list-and-recurse flow.
+                // Delete files from pending storage recursively so collected
+                // footage/assets do not leak after a withdrawal.
                 if (sub.storage_path) {
                     try {
-                        var allFiles = [];
-                        var listRes = await sb.storage.from('blitzkrieg').list(sub.storage_path);
-                        if (listRes.data) {
-                            allFiles = listRes.data
-                                .filter(function(f) { return f.id !== null; })
-                                .map(function(f) { return sub.storage_path + '/' + f.name; });
-                            // Check subfolders (e.g. preview/)
-                            var subFolders = listRes.data.filter(function(f) { return f.id === null; });
-                            for (var sf = 0; sf < subFolders.length; sf++) {
-                                var subList = await sb.storage.from('blitzkrieg').list(sub.storage_path + '/' + subFolders[sf].name);
-                                if (subList.data) {
-                                    subList.data.filter(function(f) { return f.id !== null; }).forEach(function(f) {
-                                        allFiles.push(sub.storage_path + '/' + subFolders[sf].name + '/' + f.name);
-                                    });
-                                }
-                            }
-                        }
+                        var allFiles = window.cloudLibrary && window.cloudLibrary.collectAllFiles
+                            ? await window.cloudLibrary.collectAllFiles(sub.storage_path)
+                            : [];
                         if (allFiles.length > 0) {
-                            await sb.storage.from('blitzkrieg').remove(allFiles);
+                            if (window.cloudLibrary && window.cloudLibrary.removeStorageFiles) {
+                                await window.cloudLibrary.removeStorageFiles(allFiles);
+                            } else {
+                                await sb.storage.from('blitzkrieg').remove(allFiles);
+                            }
                         }
                     } catch (e) {
                         debugLog('Withdraw file cleanup warning: ' + e.message, 'warn');
@@ -5918,6 +6150,19 @@
             + '?_=' + Date.now();
     }
 
+    function getExtensionRootHintForUpdate() {
+        try {
+            if (!_hasCepBridge || !csInterface || typeof csInterface.getSystemPath !== 'function' ||
+                typeof SystemPath === 'undefined') {
+                return '';
+            }
+            return csInterface.getSystemPath(SystemPath.EXTENSION) || '';
+        } catch (e) {
+            debugLog('Could not read CEP extension root hint: ' + (e && e.message || e), 'warn');
+            return '';
+        }
+    }
+
     function isNewerVersion(remote, local) {
         var rParts = String(remote).split('.').map(Number);
         var lParts = String(local).split('.').map(Number);
@@ -6353,10 +6598,11 @@
             window.blitzkriegAnalytics.trackAccessChange(null, 'update_started', null);
         }
 
-        safeEvalScript('getExtensionRootPath()', function(rootPath) {
+        var rootHint = getExtensionRootHintForUpdate();
+        safeEvalScript('getExtensionRootPath("' + escapeForExtendScript(rootHint) + '")', function(rootPath) {
             if (!rootPath || rootPath === 'EvalScript error.' || rootPath === 'undefined' ||
                 rootPath.indexOf('ERROR:') === 0) {
-                _failUpdate(version, 'cannot resolve extension root');
+                _failUpdate(version, 'cannot resolve extension root' + (rootHint ? ' from CEP hint' : ''));
                 return;
             }
 
@@ -6632,6 +6878,55 @@
         });
     }
 
+    function ensureFolderAsync(dirPath) {
+        return new Promise(function(resolve, reject) {
+            if (!dirPath) { resolve(); return; }
+            var safePath = escapeForExtendScript(dirPath);
+            safeEvalScript(
+                '(function(){ function mk(p){ var f = new Folder(p); if (f.exists) return true; var parent = f.parent; if (parent && !parent.exists && !mk(parent.fsName)) return false; return f.create(); } var target = new Folder("' + safePath + '"); if (target.exists || mk(target.fsName)) return "ok"; return "ERROR: Could not create " + target.fsName; })()',
+                function(result) {
+                    if (result === 'ok') resolve();
+                    else reject(new Error(result || 'Could not create folder'));
+                }
+            );
+        });
+    }
+
+    function safeTempFileName(name) {
+        name = String(name || 'template.aep').replace(/[\\\/:*?"<>|]/g, '_');
+        return name || 'template.aep';
+    }
+
+    function writeDownloadedTemplateBundle(downloaded, targetDir) {
+        if (!downloaded || !downloaded.blob) return Promise.reject(new Error('Downloaded template is empty'));
+        var aepName = safeTempFileName(downloaded.fileName || 'template.aep');
+        var aepPath = targetDir + '/' + aepName;
+        return ensureFolderAsync(targetDir).then(function() {
+            return writeBlobToFile(downloaded.blob, aepPath);
+        }).then(function(writtenPath) {
+            var finalAepPath = writtenPath || aepPath;
+            var files = downloaded.extraFiles || [];
+            var chain = Promise.resolve();
+            files.forEach(function(file) {
+                chain = chain.then(function() {
+                    var rel = normalizeBundleRelativePath(file.relativePath || '');
+                    if (!rel) return null;
+                    var outPath = targetDir + '/' + rel;
+                    var parent = pathDirname(outPath);
+                    return ensureFolderAsync(parent).then(function() {
+                        return writeBlobToFile(file.blob, outPath);
+                    });
+                });
+            });
+            return chain.then(function() {
+                if (files.length > 0) {
+                    debugLog('IMPORT: wrote ' + files.length + ' bundle asset(s) beside AEP', 'info');
+                }
+                return finalAepPath;
+            });
+        });
+    }
+
     /** Read a file from disk as a Blob (async, works with all I/O methods). */
     function readFileAsBlobAsync(filePath, contentType) {
         initDiskIo();
@@ -6773,9 +7068,8 @@
             debugLog('GEN: downloading AEP...');
             return window.cloudLibrary.downloadTemplate(comp.storagePath);
         }).then(function(downloaded) {
-            debugLog('GEN: AEP downloaded (' + (downloaded.blob.size / 1024).toFixed(0) + 'KB), writing to disk...');
-            var aepPath = tempDir + '/' + downloaded.fileName;
-            return writeBlobToFile(downloaded.blob, aepPath).then(function() {
+            debugLog('GEN: AEP downloaded (' + (downloaded.blob.size / 1024).toFixed(0) + 'KB, assets: ' + ((downloaded.extraFiles && downloaded.extraFiles.length) || 0) + '), writing to disk...');
+            return writeDownloadedTemplateBundle(downloaded, tempDir).then(function(aepPath) {
                 debugLog('GEN: AEP written, calling generatePreviewsToDisk...');
                 return new Promise(function(resolve, reject) {
                     safeEvalScript(
@@ -6854,6 +7148,7 @@
                         { contentType: 'image/png', upsert: true }
                     )
                 ];
+                var frameUploads = [];
                 var skippedFrames = 0;
                 // Renumber frames during upload so the cloud copy is contiguous
                 // (frame_0, frame_1, ..., frame_N) even if some local frames are
@@ -6869,12 +7164,7 @@
                             var framePath = outputDir + '/preview/frame_' + srcIdx + '.png';
                             return readFileAsBlobAsync(framePath, 'image/png').then(function(frameBlob) {
                                 var destIdx = uploadFrameIdx++;
-                                uploads.push(
-                                    sb.storage.from('blitzkrieg').upload(
-                                        comp.storagePath + '/preview/frame_' + destIdx + '.png', frameBlob,
-                                        { contentType: 'image/png', upsert: true }
-                                    )
-                                );
+                                frameUploads.push({ destIdx: destIdx, blob: frameBlob });
                             }).catch(function(readErr) {
                                 // Only swallow file-missing errors (the frame file wasn't
                                 // produced by ExtendScript). Log everything else so silent
@@ -6890,7 +7180,27 @@
                 }
 
                 return frameChain.then(function() {
-                    return Promise.all(uploads);
+                    var cleanupOldFrames = Promise.resolve(0);
+                    if (window.cloudLibrary && window.cloudLibrary.removePreviewFrames) {
+                        cleanupOldFrames = window.cloudLibrary.removePreviewFrames(comp.storagePath).then(function(removed) {
+                            if (removed > 0) debugLog('GEN: removed ' + removed + ' old preview frame(s) before upload', 'info');
+                            return removed;
+                        }).catch(function(cleanErr) {
+                            debugLog('GEN: could not remove old preview frames: ' + (cleanErr && cleanErr.message || cleanErr), 'warn');
+                            return 0;
+                        });
+                    }
+                    return cleanupOldFrames.then(function() {
+                        for (var fui = 0; fui < frameUploads.length; fui++) {
+                            uploads.push(
+                                sb.storage.from('blitzkrieg').upload(
+                                    comp.storagePath + '/preview/frame_' + frameUploads[fui].destIdx + '.png', frameUploads[fui].blob,
+                                    { contentType: 'image/png', upsert: true }
+                                )
+                            );
+                        }
+                        return Promise.all(uploads);
+                    });
                 }).then(function(results) {
                     // Distinguish thumbnail upload (index 0) from frame uploads.
                     var thumbResult = results[0];
@@ -6967,10 +7277,9 @@
                 try {
                     var metadata = JSON.parse(text);
                     metadata.cloudThumbnailGenerated = true;
-                    if (frameCount > 0) {
-                        metadata.previewFrames = frameCount;
-                        metadata.cloudPreviewFrameCount = frameCount;
-                    }
+                    metadata.previewFrames = frameCount || 0;
+                    metadata.cloudPreviewFrameCount = frameCount || 0;
+                    metadata.cloudPreviewGenerated = frameCount > 0;
                     var metaBlob = new Blob([JSON.stringify(metadata)], { type: 'application/json' });
                     return sb.storage.from('blitzkrieg').upload(metaPath, metaBlob, {
                         contentType: 'application/json',

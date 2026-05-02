@@ -112,7 +112,7 @@ All modals: `.modal-overlay > .modal-box`, start `display:none`, toggled by JS.
 - **No build step**: Vanilla JS, no bundler or transpiler; runs directly in CEP Chromium runtime
 - **CEP bridge safety**: Always use `safeEvalScript()` (not `csInterface.evalScript()` directly) — checks `window.__adobe_cep__` before calling
 - **Async**: `async/await` used in `cloud-library.js`; `var` (not `let`/`const`) used throughout `main.js`
-- **CSS**: All styles in `CSS/style.css` (folder is uppercase `CSS/` on disk; `index.html` references `./css/style.css` lowercase — macOS case-insensitive resolves this); use CSS custom properties from `:root` — never hardcode colors or spacing
+- **CSS**: All styles in `CSS/style.css` (folder is uppercase `CSS/` on disk, and `index.html` must reference `./CSS/style.css` exactly for case-sensitive online installs); use CSS custom properties from `:root` — never hardcode colors or spacing
 - **Naming**: kebab-case for CSS classes and IDs; camelCase for JS variables and functions
 - **Logging**: Use `window._blitzLog(msg, level)` in `cloud-library.js`; use `debugLog(msg, level)` in `main.js`. Valid levels: `info`, `warn`, `error`, `success`
 - **Cache invalidation**: Call `invalidateCache()` after every mutation in `cloud-library.js`

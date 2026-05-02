@@ -38,12 +38,14 @@ fi
 FILES=(
   "js/main.js"
   "js/cloud-library.js"
+  "js/supabase-config.js"
   "js/auth.js"
   "js/analytics.js"
   "js/telemetry.js"
   "jsx/hostscript.jsx"
   "CSS/style.css"
   "index.html"
+  "version.json"
 )
 
 echo "==> Uploading ${#FILES[@]} files to $BUCKET/$VERSION/"

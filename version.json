@@ -1,8 +1,9 @@
 {
-  "version": "1.3.4",
+  "version": "1.3.5",
   "files": [
     "js/main.js",
     "js/cloud-library.js",
+    "js/supabase-config.js",
     "js/auth.js",
     "js/analytics.js",
     "js/telemetry.js",

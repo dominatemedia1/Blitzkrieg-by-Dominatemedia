@@ -2409,6 +2409,14 @@ function getSettingsFilePath() {
     return buildPath(settingsFolder, "settings.json");
 }
 
+function getAuthStorageFilePath() {
+    var settingsFolder = new Folder(buildPath(Folder.userData, "Blitzkrieg"));
+    if (!settingsFolder.exists) {
+        settingsFolder.create();
+    }
+    return buildPath(settingsFolder, "auth-session.json");
+}
+
 /**
  * Loads Blitzkrieg settings from persistent file storage.
  * @returns {string} - JSON string of settings or empty object
@@ -2445,6 +2453,37 @@ function saveBlitzkriegSettings(settingsJson) {
         settingsFile.encoding = 'UTF-8';
         settingsFile.write(settingsJson);
         settingsFile.close();
+        return "Success";
+    } catch (e) {
+        return "Error: " + e.toString();
+    }
+}
+
+function loadBlitzkriegAuthStorage() {
+    try {
+        var authFile = new File(getAuthStorageFilePath());
+        if (authFile.exists) {
+            authFile.open('r');
+            authFile.encoding = 'UTF-8';
+            var content = authFile.read();
+            authFile.close();
+            JSON.parse(content);
+            return content;
+        }
+    } catch (e) {
+        $.writeln("Blitzkrieg: Warning - Could not load auth storage: " + e.toString());
+    }
+    return "{}";
+}
+
+function saveBlitzkriegAuthStorage(authJson) {
+    try {
+        JSON.parse(authJson);
+        var authFile = new File(getAuthStorageFilePath());
+        authFile.open('w');
+        authFile.encoding = 'UTF-8';
+        authFile.write(authJson);
+        authFile.close();
         return "Success";
     } catch (e) {
         return "Error: " + e.toString();
@@ -3070,20 +3109,87 @@ function removeFolderRecursive(folder) {
 }
 
 /**
- * Get the extension root path (parent of jsx/ folder where this script lives).
+ * Get the extension root path.
  * Returns the path string on success, or the literal string "ERROR: ..." on failure.
- * (The previous version returned JSON.stringify({error: ...}), which the JS caller
- * didn't detect and would have used as if it were a real path.)
  */
-function getExtensionRootPath() {
+var BLITZKRIEG_EXTENSION_ROOT_OVERRIDE = null;
+
+function _existingFolderFromPath(path) {
     try {
-        var scriptFile = new File($.fileName);
-        var jsxFolder = scriptFile.parent;
-        var rootFolder = jsxFolder.parent;
+        if (!path || typeof path !== 'string') return null;
+        if (!isValidPath(path)) return null;
+        var folder = new Folder(path);
+        if (folder && folder.exists) return folder;
+    } catch (e) {}
+    return null;
+}
+
+function _resolveExtensionRootFolder(rootHint) {
+    var hinted = _existingFolderFromPath(rootHint);
+    if (hinted) {
+        BLITZKRIEG_EXTENSION_ROOT_OVERRIDE = hinted.fsName;
+        return hinted;
+    }
+
+    var override = _existingFolderFromPath(BLITZKRIEG_EXTENSION_ROOT_OVERRIDE);
+    if (override) return override;
+
+    try {
+        if (typeof $ !== 'undefined' && $.fileName && String($.fileName).length > 0) {
+            var scriptFile = new File($.fileName);
+            if (scriptFile && scriptFile.parent && scriptFile.parent.parent) {
+                var rootFolder = scriptFile.parent.parent;
+                if (rootFolder.exists) {
+                    BLITZKRIEG_EXTENSION_ROOT_OVERRIDE = rootFolder.fsName;
+                    return rootFolder;
+                }
+            }
+        }
+    } catch (e) {}
+
+    return null;
+}
+
+function setBlitzkriegExtensionRoot(rootPath) {
+    try {
+        var folder = _existingFolderFromPath(rootPath);
+        if (!folder) return 'ERROR: invalid extension root';
+        BLITZKRIEG_EXTENSION_ROOT_OVERRIDE = folder.fsName;
+        return 'ok';
+    } catch (e) {
+        return 'ERROR: ' + e.toString();
+    }
+}
+
+function getExtensionRootPath(rootHint) {
+    try {
+        var rootFolder = _resolveExtensionRootFolder(rootHint);
+        if (!rootFolder || !rootFolder.exists) return 'ERROR: cannot resolve extension root';
         return rootFolder.fsName;
     } catch (e) {
         return 'ERROR: ' + e.toString();
     }
+}
+
+function _normalizeForRootCheck(path) {
+    var normalized = String(path || '').replace(/\\/g, '/');
+    if (($.os.indexOf('Windows') !== -1) || ($.os.indexOf('Mac') !== -1)) {
+        normalized = normalized.toLowerCase();
+    }
+    while (normalized.length > 1 && normalized.charAt(normalized.length - 1) === '/') {
+        normalized = normalized.substring(0, normalized.length - 1);
+    }
+    return normalized;
+}
+
+function _isPathInsideRoot(path, rootPath, allowExact) {
+    var target = _normalizeForRootCheck(path);
+    var root = _normalizeForRootCheck(rootPath);
+    var exactRoot = target === root;
+    var underRoot = target.length > root.length &&
+                    target.substring(0, root.length) === root &&
+                    target.charAt(root.length) === '/';
+    return (allowExact && exactRoot) || underRoot;
 }
 
 /**
@@ -3115,40 +3221,15 @@ function writeUpdateFile(filePath, content) {
             return JSON.stringify({error: 'Update file extension not allowed: ' + filePath});
         }
         // Resolve extension root and make sure the target stays under it
-        var rootFolder;
-        try {
-            var scriptFile = new File($.fileName);
-            rootFolder = scriptFile.parent.parent; // jsx/ -> extension root
-        } catch (rootErr) {
-            return JSON.stringify({error: 'Could not resolve extension root: ' + rootErr.toString()});
-        }
+        var rootFolder = _resolveExtensionRootFolder();
         if (!rootFolder || !rootFolder.exists) {
             return JSON.stringify({error: 'Extension root missing'});
         }
         var rootPath = rootFolder.fsName;
-        // Normalize both paths to forward slashes for comparison. On case-
-        // insensitive filesystems (macOS APFS/HFS+ default, Windows NTFS) also
-        // lowercase both sides so a legitimate `/library/...` casing variation
-        // isn't incorrectly rejected.
-        var normalizedTarget = filePath.replace(/\\/g, '/');
-        var normalizedRoot = rootPath.replace(/\\/g, '/');
-        var caseInsensitive = ($.os.indexOf('Windows') !== -1) || ($.os.indexOf('Mac') !== -1);
-        if (caseInsensitive) {
-            normalizedTarget = normalizedTarget.toLowerCase();
-            normalizedRoot = normalizedRoot.toLowerCase();
-        }
-        // Strip trailing slashes
-        while (normalizedRoot.length > 1 && normalizedRoot.charAt(normalizedRoot.length - 1) === '/') {
-            normalizedRoot = normalizedRoot.substring(0, normalizedRoot.length - 1);
-        }
-        // Enforce exact match or strictly-under — prevents prefix-collision attacks
+        // Enforce strictly-under-root — prevents prefix-collision attacks
         // where an extension root of `/Library/Extensions/Blitzkrieg` would otherwise
         // allow writes to `/Library/Extensions/Blitzkrieg-evil/payload.js`.
-        var exactRoot = normalizedTarget === normalizedRoot;
-        var underRoot = normalizedTarget.length > normalizedRoot.length &&
-                        normalizedTarget.substring(0, normalizedRoot.length) === normalizedRoot &&
-                        normalizedTarget.charAt(normalizedRoot.length) === '/';
-        if (!exactRoot && !underRoot) {
+        if (!_isPathInsideRoot(filePath, rootPath, false)) {
             return JSON.stringify({error: 'Update target is outside extension root'});
         }
 
@@ -3175,21 +3256,12 @@ function writeUpdateFile(filePath, content) {
 function mkdirUnderRoot(targetPath) {
     try {
         if (!isValidPath(targetPath)) return JSON.stringify({error: 'Invalid path'});
-        var rootFolder;
-        try {
-            var scriptFile = new File($.fileName);
-            rootFolder = scriptFile.parent.parent;
-        } catch (rootErr) {
+        var rootFolder = _resolveExtensionRootFolder();
+        if (!rootFolder || !rootFolder.exists) {
             return JSON.stringify({error: 'Could not resolve extension root'});
         }
         var rootPath = rootFolder.fsName;
-        var caseInsensitive = ($.os.indexOf('Windows') !== -1) || ($.os.indexOf('Mac') !== -1);
-        var nt = targetPath.replace(/\\/g, '/');
-        var nr = rootPath.replace(/\\/g, '/');
-        if (caseInsensitive) { nt = nt.toLowerCase(); nr = nr.toLowerCase(); }
-        while (nr.length > 1 && nr.charAt(nr.length - 1) === '/') nr = nr.substring(0, nr.length - 1);
-        var underR = nt.length > nr.length && nt.substring(0, nr.length) === nr && nt.charAt(nr.length) === '/';
-        if (!underR) return JSON.stringify({error: 'mkdir target outside extension root'});
+        if (!_isPathInsideRoot(targetPath, rootPath, true)) return JSON.stringify({error: 'mkdir target outside extension root'});
         var folder = new Folder(targetPath);
         if (folder.exists) return 'ok';
         if (!folder.create()) return JSON.stringify({error: 'Folder.create() returned false for ' + targetPath});
@@ -3222,24 +3294,13 @@ function moveUpdateFile(srcPath, dstPath) {
         if (!hasAllowedExt(dstPath)) {
             return JSON.stringify({error: 'Move destination extension not allowed: ' + dstPath});
         }
-        var rootFolder;
-        try {
-            var scriptFile = new File($.fileName);
-            rootFolder = scriptFile.parent.parent;
-        } catch (rootErr) {
-            return JSON.stringify({error: 'Could not resolve extension root: ' + rootErr.toString()});
-        }
+        var rootFolder = _resolveExtensionRootFolder();
         if (!rootFolder || !rootFolder.exists) {
             return JSON.stringify({error: 'Extension root missing'});
         }
         var rootPath = rootFolder.fsName;
-        var caseInsensitive = ($.os.indexOf('Windows') !== -1) || ($.os.indexOf('Mac') !== -1);
         function underRoot(p) {
-            var nt = p.replace(/\\/g, '/');
-            var nr = rootPath.replace(/\\/g, '/');
-            if (caseInsensitive) { nt = nt.toLowerCase(); nr = nr.toLowerCase(); }
-            while (nr.length > 1 && nr.charAt(nr.length - 1) === '/') nr = nr.substring(0, nr.length - 1);
-            return nt.length > nr.length && nt.substring(0, nr.length) === nr && nt.charAt(nr.length) === '/';
+            return _isPathInsideRoot(p, rootPath, false);
         }
         if (!underRoot(srcPath) || !underRoot(dstPath)) {
             return JSON.stringify({error: 'Move endpoints outside extension root'});
@@ -3276,21 +3337,13 @@ function moveUpdateFile(srcPath, dstPath) {
 function deleteUpdateDir(dirPath) {
     try {
         if (!isValidPath(dirPath)) return JSON.stringify({error: 'Invalid path'});
-        var rootFolder;
-        try {
-            var scriptFile = new File($.fileName);
-            rootFolder = scriptFile.parent.parent;
-        } catch (rootErr) {
+        var rootFolder = _resolveExtensionRootFolder();
+        if (!rootFolder || !rootFolder.exists) {
             return JSON.stringify({error: 'Could not resolve extension root'});
         }
         var rootPath = rootFolder.fsName;
-        var caseInsensitive = ($.os.indexOf('Windows') !== -1) || ($.os.indexOf('Mac') !== -1);
-        var nt = dirPath.replace(/\\/g, '/');
-        var nr = rootPath.replace(/\\/g, '/');
-        if (caseInsensitive) { nt = nt.toLowerCase(); nr = nr.toLowerCase(); }
-        while (nr.length > 1 && nr.charAt(nr.length - 1) === '/') nr = nr.substring(0, nr.length - 1);
-        var underR = nt.length > nr.length && nt.substring(0, nr.length) === nr && nt.charAt(nr.length) === '/';
-        if (!underR) return JSON.stringify({error: 'Path outside extension root'});
+        var nt = _normalizeForRootCheck(dirPath);
+        if (!_isPathInsideRoot(dirPath, rootPath, false)) return JSON.stringify({error: 'Path outside extension root'});
         // Refuse to delete anything that doesn't look like a staging dir
         if (nt.indexOf('/.update-staging') === -1) {
             return JSON.stringify({error: 'Refusing to delete non-staging dir: ' + dirPath});

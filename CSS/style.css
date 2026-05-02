@@ -1,4 +1,4 @@
-/* css/style.css - Blitzkrieg by Dominate Media
+/* CSS/style.css - Blitzkrieg by Dominate Media
    Design System: Matches insight-flow DESIGN_SPEC.md */
 
 :root {
@@ -1011,11 +1011,22 @@ body {
     align-items: center;
     justify-content: space-between;
     gap: var(--sp-2);
+    min-height: 16px;
+    margin-bottom: var(--sp-2);
 }
 
 .item-category {
     font-size: 11px;
     color: var(--text-faint);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.item-duration {
+    flex-shrink: 0;
+    font-size: 11px;
+    color: var(--text-muted);
 }
 
 /* Import Button on Card */

@@ -78,13 +78,17 @@
                 .maybeSingle();
 
             if (emailResult.data) {
-                // Auto-link user_id for future lookups (SECURITY DEFINER bypasses RLS).
-                // Retry-with-backoff because if the RPC silently fails (RPC not yet
-                // deployed, network blip, transient permission error), the user
-                // is stuck in email-fallback limbo every login. Three attempts
-                // at 0, 1.5s, 4.5s — then surface a debug log so we can see
-                // recurring failures in telemetry.
-                _linkUserIdWithRetry(0);
+                // Storage RLS keys off auth.uid(). If we render the app before
+                // this email-fallback row is linked to the Supabase user_id, the
+                // editor can pass app auth but see an empty cloud library.
+                var linked = await _linkUserIdBlocking();
+                if (linked) {
+                    var linkedResult = await sb.from('team_members')
+                        .select('id, full_name, blitzkrieg_access, blitzkrieg_admin')
+                        .eq('user_id', userId)
+                        .maybeSingle();
+                    if (linkedResult.data) return linkedResult.data;
+                }
                 return emailResult.data;
             }
         }
@@ -99,15 +103,50 @@
     // is module-scoped (above the IIFE close) so concurrent invocations
     // share state.
     var _linkInFlight = false;
+    function _linkUserIdOnce() {
+        var sb = window.blitzkriegSupabase;
+        if (!sb) return Promise.reject(new Error('Supabase client unavailable'));
+        return sb.rpc('link_blitzkrieg_user_id').then(function (res) {
+            if (res && res.error) throw res.error;
+            return true;
+        });
+    }
+
+    function _delay(ms) {
+        return new Promise(function(resolve) { setTimeout(resolve, ms); });
+    }
+
+    async function _linkUserIdBlocking() {
+        if (_linkInFlight) {
+            await _delay(800);
+        }
+        _linkInFlight = true;
+        var lastErr = null;
+        for (var attempt = 0; attempt < 3; attempt++) {
+            try {
+                await _linkUserIdOnce();
+                if (attempt > 0) console.log('Auto-linked user_id to team member (attempt ' + (attempt + 1) + ')');
+                else console.log('Auto-linked user_id to team member');
+                _linkInFlight = false;
+                return true;
+            } catch (err) {
+                lastErr = err;
+                if (attempt < 2) await _delay(1500 * Math.pow(3, attempt));
+            }
+        }
+        _linkInFlight = false;
+        if (typeof window._blitzLog === 'function') {
+            window._blitzLog('link_blitzkrieg_user_id RPC failed before library load: ' + (lastErr && lastErr.message || lastErr), 'warn');
+        }
+        return false;
+    }
+
     function _linkUserIdWithRetry(attempt) {
         if (attempt === 0) {
             if (_linkInFlight) return;
             _linkInFlight = true;
         }
-        var sb = window.blitzkriegSupabase;
-        if (!sb) { _linkInFlight = false; return; }
-        sb.rpc('link_blitzkrieg_user_id').then(function (res) {
-            if (res && res.error) throw res.error;
+        _linkUserIdOnce().then(function () {
             if (attempt > 0) console.log('Auto-linked user_id to team member (attempt ' + (attempt + 1) + ')');
             else console.log('Auto-linked user_id to team member');
             _linkInFlight = false;
@@ -166,6 +205,18 @@
 
         // Show the main app
         showScreen(appContainer);
+
+        try {
+            window.dispatchEvent(new CustomEvent('blitzkrieg-auth-ready', {
+                detail: { user: currentUser, teamMember: currentTeamMember }
+            }));
+        } catch (eventErr) {
+            try {
+                var ev = document.createEvent('CustomEvent');
+                ev.initCustomEvent('blitzkrieg-auth-ready', false, false, { user: currentUser, teamMember: currentTeamMember });
+                window.dispatchEvent(ev);
+            } catch (ignoredEventErr) {}
+        }
 
         // Notify main.js that auth is ready (outside try/catch so app errors don't mask as connection errors)
         if (typeof window.onBlitzkriegAuthReady === 'function') {

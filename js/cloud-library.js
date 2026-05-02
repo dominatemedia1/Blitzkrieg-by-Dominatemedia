@@ -44,14 +44,15 @@
         }
     }
 
-    // In-memory signed URL cache — avoids re-signing on every loadLibrary call.
+    // In-memory signed URL cache — avoids re-signing thumbnails/previews as users
+    // scroll and hover. Metadata loads never wait for every thumbnail to sign.
     // Cache TTL is set to (signed URL expiry - 10 minute safety margin) so we
     // never serve a near-expired URL but also don't waste round-trips re-signing
-    // every 30 minutes when the URLs are still valid for hours. Saves ~248 batch
-    // sign calls per session for an active user.
-    var _signedUrlCache = null;
-    var _signedUrlCacheTime = 0;
+    // every 30 minutes when the URLs are still valid for hours.
     var SIGNED_URL_CACHE_TTL = (SIGNED_URL_EXPIRY - 600) * 1000; // 4h - 10min in ms
+    var _signedPathUrlCache = {};
+    var _previewUrlCache = {};
+    var _previewPathCache = {};
 
     // localStorage cache for template metadata (persists across restarts)
     var META_CACHE_KEY = 'blitzkrieg_meta_cache';
@@ -60,7 +61,7 @@
     // metadata for every template. One download instead of 248+. Rebuilt on any
     // mutation (debounced). Subsequent cold loads (new users, cache-cleared
     // users) go from ~5s → <500ms.
-    var MANIFEST_KEY = '_blitzkrieg_manifest.json';
+    var MANIFEST_KEY = '_blitzkrieg_manifest_v2.json';
     // 5 min TTL — was 30 min, but submissions approved by admins or templates
     // added outside the panel (Supabase dashboard, scripts) don't always trigger
     // invalidateManifest(), so users could see a stale list for up to 30 min.
@@ -158,6 +159,10 @@
             var droppedNulls = (metadataResults || []).length - cleanResults.length;
             if (droppedNulls > 0) {
                 _log('uploadManifest: dropped ' + droppedNulls + ' null-metadata entries from manifest', 'warn');
+            }
+            if (cleanResults.length === 0) {
+                _log('uploadManifest: refusing to publish empty manifest; keeping last known cloud manifest intact', 'warn');
+                return;
             }
             var manifest = {
                 version: 1,
@@ -328,125 +333,60 @@
      */
     function invalidateCache() {
         try { localStorage.removeItem(META_CACHE_KEY); } catch (e) {}
-        _signedUrlCache = null;
-        _signedUrlCacheTime = 0;
+        _signedPathUrlCache = {};
+        _previewUrlCache = {};
+        _previewPathCache = {};
         invalidateManifest();
     }
 
     /**
-     * Surgical signed-URL cache invalidation for single-template mutations
-     * (rename, single delete, single move). Avoids re-signing all 290+ URLs
-     * just because one template changed.
+     * Clear only this panel's local caches. Does not delete the shared cloud
+     * manifest, because that manifest is the fast source of truth for all
+     * editors and should only be invalidated after real storage mutations.
+     */
+    function clearLocalCache() {
+        try { localStorage.removeItem(META_CACHE_KEY); } catch (e) {}
+        _signedPathUrlCache = {};
+        _previewUrlCache = {};
+        _previewPathCache = {};
+    }
+
+    /**
+     * Surgical cache invalidation for one template. Keeps unrelated signed URLs
+     * warm while still forcing metadata/manifest refresh after mutations.
      */
     function invalidateCacheForPath(storagePath) {
-        if (_signedUrlCache && storagePath && _signedUrlCache[storagePath]) {
-            delete _signedUrlCache[storagePath];
-        }
-        // Local cache + cloud manifest still need to be rebuilt — the changed
-        // template's metadata.json may have changed, and the manifest needs
-        // to reflect rename/delete events.
         try { localStorage.removeItem(META_CACHE_KEY); } catch (e) {}
+        if (storagePath) {
+            delete _signedPathUrlCache[storagePath + '/comp.png'];
+            delete _signedPathUrlCache[storagePath + '/thumbnail.png'];
+            Object.keys(_previewUrlCache).forEach(function(key) {
+                if (key.indexOf(storagePath + '|') === 0) delete _previewUrlCache[key];
+            });
+            Object.keys(_previewPathCache).forEach(function(key) {
+                if (key.indexOf(storagePath + '|') === 0) delete _previewPathCache[key];
+            });
+        }
         invalidateManifest();
     }
 
+    function getCachedSignedUrl(path) {
+        var cached = _signedPathUrlCache[path];
+        if (!cached) return '';
+        if (Date.now() - cached.ts >= SIGNED_URL_CACHE_TTL) {
+            delete _signedPathUrlCache[path];
+            return '';
+        }
+        return cached.url || '';
+    }
+
     /**
-     * Sign thumbnail URLs and build comp objects from metadata results.
-     * Only signs thumbnail URLs initially (fast). Preview frames are signed lazily on hover.
+     * Build comp objects from metadata results.
+     * Thumbnail and preview URLs are signed lazily by the UI.
      */
     async function buildCompsFromMetadata(metadataResults) {
-        // Sign ONLY thumbnail URLs (2 per template: comp.png + thumbnail.png)
-        // Preview frame URLs are signed lazily on hover via signPreviewFrames()
-
         var validEntries = metadataResults.filter(function(mr) { return mr.metadata !== null && mr.metadata !== undefined; });
         _log('buildCompsFromMetadata: ' + validEntries.length + ' entries with metadata (of ' + metadataResults.length + ' total)', 'info');
-
-        var signedUrlMap;
-        var now = Date.now();
-
-        // Use cached signed URLs if still fresh (avoids re-signing on every focus).
-        // Templates added since the cache was built are NOT in the cached map,
-        // so sign just the missing ones and merge — otherwise newly added
-        // templates would render with empty thumbnail URLs after a background
-        // refresh until the next 4h cache rotation.
-        if (_signedUrlCache && (now - _signedUrlCacheTime < SIGNED_URL_CACHE_TTL)) {
-            signedUrlMap = _signedUrlCache;
-            var missingPaths = [];
-            var missingIndex = {};
-            for (var mi = 0; mi < validEntries.length; mi++) {
-                var mEntry = validEntries[mi];
-                var mKey = mEntry.categoryName + '/' + mEntry.folderName;
-                if (signedUrlMap[mKey]) continue;
-                var mCompPath = mKey + '/comp.png';
-                var mThumbPath = mKey + '/thumbnail.png';
-                missingPaths.push(mCompPath);
-                missingPaths.push(mThumbPath);
-                missingIndex[mCompPath] = { categoryName: mEntry.categoryName, folderName: mEntry.folderName, type: 'thumb_comp' };
-                missingIndex[mThumbPath] = { categoryName: mEntry.categoryName, folderName: mEntry.folderName, type: 'thumb_new' };
-            }
-            if (missingPaths.length > 0) {
-                _log('buildCompsFromMetadata: signing ' + missingPaths.length + ' new thumbnails missing from cache', 'info');
-                var BATCH_M = 100;
-                for (var bm = 0; bm < missingPaths.length; bm += BATCH_M) {
-                    var batchM = missingPaths.slice(bm, bm + BATCH_M);
-                    var resM = await sb.storage.from(BUCKET).createSignedUrls(batchM, SIGNED_URL_EXPIRY);
-                    if (resM.data) {
-                        resM.data.forEach(function(item) {
-                            if (item.error || !item.signedUrl) return;
-                            var info = missingIndex[item.path];
-                            if (!info) return;
-                            var key = info.categoryName + '/' + info.folderName;
-                            if (!signedUrlMap[key]) signedUrlMap[key] = {};
-                            if (info.type === 'thumb_comp') signedUrlMap[key].thumbCompUrl = item.signedUrl;
-                            else if (info.type === 'thumb_new') signedUrlMap[key].thumbNewUrl = item.signedUrl;
-                        });
-                    }
-                }
-                _signedUrlCache = signedUrlMap;
-            }
-        } else {
-            var pathsToSign = [];
-            var pathIndexMap = {};
-
-            metadataResults.forEach(function (mr) {
-                if (!mr.metadata) return;
-                var basePath = mr.categoryName + '/' + mr.folderName;
-
-                var compPngPath = basePath + '/comp.png';
-                pathsToSign.push(compPngPath);
-                pathIndexMap[compPngPath] = { categoryName: mr.categoryName, folderName: mr.folderName, type: 'thumb_comp' };
-
-                var thumbPngPath = basePath + '/thumbnail.png';
-                pathsToSign.push(thumbPngPath);
-                pathIndexMap[thumbPngPath] = { categoryName: mr.categoryName, folderName: mr.folderName, type: 'thumb_new' };
-            });
-
-            signedUrlMap = {};
-            // Batch sign in chunks of 100 to avoid request size limits
-            var SIGN_BATCH = 100;
-            for (var b = 0; b < pathsToSign.length; b += SIGN_BATCH) {
-                var batch = pathsToSign.slice(b, b + SIGN_BATCH);
-                var signResult = await sb.storage.from(BUCKET).createSignedUrls(batch, SIGNED_URL_EXPIRY);
-                if (signResult.data) {
-                    signResult.data.forEach(function (item) {
-                        if (item.error || !item.signedUrl) return;
-                        var info = pathIndexMap[item.path];
-                        if (!info) return;
-                        var key = info.categoryName + '/' + info.folderName;
-                        if (!signedUrlMap[key]) signedUrlMap[key] = {};
-                        if (info.type === 'thumb_comp') {
-                            signedUrlMap[key].thumbCompUrl = item.signedUrl;
-                        } else if (info.type === 'thumb_new') {
-                            signedUrlMap[key].thumbNewUrl = item.signedUrl;
-                        }
-                    });
-                }
-            }
-
-            // Cache for reuse
-            _signedUrlCache = signedUrlMap;
-            _signedUrlCacheTime = now;
-            _log('buildCompsFromMetadata: signed ' + pathsToSign.length + ' thumbnail URLs in ' + (Date.now() - now) + 'ms', 'info');
-        }
 
         // Build comp objects
         var allComps = [];
@@ -461,15 +401,12 @@
             var parts = mr.folderName.split('_');
             var uniqueId = parts.length > 1 ? parts[parts.length - 1] : mr.folderName;
             var storagePath = mr.categoryName + '/' + mr.folderName;
-            var urls = signedUrlMap[storagePath] || {};
-
-            var thumbUrl = urls.thumbCompUrl || urls.thumbNewUrl || '';
-            var thumbUrlAlt = urls.thumbNewUrl || '';
-            if (thumbUrl === urls.thumbCompUrl && urls.thumbNewUrl) {
-                thumbUrlAlt = urls.thumbNewUrl;
-            } else if (thumbUrl === urls.thumbNewUrl && urls.thumbCompUrl) {
-                thumbUrlAlt = urls.thumbCompUrl;
-            }
+            var thumbPath = storagePath + '/comp.png';
+            var thumbPathAlt = storagePath + '/thumbnail.png';
+            var cachedPrimaryThumb = getCachedSignedUrl(thumbPath);
+            var cachedAltThumb = getCachedSignedUrl(thumbPathAlt);
+            var thumbUrl = cachedPrimaryThumb || cachedAltThumb;
+            var thumbUrlAlt = cachedPrimaryThumb ? cachedAltThumb : cachedPrimaryThumb;
 
             var previewFrameCount = 0;
             if (typeof meta.previewFrames === 'number') previewFrameCount = meta.previewFrames;
@@ -487,6 +424,8 @@
                 folderName: mr.folderName,
                 thumbUrl: thumbUrl,
                 thumbUrlAlt: thumbUrlAlt,
+                thumbPath: thumbPath,
+                thumbPathAlt: thumbPathAlt,
                 duration: meta.duration || 0,
                 width: meta.width || 0,
                 height: meta.height || 0,
@@ -501,16 +440,58 @@
         return allComps;
     }
 
+    function sortPreviewPaths(paths) {
+        return paths.sort(function(a, b) {
+            var ma = /frame_(\d+)\.png$/i.exec(a);
+            var mb = /frame_(\d+)\.png$/i.exec(b);
+            var na = ma ? parseInt(ma[1], 10) : 0;
+            var nb = mb ? parseInt(mb[1], 10) : 0;
+            return na - nb;
+        });
+    }
+
+    async function getExistingPreviewFramePaths(storagePath, expectedCount) {
+        if (!storagePath) return [];
+        var cacheKey = storagePath + '|' + (expectedCount || 0);
+        if (_previewPathCache[cacheKey]) return _previewPathCache[cacheKey].slice();
+
+        var previewPrefix = storagePath + '/preview';
+        try {
+            var items = await listAllPaginated(previewPrefix, { sortBy: { column: 'name', order: 'asc' } });
+            var paths = [];
+            (items || []).forEach(function(item) {
+                if (!item || item.id === null || !item.name) return;
+                if (/^frame_\d+\.png$/i.test(item.name)) {
+                    paths.push(previewPrefix + '/' + item.name);
+                }
+            });
+            paths = sortPreviewPaths(paths);
+            if (expectedCount && paths.length < expectedCount) {
+                _log('preview mismatch for ' + storagePath + ': metadata says ' + expectedCount + ', storage has ' + paths.length, 'warn');
+            }
+            _previewPathCache[cacheKey] = paths.slice();
+            return paths;
+        } catch (e) {
+            _log('preview listing failed for ' + storagePath + ': ' + (e && e.message || e), 'warn');
+            return [];
+        }
+    }
+
     /**
      * Sign preview frame URLs on demand (called on hover).
-     * Returns array of signed URLs for preview/frame_N.png.
+     * Returns signed URLs for preview frames that actually exist in storage.
      */
     async function signPreviewFrames(storagePath, frameCount) {
-        if (!frameCount || frameCount <= 0) return [];
-        var paths = [];
-        for (var i = 0; i < frameCount; i++) {
-            paths.push(storagePath + '/preview/frame_' + i + '.png');
+        if (!storagePath || !frameCount || frameCount <= 0) return [];
+        var cacheKey = storagePath + '|' + frameCount;
+        var cached = _previewUrlCache[cacheKey];
+        if (cached && (Date.now() - cached.ts < SIGNED_URL_CACHE_TTL)) {
+            return cached.urls.slice();
         }
+
+        var paths = await getExistingPreviewFramePaths(storagePath, frameCount);
+        if (!paths || paths.length === 0) return [];
+
         // Batch sign in chunks of 100
         var signed = [];
         var BATCH = 100;
@@ -523,6 +504,7 @@
                 });
             }
         }
+        _previewUrlCache[cacheKey] = { ts: Date.now(), urls: signed.slice() };
         return signed;
     }
 
@@ -536,7 +518,7 @@
         var allItems = [];
         var offset = 0;
         var seenNames = {};
-        var maxPages = 50; // Safety limit
+        var maxPages = 1000; // Safety cap: up to 1,000,000 items at PAGE=1000
         var page = 0;
         var label = folder === '' ? 'root' : '"' + folder + '"';
         var pageTimeout = (opts && opts._timeoutMs) || undefined;
@@ -571,6 +553,9 @@
             offset += PAGE;
             page++;
         }
+        if (page >= maxPages) {
+            _log('Pagination safety cap hit for ' + label + ' at ' + allItems.length + ' items; increase maxPages if this bucket grows beyond 1M objects in one folder.', 'warn');
+        }
         _log('Listed ' + label + ': ' + allItems.length + ' items (' + (page + 1) + ' pages)');
         return allItems;
     }
@@ -593,7 +578,9 @@
             var rootNames = allRootItems.map(function(it) {
                 return it.name + (it.id === null ? '/' : '');
             });
-            _log('fetchAllMetadata: root contents: [' + rootNames.join(', ') + ']', 'info');
+            var rootPreview = rootNames.slice(0, 40).join(', ');
+            if (rootNames.length > 40) rootPreview += ', ... +' + (rootNames.length - 40) + ' more';
+            _log('fetchAllMetadata: root contents: [' + rootPreview + ']', 'info');
         } else {
             _log('fetchAllMetadata: bucket root is EMPTY — no categories found', 'warn');
         }
@@ -824,7 +811,7 @@
         var cache = getCachedMetadata();
 
         if (cache && cache.folders && cache.folders.length > 0) {
-            // FAST PATH: Use cached metadata, only sign fresh URLs (1 API call)
+            // FAST PATH: Use cached metadata. Media URLs are signed lazily by the UI.
             var ageMs = Date.now() - (cache.ts || 0);
             var partialUntilFresh = cache.partialUntilTs && Date.now() < cache.partialUntilTs;
             _log('listTemplates: FAST PATH — using cached metadata (' + cache.folders.length + ' entries, age: ' + Math.round(ageMs / 1000) + 's' + (partialUntilFresh ? ', partial-grace ' + Math.round((cache.partialUntilTs - Date.now()) / 1000) + 's' : '') + ')', 'info');
@@ -976,7 +963,7 @@
             uploadManifest(metadataResults, listTemplates._archives || []);
         }
 
-        // Sign URLs and build comps
+        // Build comp objects; thumbnails/previews are signed lazily by the UI.
         var comps2 = await buildCompsFromMetadata(metadataResults);
         _log('listTemplates: SLOW PATH complete — ' + comps2.length + ' comps in ' + (Date.now() - t0) + 'ms', comps2.length > 0 ? 'success' : 'warn');
         var slowFailed = (metadataResults && metadataResults._failedCategories) ? metadataResults._failedCategories.slice() : [];
@@ -989,7 +976,6 @@
      */
     function getDiagnostics() {
         var cache = getCachedMetadata();
-        var sigCache = _signedUrlCache;
         // The manifest is downloaded fresh from cloud each fetchManifest()
         // call — there is no in-memory cache var, so no field to expose.
         // (A previous draft referenced an undeclared `_manifestCache`; the
@@ -1019,11 +1005,12 @@
                 failedCategories: (cache.failedCategories || []).slice(),
                 nullMetadataCount: (cache.folders || []).filter(function(f) { return !f || f.metadata == null; }).length
             } : null,
-            signedUrlCache: sigCache ? {
-                ageMs: Date.now() - _signedUrlCacheTime,
+            signedUrlCache: {
                 ttlMs: SIGNED_URL_CACHE_TTL,
-                pathCount: Object.keys(sigCache).length
-            } : null,
+                pathCount: Object.keys(_signedPathUrlCache).length,
+                previewUrlCount: Object.keys(_previewUrlCache).length,
+                previewPathCount: Object.keys(_previewPathCache).length
+            },
             archives: (listTemplates._archives || []).length,
             constants: {
                 LIST_TIMEOUT_MS: LIST_TIMEOUT_MS,
@@ -1035,49 +1022,208 @@
         };
     }
 
-    // Download a template's .aep file to a temp location for import
+    function pathEndsWith(path, suffix) {
+        if (!path || !suffix) return false;
+        var lowerPath = String(path).toLowerCase();
+        var lowerSuffix = String(suffix).toLowerCase();
+        return lowerPath.length >= lowerSuffix.length &&
+            lowerPath.indexOf(lowerSuffix, lowerPath.length - lowerSuffix.length) !== -1;
+    }
+
+    function isAepPath(path) {
+        return pathEndsWith(path, '.aep');
+    }
+
+    function shouldDownloadWithTemplate(storagePath, fullPath, chosenAepPath) {
+        if (!fullPath || fullPath === chosenAepPath) return false;
+        var rel = fullPath.substring(storagePath.length + 1);
+        var lower = rel.toLowerCase();
+        if (!rel || lower === '.emptyfolderplaceholder' || lower === '.ds_store' || lower.indexOf('/.ds_store') !== -1) return false;
+        if (lower === 'metadata.json' || lower === 'comp.png' || lower === 'thumbnail.png' || lower === 'thumbnail.jpg') return false;
+        if (lower.indexOf('preview/') === 0) return false;
+        if (isAepPath(lower)) return false;
+        return true;
+    }
+
+    function contentTypeForPath(path) {
+        var lower = (path || '').toLowerCase();
+        if (pathEndsWith(lower, '.png')) return 'image/png';
+        if (pathEndsWith(lower, '.jpg') || pathEndsWith(lower, '.jpeg')) return 'image/jpeg';
+        if (pathEndsWith(lower, '.json')) return 'application/json';
+        if (pathEndsWith(lower, '.txt')) return 'text/plain';
+        if (pathEndsWith(lower, '.mp4')) return 'video/mp4';
+        if (pathEndsWith(lower, '.mov')) return 'video/quicktime';
+        if (pathEndsWith(lower, '.wav')) return 'audio/wav';
+        if (pathEndsWith(lower, '.mp3')) return 'audio/mpeg';
+        return 'application/octet-stream';
+    }
+
+    async function downloadStorageFiles(paths, basePath, concurrency) {
+        var results = new Array(paths.length);
+        var next = 0;
+        var limit = concurrency || 6;
+        async function worker() {
+            while (next < paths.length) {
+                var idx = next++;
+                var path = paths[idx];
+                var res = await sb.storage.from(BUCKET).download(path);
+                if (res.error || !res.data) {
+                    throw new Error('Failed to download bundle file ' + path + ': ' + (res.error && res.error.message || 'unknown'));
+                }
+                results[idx] = {
+                    path: path,
+                    relativePath: path.substring(basePath.length + 1),
+                    blob: res.data,
+                    contentType: contentTypeForPath(path)
+                };
+            }
+        }
+        var workers = [];
+        var workerCount = Math.min(limit, paths.length);
+        for (var i = 0; i < workerCount; i++) workers.push(worker());
+        await Promise.all(workers);
+        return results;
+    }
+
+    // Download a template bundle for import/generation. The returned extraFiles
+    // preserve collected footage/assets next to the AEP so AE can relink them.
     async function downloadTemplate(storagePath) {
-        // Fast path: try template.aep directly (standard upload name)
+        var allFiles = await collectAllFiles(storagePath);
+        var chosenAepPath = null;
         var fastPath = storagePath + '/template.aep';
-        var fastResult = await sb.storage.from(BUCKET).download(fastPath);
-        if (!fastResult.error && fastResult.data) {
-            return { blob: fastResult.data, fileName: 'template.aep' };
-        }
 
-        // Fallback: list files and find any .aep
-        var filesResult = await sb.storage.from(BUCKET).list(storagePath, { limit: 100 });
-        if (filesResult.error) {
-            throw new Error('Failed to list template files: ' + filesResult.error.message);
-        }
-
-        // Plain loop instead of Array.prototype.find — ES6, not on CEP 8/9.
-        var aepFile = null;
-        var _files = filesResult.data || [];
-        for (var _fi = 0; _fi < _files.length; _fi++) {
-            var _f = _files[_fi];
-            if (!_f || !_f.name) continue;
-            var _ln = _f.name.toLowerCase();
-            if (_ln.length >= 4 && _ln.indexOf('.aep', _ln.length - 4) !== -1) {
-                aepFile = _f;
+        for (var af = 0; af < allFiles.length; af++) {
+            if (allFiles[af] === fastPath) {
+                chosenAepPath = fastPath;
                 break;
             }
         }
 
-        if (!aepFile) {
+        if (!chosenAepPath) {
+            for (var ap = 0; ap < allFiles.length; ap++) {
+                if (isAepPath(allFiles[ap])) {
+                    chosenAepPath = allFiles[ap];
+                    break;
+                }
+            }
+        }
+
+        if (!chosenAepPath) {
+            var filesResult = await sb.storage.from(BUCKET).list(storagePath, { limit: 1000 });
+            if (filesResult.error) {
+                throw new Error('Failed to list template files: ' + filesResult.error.message);
+            }
+            var _files = filesResult.data || [];
+            for (var _fi = 0; _fi < _files.length; _fi++) {
+                var _f = _files[_fi];
+                if (!_f || !_f.name || _f.id === null) continue;
+                if (isAepPath(_f.name)) {
+                    chosenAepPath = storagePath + '/' + _f.name;
+                    break;
+                }
+            }
+        }
+
+        if (!chosenAepPath) {
             throw new Error('No .aep file found in template folder');
         }
 
-        var aepPath = storagePath + '/' + aepFile.name;
-        var downloadResult = await sb.storage.from(BUCKET).download(aepPath);
+        var downloadResult = await sb.storage.from(BUCKET).download(chosenAepPath);
+        if (downloadResult.error || !downloadResult.data) {
+            throw new Error('Failed to download template: ' + (downloadResult.error && downloadResult.error.message || 'unknown'));
+        }
 
-        if (downloadResult.error) {
-            throw new Error('Failed to download template: ' + downloadResult.error.message);
+        var extraPaths = [];
+        for (var ep = 0; ep < allFiles.length; ep++) {
+            if (shouldDownloadWithTemplate(storagePath, allFiles[ep], chosenAepPath)) {
+                extraPaths.push(allFiles[ep]);
+            }
+        }
+
+        var extras = [];
+        if (extraPaths.length > 0) {
+            extras = await downloadStorageFiles(extraPaths, storagePath, 6);
+            _log('downloadTemplate: downloaded AEP + ' + extras.length + ' bundle asset(s) for ' + storagePath, 'info');
         }
 
         return {
             blob: downloadResult.data,
-            fileName: aepFile.name,
+            fileName: chosenAepPath.split('/').pop(),
+            storagePath: chosenAepPath,
+            extraFiles: extras
         };
+    }
+
+    async function uploadBundleFiles(basePath, bundleFiles) {
+        if (!bundleFiles || bundleFiles.length === 0) return [];
+        var failures = [];
+        var idx = 0;
+        var CONCURRENCY = 6;
+        async function worker() {
+            while (idx < bundleFiles.length) {
+                var myIdx = idx++;
+                var f = bundleFiles[myIdx];
+                if (!f || !f.relativePath || !f.blob) continue;
+                var uploadPath = basePath + '/' + f.relativePath.replace(/^\/+/, '');
+                try {
+                    var res = await sb.storage.from(BUCKET).upload(uploadPath, f.blob, {
+                        contentType: f.contentType || contentTypeForPath(uploadPath),
+                        upsert: true,
+                    });
+                    if (res.error) failures.push({ path: uploadPath, error: res.error.message });
+                } catch (e) {
+                    failures.push({ path: uploadPath, error: (e && e.message) || String(e) });
+                }
+            }
+        }
+        var workers = [];
+        for (var wi = 0; wi < Math.min(CONCURRENCY, bundleFiles.length); wi++) workers.push(worker());
+        await Promise.all(workers);
+        if (failures.length > 0) {
+            throw new Error('Failed to upload bundle asset ' + failures[0].path + ': ' + failures[0].error);
+        }
+        return bundleFiles;
+    }
+
+    async function copyStorageFiles(filesToCopy) {
+        if (!filesToCopy || filesToCopy.length === 0) return;
+        var idx = 0;
+        var failures = [];
+        var CONCURRENCY = 6;
+        async function worker() {
+            while (idx < filesToCopy.length) {
+                var myIdx = idx++;
+                var entry = filesToCopy[myIdx];
+                try {
+                    var dlRes = await sb.storage.from(BUCKET).download(entry.src);
+                    if (dlRes.error || !dlRes.data) throw new Error('Download failed: ' + (dlRes.error && dlRes.error.message || 'unknown'));
+                    var upRes = await sb.storage.from(BUCKET).upload(entry.dest, dlRes.data, {
+                        contentType: contentTypeForPath(entry.dest),
+                        upsert: true,
+                    });
+                    if (upRes.error) throw new Error('Upload failed: ' + upRes.error.message);
+                } catch (e) {
+                    failures.push({ path: entry.src, error: (e && e.message) || String(e) });
+                }
+            }
+        }
+        var workers = [];
+        for (var wi = 0; wi < Math.min(CONCURRENCY, filesToCopy.length); wi++) workers.push(worker());
+        await Promise.all(workers);
+        if (failures.length > 0) {
+            throw new Error('Failed to copy ' + failures[0].path + ': ' + failures[0].error);
+        }
+    }
+
+    async function removeStorageFiles(paths) {
+        if (!paths || paths.length === 0) return;
+        for (var b = 0; b < paths.length; b += 100) {
+            var batch = paths.slice(b, b + 100);
+            var removeResult = await sb.storage.from(BUCKET).remove(batch);
+            if (removeResult.error) {
+                throw new Error('Failed to remove files: ' + removeResult.error.message);
+            }
+        }
     }
 
     // Upload a template bundle (aep + thumbnail + preview frames + metadata) to the bucket
@@ -1128,6 +1274,10 @@
             });
         }
 
+        if (files.bundleFiles && files.bundleFiles.length > 0) {
+            uploads.push(uploadBundleFiles(basePath, files.bundleFiles));
+        }
+
         if (files.metadata) {
             var metaBlob = new Blob([JSON.stringify(files.metadata)], { type: 'application/json' });
             uploads.push(
@@ -1153,9 +1303,7 @@
      * which is the dominant cost when processing categories with many comp folders.
      */
     async function collectAllFiles(folderPath) {
-        var result = await sb.storage.from(BUCKET).list(folderPath, { limit: 1000 });
-        if (result.error) return [];
-        var items = result.data || [];
+        var items = await listAllPaginated(folderPath, { sortBy: { column: 'name', order: 'asc' } });
         var filePaths = [];
         var subfolderPromises = [];
         for (var i = 0; i < items.length; i++) {
@@ -1191,6 +1339,22 @@
             }
         }
         invalidateCacheForPath(storagePath);
+    }
+
+    async function removePreviewFrames(storagePath) {
+        var framePaths = await getExistingPreviewFramePaths(storagePath, 0);
+        if (!framePaths || framePaths.length === 0) return 0;
+        for (var b = 0; b < framePaths.length; b += 100) {
+            var batch = framePaths.slice(b, b + 100);
+            var removeResult = await sb.storage.from(BUCKET).remove(batch);
+            if (removeResult.error) {
+                throw new Error('Failed to remove old preview frames: ' + removeResult.error.message);
+            }
+        }
+        _previewUrlCache = {};
+        _previewPathCache = {};
+        invalidateCache();
+        return framePaths.length;
     }
 
     // Rename a template (re-upload metadata with new displayName)
@@ -1391,14 +1555,28 @@
     async function signPaths(paths) {
         if (!paths || paths.length === 0) return {};
         var result = {};
+        var pathsToSign = [];
+        var seen = {};
+        paths.forEach(function(path) {
+            if (!path || seen[path]) return;
+            seen[path] = 1;
+            var cached = getCachedSignedUrl(path);
+            if (cached) {
+                result[path] = cached;
+            } else {
+                pathsToSign.push(path);
+            }
+        });
+        if (pathsToSign.length === 0) return result;
         var BATCH = 100;
-        for (var b = 0; b < paths.length; b += BATCH) {
-            var batch = paths.slice(b, b + BATCH);
+        for (var b = 0; b < pathsToSign.length; b += BATCH) {
+            var batch = pathsToSign.slice(b, b + BATCH);
             var signResult = await sb.storage.from(BUCKET).createSignedUrls(batch, SIGNED_URL_EXPIRY);
             if (signResult.data) {
                 signResult.data.forEach(function(item) {
                     if (!item.error && item.signedUrl) {
                         result[item.path] = item.signedUrl;
+                        _signedPathUrlCache[item.path] = { ts: Date.now(), url: item.signedUrl };
                     }
                 });
             }
@@ -1421,8 +1599,9 @@
         // chronic Supabase outage drops failed-category templates entirely).
         var preExisting = getCachedMetadata();
         var stale = preExisting && preExisting.folders ? preExisting.folders : [];
-        _signedUrlCache = null;
-        _signedUrlCacheTime = 0;
+        _signedPathUrlCache = {};
+        _previewUrlCache = {};
+        _previewPathCache = {};
         try { localStorage.removeItem(META_CACHE_KEY); } catch (e) {}
 
         var fresh = await fetchAllMetadata();
@@ -1459,10 +1638,16 @@
         getArchives: getArchives,
         getArchiveDownloadUrl: getArchiveDownloadUrl,
         invalidateCache: invalidateCache,
+        clearLocalCache: clearLocalCache,
         invalidateCacheForPath: invalidateCacheForPath,
         forceReload: forceReload,
         signPreviewFrames: signPreviewFrames,
+        removePreviewFrames: removePreviewFrames,
         signPaths: signPaths,
         getDiagnostics: getDiagnostics,
+        uploadBundleFiles: uploadBundleFiles,
+        collectAllFiles: collectAllFiles,
+        copyStorageFiles: copyStorageFiles,
+        removeStorageFiles: removeStorageFiles,
     };
 })();
