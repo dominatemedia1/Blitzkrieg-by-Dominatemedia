@@ -73,6 +73,10 @@
     // templates. Trust the manifest for an hour; admin mutations publish a
     // fresh manifest immediately, and "Regenerate/Refresh" still forces a scan.
     var MANIFEST_TTL_MS = 60 * 60 * 1000;
+    // Rescue old poisoned local caches like the 30-template John/Usama-only
+    // cache that happened when category listing timed out. A single manifest
+    // download is cheap and prevents editors from seeing a visibly partial grid.
+    var CACHE_UNDERCOUNT_RESCUE_THRESHOLD = 200;
 
     // Per-attempt list timeout — adaptive. 8s was too aggressive for slow
     // networks (regional editors on high-latency links saw EVERY category
@@ -814,6 +818,35 @@
         var cache = getCachedMetadata();
 
         if (cache && cache.folders && cache.folders.length > 0) {
+            var cacheLooksPartial =
+                (cache.folders.length < CACHE_UNDERCOUNT_RESCUE_THRESHOLD) ||
+                (cache.failedCategories && cache.failedCategories.length > 0) ||
+                (cache.partialUntilTs && Date.now() < cache.partialUntilTs);
+            if (cacheLooksPartial) {
+                try {
+                    var rescueManifest = await fetchManifest();
+                    if (rescueManifest && rescueManifest.folders &&
+                        rescueManifest.folders.length > cache.folders.length) {
+                        _log('listTemplates: cache rescue — local cache has ' + cache.folders.length +
+                             ' entries, manifest has ' + rescueManifest.folders.length + '; using manifest before render', 'warn');
+                        setCachedMetadata(rescueManifest.folders);
+                        if (rescueManifest.archives) listTemplates._archives = rescueManifest.archives;
+                        var rescuedComps = await buildCompsFromMetadata(rescueManifest.folders);
+                        _lastLoad = {
+                            ts: Date.now(),
+                            source: rescueManifest._stale ? 'manifest-rescue-stale' : 'manifest-rescue',
+                            durationMs: Date.now() - t0,
+                            count: rescuedComps.length,
+                            partial: false,
+                            failedCategories: []
+                        };
+                        return rescuedComps;
+                    }
+                } catch (rescueErr) {
+                    _log('listTemplates: cache rescue manifest check failed: ' + (rescueErr && rescueErr.message || rescueErr), 'warn');
+                }
+            }
+
             // FAST PATH: Use cached metadata. Media URLs are signed lazily by the UI.
             var ageMs = Date.now() - (cache.ts || 0);
             var partialUntilFresh = cache.partialUntilTs && Date.now() < cache.partialUntilTs;
