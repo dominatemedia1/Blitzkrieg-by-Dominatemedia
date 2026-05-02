@@ -941,10 +941,10 @@
             }
         });
 
-        // Refresh Library action — uses forceReload() so a deliberate user
-        // click ALWAYS clears every cache layer (in-memory signed URLs,
-        // localStorage metadata, cloud manifest) and fetches fresh. This is
-        // the recovery path when the grid is undercounting templates.
+        // Refresh Library action — clear this editor's local caches, then use
+        // the published manifest fast path. Full storage rescans are expensive
+        // once the bucket has hundreds of templates and should only happen via
+        // explicit maintenance paths, not a normal editor refresh.
         if (dropdownRefresh) {
             dropdownRefresh.addEventListener('click', function(e) {
                 e.preventDefault();
@@ -954,42 +954,13 @@
                     showToast('Already loading...');
                     return;
                 }
-                showToast('Reloading library from cloud...');
-                isLoading = true;
-                showSpinner();
-                var t0 = Date.now();
-                // Drain any pendingLibraryReload that focus events queued
-                // while forceReload was running — without this the flag
-                // could get stuck `true` indefinitely (loadLibrary checks
-                // it inside its own success/fail handlers, which never
-                // run if loadLibrary itself isn't called).
-                function _drainPending() {
-                    if (pendingLibraryReload) {
-                        pendingLibraryReload = false;
-                        loadLibrary();
-                    }
+                showToast('Refreshing library...');
+                if (window.cloudLibrary.clearLocalCache) {
+                    window.cloudLibrary.clearLocalCache();
+                } else if (window.cloudLibrary.invalidateCache) {
+                    window.cloudLibrary.invalidateCache();
                 }
-                window.cloudLibrary.forceReload().then(function (comps) {
-                    var elapsed = Date.now() - t0;
-                    debugLog('forceReload: ' + comps.length + ' templates in ' + elapsed + 'ms', 'success');
-                    allComps = comps;
-                    _invalidateCategoryCache();
-                    if (activeCategory === '__analytics') { renderCategories(); renderAnalyticsDashboard(); }
-                    else if (activeCategory.indexOf('__submissions_') === 0) { renderCategories(); renderSubmissionsGrid(activeCategory.replace('__submissions_', '')); }
-                    else if (activeCategory === '__review_pending') { renderCategories(); renderSubmissionsGrid('pending_review'); }
-                    else { renderUI(); }
-                    hideSpinner();
-                    isLoading = false;
-                    updateAdminBarLabel();
-                    showToast('Library reloaded — ' + comps.length + ' templates.');
-                    _drainPending();
-                }).catch(function (err) {
-                    debugLog('forceReload failed: ' + (err && err.message || err), 'error');
-                    showToast('Reload failed: ' + (err && err.message || 'unknown'), true);
-                    hideSpinner();
-                    isLoading = false;
-                    _drainPending();
-                });
+                loadLibrary();
             });
         }
 

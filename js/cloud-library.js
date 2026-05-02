@@ -1634,25 +1634,17 @@
         return result;
     }
 
-    // Hard reload — wipes LOCAL caches and bypasses the cloud manifest by
-    // calling fetchAllMetadata directly. The cloud manifest is intentionally
-    // left in place: uploadManifest uses upsert, so a clean fetch atomically
-    // replaces it. Deleting the shared manifest before knowing whether the
-    // slow path will succeed would self-DoS during a chronic Supabase
-    // outage — every editor whose local cache TTL expires would fall to
-    // slow path with no fallback, and if their slow paths also partial,
-    // the manifest stays gone forever.
+    // Hard reload — bypasses the manifest and calls fetchAllMetadata directly.
+    // Keep the last local metadata cache in place until fresh data is ready:
+    // diagnostics can run mid-scan, and a failed slow scan should not turn a
+    // healthy 248-template cache into an empty one.
     async function forceReload() {
-        _log('forceReload: capturing stale, clearing caches, slow-path fetch (bypass manifest)', 'info');
-        // Capture the stale folders BEFORE wiping localStorage so a partial
-        // fetch can merge against them (otherwise forceReload during a
-        // chronic Supabase outage drops failed-category templates entirely).
+        _log('forceReload: capturing stale, clearing media caches, slow-path fetch (bypass manifest)', 'info');
         var preExisting = getCachedMetadata();
         var stale = preExisting && preExisting.folders ? preExisting.folders : [];
         _signedPathUrlCache = {};
         _previewUrlCache = {};
         _previewPathCache = {};
-        try { localStorage.removeItem(META_CACHE_KEY); } catch (e) {}
 
         var fresh = await fetchAllMetadata();
         if (!listTemplates._archives) listTemplates._archives = [];
