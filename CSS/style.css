@@ -448,6 +448,36 @@ body {
     min-height: 52px;
 }
 
+.cep-runtime-banner {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    margin: var(--sp-3) var(--sp-6) 0;
+    padding: 10px 12px;
+    background: rgba(248, 113, 113, 0.08);
+    border: 1px solid rgba(248, 113, 113, 0.35);
+    border-radius: var(--radius-lg);
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.4;
+    flex-shrink: 0;
+}
+
+.cep-runtime-banner svg {
+    flex-shrink: 0;
+    color: var(--error);
+}
+
+.cep-runtime-banner strong {
+    color: var(--error);
+    font-weight: 600;
+    margin-right: 6px;
+}
+
+.cep-runtime-banner span {
+    color: var(--text-tertiary);
+}
+
 .top-bar-left {
     display: flex;
     align-items: center;
@@ -745,6 +775,17 @@ body {
     color: var(--text-primary);
 }
 
+.dropdown-item.is-disabled {
+    color: var(--text-faint);
+    cursor: not-allowed;
+    opacity: 0.58;
+}
+
+.dropdown-item.is-disabled:hover {
+    background: transparent;
+    color: var(--text-faint);
+}
+
 .dropdown-item .item-icon {
     width: 16px;
     height: 16px;
@@ -753,6 +794,11 @@ body {
 
 .dropdown-item:hover .item-icon {
     color: var(--text-muted);
+}
+
+.dropdown-item.is-disabled .item-icon,
+.dropdown-item.is-disabled:hover .item-icon {
+    color: var(--icon-muted);
 }
 
 .dropdown-item .item-text {
@@ -1055,6 +1101,15 @@ body {
 .stash-item:hover .import-btn {
     background-color: var(--brand-green);
     color: white;
+}
+
+.import-btn:disabled,
+.import-btn.cep-disabled-action,
+.stash-item:hover .import-btn:disabled,
+.stash-item:hover .import-btn.cep-disabled-action {
+    background-color: transparent;
+    color: var(--text-faint);
+    cursor: not-allowed;
 }
 
 /* ========================================
@@ -1520,6 +1575,22 @@ body {
 
 .generate-preview-btn:hover {
     background-color: var(--brand-green);
+}
+
+.generate-preview-btn:disabled,
+.generate-preview-btn.cep-disabled-action {
+    color: var(--text-faint);
+    cursor: not-allowed;
+}
+
+.stash-item:hover .generate-preview-btn:disabled,
+.stash-item:hover .generate-preview-btn.cep-disabled-action {
+    opacity: 0.72;
+}
+
+.generate-preview-btn:disabled:hover,
+.generate-preview-btn.cep-disabled-action:hover {
+    background-color: rgba(0, 0, 0, 0.7);
 }
 
 /* ========================================
@@ -2990,6 +3061,18 @@ body.debug-panel-open #app {
     background: var(--brand-green-hover);
     transform: translateY(-1px);
 }
+
+.admin-bar-btn:disabled,
+.admin-bar-btn.cep-disabled-action,
+.admin-bar-btn:disabled:hover,
+.admin-bar-btn.cep-disabled-action:hover {
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    color: var(--text-faint);
+    cursor: not-allowed;
+    transform: none;
+}
+
 .admin-bar-btn-secondary {
     background: var(--bg-input);
     color: var(--text-secondary);

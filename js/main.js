@@ -11,16 +11,89 @@
     // CEP bridge detection — window.__adobe_cep__ is the native bridge to ExtendScript.
     // csInterface.evalScript is always a function (prototype), but it THROWS if __adobe_cep__ is missing.
     var _hasCepBridge = !!(window.__adobe_cep__ && typeof window.__adobe_cep__.evalScript === 'function');
+    var CEP_ACTION_HINT = 'Open from After Effects > Window > Extensions > Blitzkrieg for import/generate.';
+
+    function refreshCepBridgeState() {
+        var nextState = !!(window.__adobe_cep__ && typeof window.__adobe_cep__.evalScript === 'function');
+        if (_hasCepBridge !== nextState) {
+            _hasCepBridge = nextState;
+            syncCepOnlyUiState();
+        } else {
+            _hasCepBridge = nextState;
+        }
+        return _hasCepBridge;
+    }
+
+    function getRuntimeHint() {
+        var protocol = (window.location && window.location.protocol) || 'unknown';
+        if (protocol.indexOf('http') === 0) return 'browser/dev preview';
+        if (protocol === 'file:') return 'file runtime without CEP bridge';
+        return protocol + ' runtime without CEP bridge';
+    }
+
+    function setCepButtonState(btn, disabled, title) {
+        if (!btn) return;
+        if (!btn.getAttribute('data-cep-original-title')) {
+            btn.setAttribute('data-cep-original-title', btn.getAttribute('title') || '');
+        }
+        btn.disabled = disabled;
+        btn.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+        btn.classList.toggle('cep-disabled-action', disabled);
+        btn.setAttribute('title', disabled ? title : btn.getAttribute('data-cep-original-title'));
+    }
+
+    function syncCepOnlyUiState() {
+        var disabled = !_hasCepBridge;
+        var title = disabled ? CEP_ACTION_HINT : '';
+        if (document.body) document.body.classList.toggle('cep-bridge-missing', disabled);
+
+        setCepButtonState(document.getElementById('add-comp-btn'), disabled, title);
+        setCepButtonState(document.getElementById('admin-generate-missing-btn'), disabled, title);
+        setCepButtonState(document.getElementById('admin-generate-all-btn'), disabled, title);
+
+        var cardButtons = document.querySelectorAll('.import-btn, .generate-preview-btn');
+        cardButtons.forEach(function(btn) { setCepButtonState(btn, disabled, title); });
+
+        var dropdownGenerate = document.getElementById('dropdown-generate-thumbs');
+        if (dropdownGenerate) {
+            dropdownGenerate.classList.toggle('is-disabled', disabled);
+            dropdownGenerate.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+            dropdownGenerate.setAttribute('title', disabled ? title : '');
+        }
+
+        var banner = document.getElementById('cep-runtime-banner');
+        if (disabled) {
+            if (!banner) {
+                banner = document.createElement('div');
+                banner.id = 'cep-runtime-banner';
+                banner.className = 'cep-runtime-banner';
+                banner.innerHTML =
+                    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+                        '<circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line>' +
+                    '</svg>' +
+                    '<div><strong>After Effects bridge missing.</strong><span> Templates can load here, but import and generation are disabled. ' + CEP_ACTION_HINT + '</span></div>';
+                var topBar = document.querySelector('.top-bar');
+                if (topBar && topBar.parentNode) topBar.parentNode.insertBefore(banner, topBar.nextSibling);
+            }
+            banner.style.display = 'flex';
+        } else if (banner) {
+            banner.style.display = 'none';
+        }
+    }
+
+    function ensureCepBridgeForAction(actionName) {
+        if (refreshCepBridgeState()) return true;
+        syncCepOnlyUiState();
+        showToast((actionName || 'This action') + ' requires After Effects. ' + CEP_ACTION_HINT, true);
+        return false;
+    }
 
     /**
      * Safe evalScript wrapper. Checks the CEP bridge before calling.
      * If bridge is missing, calls callback with error string or rejects.
      */
     function safeEvalScript(script, callback) {
-        if (!_hasCepBridge) {
-            // Re-check in case bridge appeared after initial load
-            _hasCepBridge = !!(window.__adobe_cep__ && typeof window.__adobe_cep__.evalScript === 'function');
-        }
+        refreshCepBridgeState();
         if (!_hasCepBridge) {
             if (callback) callback('EvalScript error.');
             return;
@@ -688,16 +761,14 @@
         debugLog('Platform: ' + navigator.platform, 'info');
 
         // CEP bridge diagnostic — critical for generation/import
-        _hasCepBridge = !!(window.__adobe_cep__ && typeof window.__adobe_cep__.evalScript === 'function');
+        refreshCepBridgeState();
         debugLog('CEP bridge (window.__adobe_cep__): ' + (_hasCepBridge ? 'AVAILABLE' : 'NOT AVAILABLE'), _hasCepBridge ? 'success' : 'error');
         if (!_hasCepBridge) {
             debugLog('window.__adobe_cep__ = ' + typeof window.__adobe_cep__, 'error');
             debugLog('Import and generation require the CEP bridge. Generation/import will not work.', 'error');
-            var runtimeHint = (window.location && window.location.protocol && window.location.protocol.indexOf('http') === 0)
-                ? 'browser/dev preview'
-                : 'file runtime without CEP bridge';
-            debugLog('Runtime hint: ' + runtimeHint + '. Open from After Effects > Window > Extensions > Blitzkrieg for import/generate.', 'warn');
+            debugLog('Runtime hint: ' + getRuntimeHint() + '. ' + CEP_ACTION_HINT, 'warn');
         }
+        syncCepOnlyUiState();
 
         // Log Supabase auth state for debugging template loading issues
         if (window.blitzkriegSupabase) {
@@ -831,10 +902,12 @@
 
                 // Button handlers
                 document.getElementById('admin-generate-missing-btn').addEventListener('click', function() {
+                    if (!ensureCepBridgeForAction('Generation')) return;
                     document.getElementById('admin-bar-progress').style.display = 'flex';
                     generateAllMissingThumbnails(false);
                 });
                 document.getElementById('admin-generate-all-btn').addEventListener('click', function() {
+                    if (!ensureCepBridgeForAction('Generation')) return;
                     document.getElementById('admin-bar-progress').style.display = 'flex';
                     generateAllMissingThumbnails(true);
                 });
@@ -857,6 +930,7 @@
                 document.getElementById('admin-bulk-select-btn').addEventListener('click', function() {
                     toggleBulkMode();
                 });
+                syncCepOnlyUiState();
             }
         }
 
@@ -983,6 +1057,7 @@
             dropdownGenerateThumbs.addEventListener('click', function(e) {
                 e.preventDefault();
                 dropdownContainer.classList.remove('open');
+                if (!ensureCepBridgeForAction('Generation')) return;
                 generateAllMissingThumbnails();
             });
         }
@@ -1007,7 +1082,7 @@
         // Check if ExtendScript functions are available (only in CEP environment)
         // Wrapped in try/catch: CSInterface.evalScript may throw outside of Adobe CEP
         try {
-            if (_hasCepBridge) {
+            if (refreshCepBridgeState()) {
                 safeEvalScript('typeof getStashedComps', function(typeResult) {
                     debugLog('ExtendScript check: typeof getStashedComps = "' + typeResult + '"', typeResult === 'function' ? 'success' : 'error');
                     if (typeResult !== 'function') {
@@ -1286,10 +1361,15 @@
      * Runs library diagnostics and logs detailed folder structure info to the debug log.
      */
     function runLibraryDiagnostics() {
+        refreshCepBridgeState();
         debugLog('=== Blitzkrieg Diagnostics ===', 'info');
         debugLog('Panel version: ' + (typeof BLITZKRIEG_LOCAL_VERSION !== 'undefined' ? BLITZKRIEG_LOCAL_VERSION : 'unknown'), 'info');
         debugLog('Mode: Cloud library', 'info');
         debugLog('CEP bridge: ' + (_hasCepBridge ? 'Available' : 'NOT available — import/generate disabled'), _hasCepBridge ? 'success' : 'error');
+        if (!_hasCepBridge) {
+            debugLog('CEP runtime hint: ' + getRuntimeHint(), 'info');
+            debugLog('CEP launch check: no native bridge was injected. ' + CEP_ACTION_HINT, 'warn');
+        }
         debugLog('Templates loaded: ' + allComps.length, 'info');
         var categories = {};
         allComps.forEach(function(c) { categories[c.category] = (categories[c.category] || 0) + 1; });
@@ -1759,7 +1839,9 @@
             var parts = [];
             if (missing > 0) parts.push(missing + ' missing thumbnails');
             if (noPreview > 0) parts.push(noPreview + ' missing previews');
-            label.textContent = parts.join(', ') + ' — click Generate to fix';
+            label.textContent = parts.join(', ') + (refreshCepBridgeState()
+                ? ' — click Generate to fix'
+                : ' — open in After Effects to generate');
         }
     }
 
@@ -1792,15 +1874,20 @@
         var durationAttr = comp.duration ? ' data-duration="' + comp.duration + '"' : '';
         var previewClass = hasPreview ? ' has-preview' : '';
 
+        var hasCepBridge = refreshCepBridgeState();
+        var cepDisabledClass = hasCepBridge ? '' : ' cep-disabled-action';
+        var cepDisabledAttr = hasCepBridge ? '' : ' disabled aria-disabled="true"';
+        var cepActionTitle = hasCepBridge ? '' : CEP_ACTION_HINT;
+
         var isAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
         var generatePreviewBtn = '';
         if (comp.storagePath && isAdmin && (!comp.thumbnailVerified || isBlacklisted)) {
             // Cloud template: admin can generate thumbnail (show when not verified or blacklisted)
-            generatePreviewBtn = '<button class="generate-preview-btn" title="Generate Thumbnail + Preview"><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg> Generate</button>';
+            generatePreviewBtn = '<button class="generate-preview-btn' + cepDisabledClass + '" title="' + escapeHTML(hasCepBridge ? 'Generate Thumbnail + Preview' : cepActionTitle) + '"' + cepDisabledAttr + '><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg> Generate</button>';
         } else if (!hasPreview && !comp.thumbnailVerified && comp.storagePath) {
-            generatePreviewBtn = '<button class="generate-preview-btn" title="Generate Thumbnail"><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg> Thumb</button>';
+            generatePreviewBtn = '<button class="generate-preview-btn' + cepDisabledClass + '" title="' + escapeHTML(hasCepBridge ? 'Generate Thumbnail' : cepActionTitle) + '"' + cepDisabledAttr + '><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg> Thumb</button>';
         } else if (!hasPreview && !comp.storagePath) {
-            generatePreviewBtn = '<button class="generate-preview-btn" title="Generate Preview Animation"><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> Preview</button>';
+            generatePreviewBtn = '<button class="generate-preview-btn' + cepDisabledClass + '" title="' + escapeHTML(hasCepBridge ? 'Generate Preview Animation' : cepActionTitle) + '"' + cepDisabledAttr + '><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> Preview</button>';
         }
 
         var safeName_ = comp.name || '?';
@@ -1859,7 +1946,7 @@
             '<div class="item-info">' +
                 '<p class="item-name" title="' + safeName + '">' + safeName + '</p>' +
                 metaHtml +
-                '<button class="import-btn"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg><span>Import</span></button>' +
+                '<button class="import-btn' + cepDisabledClass + '" title="' + escapeHTML(hasCepBridge ? 'Import into After Effects' : cepActionTitle) + '"' + cepDisabledAttr + '><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg><span>Import</span></button>' +
             '</div>' +
         '</div>';
     }
@@ -2505,10 +2592,7 @@
      * Generate a thumbnail for a single cloud template card and reload.
      */
     function generateCloudThumbnailForCard(uniqueId, storagePath, compName) {
-        if (!_hasCepBridge) {
-            showToast('Requires After Effects.', true);
-            return;
-        }
+        if (!ensureCepBridgeForAction('Generation')) return;
 
         // Find the comp object
         var comp = null;
@@ -2537,11 +2621,7 @@
 
     /* --------- add/rename/delete/import flows --------- */
     function addSelectedComp() {
-        // Check if CSInterface is available
-        if (!_hasCepBridge) {
-            showToast('Adding comps requires After Effects.', true);
-            return;
-        }
+        if (!ensureCepBridgeForAction('Adding comps')) return;
         var categories = getUniqueCategories();
         existingCategorySelect.innerHTML = categories.map(function (cat) { return '<option value="' + escapeHTML(cat) + '">' + escapeHTML(cat) + '</option>'; }).join('');
         existingCategorySelect.disabled = categories.length === 0;
@@ -3242,10 +3322,7 @@
      */
     function importComp(aepPath, uniqueId, storagePath) {
         // Check if we're in a CEP environment with ExtendScript support
-        if (!_hasCepBridge) {
-            showToast('Import requires After Effects. Open this panel inside AE.', true);
-            return;
-        }
+        if (!ensureCepBridgeForAction('Import')) return;
 
         // Resolve comp info for analytics tracking
         var _trackComp = null;
@@ -6140,7 +6217,7 @@
 
     function getExtensionRootHintForUpdate() {
         try {
-            if (!_hasCepBridge || !csInterface || typeof csInterface.getSystemPath !== 'function' ||
+            if (!refreshCepBridgeState() || !csInterface || typeof csInterface.getSystemPath !== 'function' ||
                 typeof SystemPath === 'undefined') {
                 return '';
             }
@@ -7014,7 +7091,7 @@
      */
     function generateCloudThumbnail(comp) {
         if (!comp || !comp.storagePath) return Promise.reject(new Error('No storage path'));
-        if (!_hasCepBridge) {
+        if (!refreshCepBridgeState()) {
             return Promise.reject(new Error('Requires After Effects'));
         }
 
@@ -7300,10 +7377,7 @@
             showToast('Admin access required.', true);
             return;
         }
-        if (!_hasCepBridge) {
-            showToast('Requires After Effects.', true);
-            return;
-        }
+        if (!ensureCepBridgeForAction('Generation')) return;
         // Re-entrance guard — a double-click on the "Generate Missing" button would
         // otherwise spawn two concurrent processing loops, both calling generateCloudThumbnail
         // against overlapping comps and flipping the progress bar between them chaotically.
