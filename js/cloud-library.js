@@ -1012,6 +1012,19 @@
      */
     function getDiagnostics() {
         var cache = getCachedMetadata();
+        var signedUrlCacheAgeMs = null;
+        Object.keys(_signedPathUrlCache).forEach(function(key) {
+            var entry = _signedPathUrlCache[key];
+            if (!entry || !entry.ts) return;
+            var age = Date.now() - entry.ts;
+            if (signedUrlCacheAgeMs === null || age > signedUrlCacheAgeMs) signedUrlCacheAgeMs = age;
+        });
+        Object.keys(_previewUrlCache).forEach(function(key) {
+            var entry = _previewUrlCache[key];
+            if (!entry || !entry.ts) return;
+            var age = Date.now() - entry.ts;
+            if (signedUrlCacheAgeMs === null || age > signedUrlCacheAgeMs) signedUrlCacheAgeMs = age;
+        });
         // The manifest is downloaded fresh from cloud each fetchManifest()
         // call — there is no in-memory cache var, so no field to expose.
         // (A previous draft referenced an undeclared `_manifestCache`; the
@@ -1045,7 +1058,8 @@
                 ttlMs: SIGNED_URL_CACHE_TTL,
                 pathCount: Object.keys(_signedPathUrlCache).length,
                 previewUrlCount: Object.keys(_previewUrlCache).length,
-                previewPathCount: Object.keys(_previewPathCache).length
+                previewPathCount: Object.keys(_previewPathCache).length,
+                ageMs: signedUrlCacheAgeMs
             },
             archives: (listTemplates._archives || []).length,
             constants: {

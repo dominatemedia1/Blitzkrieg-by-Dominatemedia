@@ -693,6 +693,10 @@
         if (!_hasCepBridge) {
             debugLog('window.__adobe_cep__ = ' + typeof window.__adobe_cep__, 'error');
             debugLog('Import and generation require the CEP bridge. Generation/import will not work.', 'error');
+            var runtimeHint = (window.location && window.location.protocol && window.location.protocol.indexOf('http') === 0)
+                ? 'browser/dev preview'
+                : 'file runtime without CEP bridge';
+            debugLog('Runtime hint: ' + runtimeHint + '. Open from After Effects > Window > Extensions > Blitzkrieg for import/generate.', 'warn');
         }
 
         // Log Supabase auth state for debugging template loading issues
@@ -1341,7 +1345,10 @@
                     debugLog('localStorage meta cache: empty', 'warn');
                 }
                 if (d.signedUrlCache) {
-                    debugLog('Signed URL cache: ' + d.signedUrlCache.pathCount + ' paths, age ' + Math.round(d.signedUrlCache.ageMs / 1000) + 's', 'info');
+                    var signedAge = typeof d.signedUrlCache.ageMs === 'number'
+                        ? Math.round(d.signedUrlCache.ageMs / 1000) + 's'
+                        : 'n/a';
+                    debugLog('Signed URL cache: ' + d.signedUrlCache.pathCount + ' paths, age ' + signedAge, 'info');
                 }
                 var attemptSched = (d.constants.LIST_TIMEOUT_BY_ATTEMPT || [d.constants.LIST_TIMEOUT_MS]).join('/');
                 debugLog('Constants: list-timeout-schedule=' + attemptSched + 'ms, manifest-ttl=' + d.constants.MANIFEST_TTL_MS + 'ms', 'info');
@@ -1374,6 +1381,16 @@
         // $RECYCLE.BIN, System Volume Information, and PROJECTS contents
         // into the debug log + telemetry pipeline.
         try { localStorage.removeItem('ae_asset_stash_path'); } catch (eRm) {}
+
+        // ExtendScript availability ping - only meaningful when the native CEP
+        // bridge exists. In a browser/dev preview, evalScript cannot run, so
+        // reporting "hostscript failed" is a false alarm.
+        if (!_hasCepBridge) {
+            debugLog('ExtendScript: skipped because CEP bridge is unavailable in this runtime', 'warn');
+            debugLog('JSON polyfill status: skipped (no CEP bridge)', 'info');
+            debugLog('AE version: skipped (no CEP bridge)', 'info');
+            return;
+        }
 
         // ExtendScript availability ping — also probe JSON polyfill status.
         safeEvalScript('typeof getStashedComps', function(typeResult) {
@@ -6192,8 +6209,16 @@
     var ZXP_DOWNLOAD_URL = 'https://github.com/dominatemedia1/Blitzkrieg-by-Dominatemedia/releases/latest/download/blitzkrieg.zxp';
 
     function loadFailedRecord() {
-        try { return JSON.parse(localStorage.getItem(FAILED_RECORD_KEY) || 'null'); }
-        catch (e) { return null; }
+        try {
+            var rec = JSON.parse(localStorage.getItem(FAILED_RECORD_KEY) || 'null');
+            if (rec && rec.version && !isNewerVersion(rec.version, BLITZKRIEG_LOCAL_VERSION)) {
+                clearFailedRecord();
+                return null;
+            }
+            return rec;
+        } catch (e) {
+            return null;
+        }
     }
     function saveFailedRecord(rec) {
         try { localStorage.setItem(FAILED_RECORD_KEY, JSON.stringify(rec)); } catch (e) {}
