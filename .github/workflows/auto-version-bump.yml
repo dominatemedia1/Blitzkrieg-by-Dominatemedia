@@ -19,6 +19,7 @@ on:
       - 'CSXS/manifest.xml'
 
 permissions:
+  actions: write
   contents: write
 
 jobs:
@@ -59,6 +60,8 @@ jobs:
           echo "new_version=$new" >> "$GITHUB_OUTPUT"
 
       - name: Commit + push bump + tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
@@ -79,3 +82,7 @@ jobs:
           # next successful tag push, creating an OTA loop where editors
           # install the older version that immediately tries to bump UP.
           git push --atomic origin HEAD "v${new}"
+          # Tags pushed with GITHUB_TOKEN do not fire other `push` workflows.
+          # Dispatch the release builder directly so the manual reinstall ZXP
+          # always matches the freshly bumped OTA version.
+          gh workflow run release-zxp.yml --ref main --field release_tag="v${new}"
