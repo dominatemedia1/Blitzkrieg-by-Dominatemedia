@@ -90,6 +90,10 @@
     // backend is genuinely failing for that prefix.
     var LIST_TIMEOUT_BY_ATTEMPT = [15000, 30000, 60000];
     var LIST_TIMEOUT_MS = LIST_TIMEOUT_BY_ATTEMPT[0]; // legacy alias for diagnostics
+    // If Supabase times out on one category, do not retry a full bucket scan on
+    // every focus/reload. The visible library keeps stale entries for the failed
+    // category, and a manual Refresh Library can still retry immediately.
+    var PARTIAL_REFRESH_BACKOFF_MS = 15 * 60 * 1000;
 
     // Diagnostic state — populated by listTemplates() at each tier exit so
     // getDiagnostics() can report what actually happened on the last load.
@@ -484,6 +488,12 @@
         }
     }
 
+    function _dispatchLibraryPartial(detail) {
+        detail = detail || {};
+        detail.failedCategories = (detail.failedCategories || []).slice();
+        _dispatchCustom('blitzkrieg-library-partial', detail);
+    }
+
     /**
      * Sign preview frame URLs on demand (called on hover).
      * Returns signed URLs for preview frames that actually exist in storage.
@@ -720,7 +730,7 @@
                         allFolderEntries.push({ categoryName: cat.name, folderName: compFolders[fi].name });
                     }
                 } catch (err) {
-                    _log('fetchAllMetadata: listing category "' + cat.name + '" FAILED after retries: ' + (err && err.message || err), 'error');
+                    _log('fetchAllMetadata: listing category "' + cat.name + '" failed after retries: ' + (err && err.message || err), 'warn');
                     failedCategoryNames.push(cat.name);
                 }
             }
@@ -791,12 +801,7 @@
         // other editor for the manifest's lifetime).
         if (hasCategoryFailures) {
             metadataResults._failedCategories = failedCategoryNames.slice();
-            _log('fetchAllMetadata: ' + failedCategoryNames.length + ' categories FAILED to list: [' + failedCategoryNames.join(', ') + ']. Caller MUST merge with stale cache or skip writes.', 'error');
-            _dispatchCustom('blitzkrieg-library-partial', {
-                failedCategories: failedCategoryNames.slice(),
-                withMeta: withMeta,
-                total: metadataResults.length
-            });
+            _log('fetchAllMetadata: ' + failedCategoryNames.length + ' categories failed to list: [' + failedCategoryNames.join(', ') + ']. Caller will merge stale cache or skip writes.', 'warn');
         }
 
         return metadataResults;
@@ -901,14 +906,14 @@
                     return fetchAllMetadata().then(function (freshMeta) {
                         if (freshMeta && freshMeta._failedCategories && freshMeta._failedCategories.length > 0) {
                             // PARTIAL fetch: merge fresh non-failed with stale failed
-                            // entries, write back with a 60s partial-grace marker so
+                            // entries, write back with a partial-grace marker so
                             // the next reload doesn't slow-path again immediately.
                             var merged = _mergePartialFolders(staleFolders, freshMeta, freshMeta._failedCategories);
                             setCachedMetadata(merged, {
-                                partialUntilTs: Date.now() + 60 * 1000,
+                                partialUntilTs: Date.now() + PARTIAL_REFRESH_BACKOFF_MS,
                                 failedCategories: freshMeta._failedCategories.slice()
                             });
-                            _log('listTemplates: background refresh PARTIAL — merged ' + merged.length + ' entries (failed cats: [' + freshMeta._failedCategories.join(', ') + ']). Manifest left untouched.', 'warn');
+                            _log('listTemplates: background refresh partial — kept ' + merged.length + ' cached entries, failed cats: [' + freshMeta._failedCategories.join(', ') + ']. Manifest left untouched; retry backed off for ' + Math.round(PARTIAL_REFRESH_BACKOFF_MS / 60000) + 'm.', 'warn');
                             _maybeNotifyChange(staleFolders, merged);
                             return;
                         }
@@ -957,7 +962,11 @@
                 _bgRefreshInFlight = true;
                 fetchAllMetadata().then(function (freshMeta) {
                     if (freshMeta && freshMeta._failedCategories && freshMeta._failedCategories.length > 0) {
-                        _log('listTemplates: stale-manifest background refresh PARTIAL — leaving manifest untouched. Failed: [' + freshMeta._failedCategories.join(', ') + ']', 'warn');
+                        setCachedMetadata(manifest.folders, {
+                            partialUntilTs: Date.now() + PARTIAL_REFRESH_BACKOFF_MS,
+                            failedCategories: freshMeta._failedCategories.slice()
+                        });
+                        _log('listTemplates: stale-manifest background refresh partial — kept manifest cache (' + manifest.folders.length + ' entries), failed cats: [' + freshMeta._failedCategories.join(', ') + ']. Manifest left untouched; retry backed off for ' + Math.round(PARTIAL_REFRESH_BACKOFF_MS / 60000) + 'm.', 'warn');
                         return;
                     }
                     setCachedMetadata(freshMeta);
@@ -982,7 +991,7 @@
 
         if (metadataResults && metadataResults._failedCategories && metadataResults._failedCategories.length > 0) {
             // Slow-path partial: there's no stale to merge with (we got here
-            // because no cache existed). Write the partial result with a 60s
+            // because no cache existed). Write the partial result with a
             // grace marker — the user no longer pays the slow-path cost on
             // every reload while Shaz is timing out. Manifest left untouched
             // to avoid poisoning other editors.
@@ -990,10 +999,18 @@
                 return r && r.metadata !== null && r.metadata !== undefined;
             });
             setCachedMetadata(cleanResults, {
-                partialUntilTs: Date.now() + 60 * 1000,
+                partialUntilTs: Date.now() + PARTIAL_REFRESH_BACKOFF_MS,
                 failedCategories: metadataResults._failedCategories.slice()
             });
-            _log('listTemplates: SLOW PATH partial — wrote ' + cleanResults.length + ' entries with 60s grace. Manifest left untouched. Failed: [' + metadataResults._failedCategories.join(', ') + ']', 'warn');
+            _log('listTemplates: SLOW PATH partial — wrote ' + cleanResults.length + ' entries with ' + Math.round(PARTIAL_REFRESH_BACKOFF_MS / 60000) + 'm grace. Manifest left untouched. Failed: [' + metadataResults._failedCategories.join(', ') + ']', 'warn');
+            _dispatchLibraryPartial({
+                failedCategories: metadataResults._failedCategories.slice(),
+                userVisible: true,
+                preservedStale: false,
+                context: 'slow-path',
+                visibleCount: cleanResults.length,
+                freshCount: cleanResults.length
+            });
         } else {
             setCachedMetadata(metadataResults);
             uploadManifest(metadataResults, listTemplates._archives || []);
@@ -1066,6 +1083,7 @@
                 LIST_TIMEOUT_MS: LIST_TIMEOUT_MS,
                 LIST_TIMEOUT_BY_ATTEMPT: LIST_TIMEOUT_BY_ATTEMPT.slice(),
                 MANIFEST_TTL_MS: MANIFEST_TTL_MS,
+                PARTIAL_REFRESH_BACKOFF_MS: PARTIAL_REFRESH_BACKOFF_MS,
                 SIGNED_URL_EXPIRY: SIGNED_URL_EXPIRY,
                 SIGNED_URL_CACHE_TTL: SIGNED_URL_CACHE_TTL
             }
@@ -1653,14 +1671,22 @@
             uploadManifest(fresh, listTemplates._archives);
             return await buildCompsFromMetadata(fresh);
         }
-        // Partial: merge fresh non-failed with stale failed entries, write
-        // back with 60s grace marker so the user can keep working.
+        // Partial: merge fresh non-failed with stale failed entries, then back
+        // off repeated full scans so the user can keep working.
         var merged = _mergePartialFolders(stale, fresh, fresh._failedCategories);
         setCachedMetadata(merged, {
-            partialUntilTs: Date.now() + 60 * 1000,
+            partialUntilTs: Date.now() + PARTIAL_REFRESH_BACKOFF_MS,
             failedCategories: fresh._failedCategories.slice()
         });
-        _log('forceReload: PARTIAL — merged ' + merged.length + ' entries (failed: [' + fresh._failedCategories.join(', ') + ']). Manifest left untouched.', 'warn');
+        _log('forceReload: partial — kept ' + merged.length + ' entries after failed cats: [' + fresh._failedCategories.join(', ') + ']. Manifest left untouched; retry backed off for ' + Math.round(PARTIAL_REFRESH_BACKOFF_MS / 60000) + 'm.', 'warn');
+        _dispatchLibraryPartial({
+            failedCategories: fresh._failedCategories.slice(),
+            userVisible: false,
+            preservedStale: true,
+            context: 'force-reload',
+            visibleCount: merged.length,
+            freshCount: fresh.length
+        });
         return await buildCompsFromMetadata(merged);
     }
 

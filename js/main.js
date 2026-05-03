@@ -1402,7 +1402,10 @@
                     debugLog('Signed URL cache: ' + d.signedUrlCache.pathCount + ' paths, age ' + signedAge, 'info');
                 }
                 var attemptSched = (d.constants.LIST_TIMEOUT_BY_ATTEMPT || [d.constants.LIST_TIMEOUT_MS]).join('/');
-                debugLog('Constants: list-timeout-schedule=' + attemptSched + 'ms, manifest-ttl=' + d.constants.MANIFEST_TTL_MS + 'ms', 'info');
+                var partialBackoff = d.constants.PARTIAL_REFRESH_BACKOFF_MS
+                    ? ', partial-backoff=' + d.constants.PARTIAL_REFRESH_BACKOFF_MS + 'ms'
+                    : '';
+                debugLog('Constants: list-timeout-schedule=' + attemptSched + 'ms, manifest-ttl=' + d.constants.MANIFEST_TTL_MS + 'ms' + partialBackoff, 'info');
             }
         } catch (diagErr) {
             debugLog('cloudLibrary.getDiagnostics threw: ' + diagErr.message, 'error');
@@ -7537,15 +7540,25 @@
         var detail = e && e.detail || {};
         var failed = detail.failedCategories || [];
         if (!failed.length) return;
-        debugLog('Library PARTIAL load — categories failed: [' + failed.join(', ') + ']', 'error');
+        var preservedStale = detail.preservedStale === true || detail.userVisible === false;
+        var visibleCount = typeof detail.visibleCount === 'number' ? detail.visibleCount : null;
+        if (preservedStale) {
+            debugLog('Library refresh partial — kept cached templates while categories failed: [' + failed.join(', ') + ']' + (visibleCount !== null ? ' (visible: ' + visibleCount + ')' : ''), 'warn');
+        } else {
+            debugLog('Library PARTIAL load — visible categories failed: [' + failed.join(', ') + ']' + (visibleCount !== null ? ' (visible: ' + visibleCount + ')' : ''), 'error');
+        }
         // Throttle: never show this toast more than once per 30s.
         var now = Date.now();
         if (now - _lastPartialToastTs < 30000) return;
         _lastPartialToastTs = now;
         var label = failed.length === 1
-            ? 'Category "' + failed[0] + '" failed to load'
-            : failed.length + ' categories failed to load: ' + failed.join(', ');
-        showToast(label + '. Click Refresh Library to retry.', true);
+            ? 'Category "' + failed[0] + '" failed to refresh'
+            : failed.length + ' categories failed to refresh: ' + failed.join(', ');
+        if (preservedStale) {
+            showToast(label + '. Kept cached templates.');
+        } else {
+            showToast(label + '. Click Refresh Library to retry.', true);
+        }
     });
 
     // expose some internals for inline calls (keeps compatibility)
