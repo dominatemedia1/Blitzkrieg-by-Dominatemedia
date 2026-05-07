@@ -401,6 +401,7 @@
 
         // Build comp objects
         var allComps = [];
+        var staleCacheCount = 0;
         metadataResults.forEach(function (mr) {
             if (!mr.metadata) return;
             var meta = mr.metadata;
@@ -426,6 +427,20 @@
                 || (cleanMeta ? metaName : '')
                 || deriveDisplayName(mr.folderName) || mr.folderName.replace(/-/g, ' ').trim() || 'Untitled';
             if (typeof displayName !== 'string') displayName = String(displayName);
+            // Final safety gate: if ALL sources produced garbage (bare number,
+            // #/@ prefix, timestamp, too short), fall back to Untitled.
+            // This catches stale-cache entries where every level fails quality checks.
+            if (displayName !== 'Untitled') {
+                var finalHasTs = /\d{10,}/.test(displayName);
+                var finalIsNum = /^\d+$/.test(displayName.trim());
+                var finalIsHash = /^[#@]/.test(displayName);
+                var finalShort = displayName.trim().length < 3;
+                if (finalHasTs || finalIsNum || finalIsHash || finalShort) {
+                    displayName = 'Untitled';
+                    staleCacheCount++;
+                    _log('buildCompsFromMetadata: all sources bad for ' + mr.folderName + ' — using Untitled', 'warn');
+                }
+            }
 
             var parts = mr.folderName.split('_');
             var uniqueId = parts.length > 1 ? parts[parts.length - 1] : mr.folderName;
@@ -468,6 +483,13 @@
                 storagePath: storagePath,
             });
         });
+
+        // If stale cache produced garbage names, clear it so next load
+        // pulls fresh manifest data from Supabase with correct display names.
+        if (staleCacheCount > 0) {
+            _log('buildCompsFromMetadata: ' + staleCacheCount + ' entries had garbage names — clearing stale cache', 'warn');
+            clearLocalCache();
+        }
 
         return allComps;
     }
