@@ -405,8 +405,14 @@
             if (!mr.metadata) return;
             var meta = mr.metadata;
 
-            // Guard against missing required fields — metadata.json could be corrupt/partial
-            var displayName = meta.displayName || meta.name || deriveDisplayName(mr.folderName) || 'Untitled';
+            // Derive a clean display name from the folder name first.
+            // Only use it if it passes quality checks (no timestamps, not a bare number).
+            // Falls through to metadata.name / metadata.displayName / folderName / 'Untitled'.
+            var derived = deriveDisplayName(mr.folderName);
+            var hasTimestamp = /\d{10,}/.test(derived);
+            var isJustNumber = /^\d+$/.test(derived);
+            var displayName = (derived && !hasTimestamp && !isJustNumber ? derived : '')
+                || meta.displayName || meta.name || 'Untitled';
             if (typeof displayName !== 'string') displayName = String(displayName);
 
             var parts = mr.folderName.split('_');
@@ -457,15 +463,22 @@
     /**
      * Derive a human-readable display name from a template folder name.
      * Folder names follow the pattern "Descriptive-Name_<uniqueId>" where
-     * uniqueId is a 10+ digit timestamp. Strips the suffix and converts
-     * dashes to spaces.
+     * uniqueId is a 10+ digit timestamp. Strips all timestamp suffixes and
+     * converts dashes to spaces. Handles rare double-timestamp edge cases
+     * like "1-1768564455228_1768564455228".
      * @param {string} folderName
      * @returns {string}
      */
     function deriveDisplayName(folderName) {
         if (!folderName) return '';
-        var cleaned = folderName.replace(/_\d{10,}$/, '').replace(/[_-]+$/, '');
-        return cleaned.replace(/-/g, ' ');
+        // Strip ALL _<timestamp> and -<timestamp> patterns (handles double-timestamp edge cases)
+        var cleaned = folderName.replace(/[_-]\d{10,}/g, '');
+        cleaned = cleaned.replace(/[_-]+$/, '');
+        // Strip short numeric disambiguation suffix (_1, _2, _3 etc.)
+        cleaned = cleaned.replace(/_\d{1,3}$/, '');
+        cleaned = cleaned.replace(/[_-]+$/, '');
+        // Convert dashes to spaces
+        return cleaned.replace(/-/g, ' ').trim();
     }
 
     function sortPreviewPaths(paths) {
