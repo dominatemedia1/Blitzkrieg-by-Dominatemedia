@@ -358,6 +358,25 @@
                 </div>
             </nav>
 
+            <!-- Local Library Sync -->
+            <div class="sync-section" id="sync-section">
+                <div class="sync-badge" id="sync-badge" style="display:none;" title="Local library sync status">
+                    <svg class="sync-badge-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                    <span>Library sync not configured</span>
+                </div>
+                <div class="sync-settings" id="sync-settings" style="display:none;">
+                    <label class="sync-label" for="sync-library-path">Local Library Path</label>
+                    <div class="sync-path-row">
+                        <input type="text" id="sync-library-path" class="sync-path-input" placeholder="~/Blitzkrieg Library" spellcheck="false">
+                        <button id="sync-path-browse" class="button-secondary sync-path-btn" title="Browse for library folder">Browse</button>
+                    </div>
+                    <div class="sync-actions">
+                        <button id="sync-path-save" class="button-primary sync-save-btn">Set Library Path</button>
+                        <button id="sync-force-all" class="button-secondary sync-force-btn" title="Download all templates to local library">Sync All</button>
+                    </div>
+                </div>
+            </div>
+
             <!-- User Profile Section -->
             <div class="sidebar-footer">
                 <div class="sidebar-user-info" id="sidebar-user-info" style="display:none;">
@@ -536,6 +555,7 @@
     <script src="./js/cloud-library.js?v=1.3.12"></script>
     <script src="./js/analytics.js?v=1.3.12"></script>
     <script src="./js/telemetry.js?v=1.3.12"></script>
+    <script src="./js/local-sync.js?v=1.3.12"></script>
     <script src="./js/main.js?v=1.3.12"></script>
 </body>
 </html>

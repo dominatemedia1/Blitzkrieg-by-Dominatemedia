@@ -1,0 +1,4365 @@
+{
+  "plan": [
+    {
+      "oldPath": "Dominate Media/3d__1768822117889",
+      "newPath": "3D-and-Depth/Gray-Metallic-3D-Object-on-Reflective-Surface_1768822117889",
+      "oldDisplayName": "3d__1768822117889",
+      "newDisplayName": "Gray Metallic 3D Object on Reflective Surface",
+      "oldFolderName": "3d__1768822117889",
+      "newFolderName": "Gray-Metallic-3D-Object-on-Reflective-Surface_1768822117889",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "3D-and-Depth"
+      ],
+      "primaryCategory": "3D-and-Depth",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Dark top fading into a bright bottom surface with a rounded metallic-gray 3D object centered, 3D render with ground plane reflection",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/9_1768562519617",
+      "newPath": "3D-and-Depth/Intricate-Geometric-3D-Structure_1768562519617",
+      "oldDisplayName": "9_1768562519617",
+      "newDisplayName": "Intricate Geometric 3D Structure",
+      "oldFolderName": "9_1768562519617",
+      "newFolderName": "Intricate-Geometric-3D-Structure_1768562519617",
+      "oldCategory": "Shaz",
+      "categories": [
+        "3D-and-Depth",
+        "Backgrounds"
+      ],
+      "primaryCategory": "3D-and-Depth",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Dark background with a complex 3D geometric or wireframe structure in the center, mechanical/digital aesthetic with intricate detail",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/7_1768562461354",
+      "newPath": "3D-and-Depth/Metallic-Mechanical-3D-Object_1768562461354",
+      "oldDisplayName": "7_1768562461354",
+      "newDisplayName": "Metallic Mechanical 3D Object",
+      "oldFolderName": "7_1768562461354",
+      "newFolderName": "Metallic-Mechanical-3D-Object_1768562461354",
+      "oldCategory": "Shaz",
+      "categories": [
+        "3D-and-Depth"
+      ],
+      "primaryCategory": "3D-and-Depth",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Complex metallic 3D render of a mechanical or architectural object with shading, highlights, and depth on dark background",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/4_1768756115168",
+      "newPath": "3D-and-Depth/Shaded-3D-Object-on-Light-Background_1768756115168",
+      "oldDisplayName": "4_1768756115168",
+      "newDisplayName": "Shaded 3D Object on Light Background",
+      "oldFolderName": "4_1768756115168",
+      "newFolderName": "Shaded-3D-Object-on-Light-Background_1768756115168",
+      "oldCategory": "Shaz",
+      "categories": [
+        "3D-and-Depth"
+      ],
+      "primaryCategory": "3D-and-Depth",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Light gray background with a complex 3D shaded object in center, appears to have depth, occlusion, and specular highlights",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/3_model_2_1768502088532",
+      "newPath": "3D-and-Depth/Small-Cyan-3D-Object-Floating-on-Black_1768502088532",
+      "oldDisplayName": "3_model_2_1768502088532",
+      "newDisplayName": "Small Cyan 3D Object Floating on Black",
+      "oldFolderName": "3_model_2_1768502088532",
+      "newFolderName": "Small-Cyan-3D-Object-Floating-on-Black_1768502088532",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "3D-and-Depth",
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "3D-and-Depth",
+      "confidence": 0.6,
+      "needsReview": false,
+      "reason": "Near-black frame with a single small cyan-blue 3D rendered object floating in center, appears to be a 3D model",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/10_1768756192304",
+      "newPath": "Backgrounds/Blue-Gradient-Fading-Left-To-Right_1768756192304",
+      "oldDisplayName": "10_1768756192304",
+      "newDisplayName": "Blue Gradient Fading Left To Right",
+      "oldFolderName": "10_1768756192304",
+      "newFolderName": "Blue-Gradient-Fading-Left-To-Right_1768756192304",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Gradient background transitioning from darker blue on left to lighter/near-white on right, with subtle text or marks embedded",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pr_edit_Linked_Comp_15_1768566428279",
+      "newPath": "Backgrounds/Bright-White-Clean-Background_1768566428279",
+      "oldDisplayName": "Pr_edit_Linked_Comp_15_1768566428279",
+      "newDisplayName": "Bright White Clean Background",
+      "oldFolderName": "Pr_edit_Linked_Comp_15_1768566428279",
+      "newFolderName": "Bright-White-Clean-Background_1768566428279",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.95,
+      "needsReview": false,
+      "reason": "Bright white background with very subtle shading, nearly uniform",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/7_1768765096396",
+      "newPath": "Backgrounds/Colorful-RGB-Grid-Abstract-Motion-Background_1768765096396",
+      "oldDisplayName": "7_1768765096396",
+      "newDisplayName": "Colorful RGB Grid Abstract Motion Background",
+      "oldFolderName": "7_1768765096396",
+      "newFolderName": "Colorful-RGB-Grid-Abstract-Motion-Background_1768765096396",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Backgrounds",
+        "Overlays-and-FX"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Dark background with bright saturated red, green, blue, magenta, cyan grid-like patterns creating a colorful abstract animated background",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/10_1768560620693",
+      "newPath": "Backgrounds/Dark-Abstract-Circular-Pattern-Motion-Loop_1768560620693",
+      "oldDisplayName": "10_1768560620693",
+      "newDisplayName": "Dark Abstract Circular Pattern Motion Loop",
+      "oldFolderName": "10_1768560620693",
+      "newFolderName": "Dark-Abstract-Circular-Pattern-Motion-Loop_1768560620693",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Backgrounds",
+        "Overlays-and-FX"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.6,
+      "needsReview": false,
+      "reason": "Dark blue-black background with subtle circular orbshaped patterns in the center, very low contrast abstract loop",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/18_1768646294390",
+      "newPath": "Backgrounds/Dark-Abstract-with-Faint-Dots_1768646294390",
+      "oldDisplayName": "18_1768646294390",
+      "newDisplayName": "Dark Abstract with Faint Dots",
+      "oldFolderName": "18_1768646294390",
+      "newFolderName": "Dark-Abstract-with-Faint-Dots_1768646294390",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Very dark warm-toned frame with faint dots and a subtle arc shape barely visible, minimal content",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/6_1768560095933",
+      "newPath": "Backgrounds/Dark-Blue-Abstract-Shape-Slow-Motion_1768560095933",
+      "oldDisplayName": "6_1768560095933",
+      "newDisplayName": "Dark Blue Abstract Shape Slow Motion",
+      "oldFolderName": "6_1768560095933",
+      "newFolderName": "Dark-Blue-Abstract-Shape-Slow-Motion_1768560095933",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.65,
+      "needsReview": false,
+      "reason": "REVIEWED: Dark blue-black abstract shapes, slow-moving background. No contrary signals.",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/12_1768560866834",
+      "newPath": "Backgrounds/Dark-Blue-Black-Subtle-Gradient-Motion_1768560866834",
+      "oldDisplayName": "12_1768560866834",
+      "newDisplayName": "Dark Blue-Black Subtle Gradient Motion",
+      "oldFolderName": "12_1768560866834",
+      "newFolderName": "Dark-Blue-Black-Subtle-Gradient-Motion_1768560866834",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.6,
+      "needsReview": false,
+      "reason": "Dark blue-black background with very subtle brighter zone in center, likely a slow gradient or abstract motion background",
+      "metadata": {}
+    },
+    {
+      "oldPath": "John Ventura/D5_1768427714643",
+      "newPath": "Backgrounds/Dark-Subtle-Gradient-Background_1768427714643",
+      "oldDisplayName": "D5_1768427714643",
+      "newDisplayName": "Dark Subtle Gradient Background",
+      "oldFolderName": "D5_1768427714643",
+      "newFolderName": "Dark-Subtle-Gradient-Background_1768427714643",
+      "oldCategory": "John Ventura",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Nearly black frame with subtle lighter gradient in center section, dark background plate",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/8_1768756171104",
+      "newPath": "Backgrounds/Dark-to-Light-Horizontal-Gradient_1768756171104",
+      "oldDisplayName": "8_1768756171104",
+      "newDisplayName": "Dark to Light Horizontal Gradient",
+      "oldFolderName": "8_1768756171104",
+      "newFolderName": "Dark-to-Light-Horizontal-Gradient_1768756171104",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Smooth horizontal gradient transitioning from dark at top to bright at bottom, subtle banding, background element",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/14_1768755604024",
+      "newPath": "Backgrounds/Faint-Arc-on-Near-Black-Background_1768755604024",
+      "oldDisplayName": "14_1768755604024",
+      "newDisplayName": "Faint Arc on Near-Black Background",
+      "oldFolderName": "14_1768755604024",
+      "newFolderName": "Faint-Arc-on-Near-Black-Background_1768755604024",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Near-black frame with a very faint curved line or bracket shape in the upper portion, almost no other visible detail",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/7_1768756146866",
+      "newPath": "Backgrounds/Horizontal-Light-Gradient-Background_1768756146866",
+      "oldDisplayName": "7_1768756146866",
+      "newDisplayName": "Horizontal Light Gradient Background",
+      "oldFolderName": "7_1768756146866",
+      "newFolderName": "Horizontal-Light-Gradient-Background_1768756146866",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Horizontal gradient transitioning from dark top to bright bottom, smooth bands of light, could be a gradient background or light leak",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/2_1768756072986",
+      "newPath": "Backgrounds/Large-Light-Blue-Gradient-Background_1768756072986",
+      "oldDisplayName": "2_1768756072986",
+      "newDisplayName": "Large Light Blue Gradient Background",
+      "oldFolderName": "2_1768756072986",
+      "newFolderName": "Large-Light-Blue-Gradient-Background_1768756072986",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Very large frame (3840x2160) with a smooth gradient from light gray at top to light blue-gray at bottom, subtle and even",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/1_1768643326564",
+      "newPath": "Backgrounds/Light-Abstract-Network-Pattern-With-Dots-And-Lines_1768643326564",
+      "oldDisplayName": "1_1768643326564",
+      "newDisplayName": "Light Abstract Network Pattern With Dots And Lines",
+      "oldFolderName": "1_1768643326564",
+      "newFolderName": "Light-Abstract-Network-Pattern-With-Dots-And-Lines_1768643326564",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Light background with distributed dot and line patterns suggesting abstract network nodes or decorative graphic elements across top half",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/20_1768646331463",
+      "newPath": "Backgrounds/Light-Gradient-with-Stacked-Shape-Layers_1768646331463",
+      "oldDisplayName": "20_1768646331463",
+      "newDisplayName": "Light Gradient with Stacked Shape Layers",
+      "oldFolderName": "20_1768646331463",
+      "newFolderName": "Light-Gradient-with-Stacked-Shape-Layers_1768646331463",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Light/warm background with a subtle gradient or stacked shape pattern visible in the center, transitions from dark center content to bright edges",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/11_1768765125500",
+      "newPath": "Backgrounds/Near-Black-Abstract-Slow-Drift_1768765125500",
+      "oldDisplayName": "11_1768765125500",
+      "newDisplayName": "Near Black Abstract Slow Drift",
+      "oldFolderName": "11_1768765125500",
+      "newFolderName": "Near-Black-Abstract-Slow-Drift_1768765125500",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.55,
+      "needsReview": false,
+      "reason": "REVIEWED: Near-black abstract background animation. Faint color tones. Background is best fit.",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/2_1768755415554",
+      "newPath": "Backgrounds/Near-Black-with-Faint-Center-Texture_1768755415554",
+      "oldDisplayName": "2_1768755415554",
+      "newDisplayName": "Near-Black with Faint Center Texture",
+      "oldFolderName": "2_1768755415554",
+      "newFolderName": "Near-Black-with-Faint-Center-Texture_1768755415554",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.65,
+      "needsReview": false,
+      "reason": "Very dark frame with the faintest hint of texture or small marks in the center area, barely visible",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/23_1768646513250",
+      "newPath": "Backgrounds/Near-Black-with-Faint-Corner-Marks_1768646513250",
+      "oldDisplayName": "23_1768646513250",
+      "newDisplayName": "Near-Black with Faint Corner Marks",
+      "oldFolderName": "23_1768646513250",
+      "newFolderName": "Near-Black-with-Faint-Corner-Marks_1768646513250",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.65,
+      "needsReview": false,
+      "reason": "Very dark warm-toned frame with the faintest hint of small marks in the center, barely any visible content",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/3_1768646001121",
+      "newPath": "Backgrounds/Near-Black-with-Faint-Horizontal-Smudge_1768646001121",
+      "oldDisplayName": "3_1768646001121",
+      "newDisplayName": "Near-Black with Faint Horizontal Smudge",
+      "oldFolderName": "3_1768646001121",
+      "newFolderName": "Near-Black-with-Faint-Horizontal-Smudge_1768646001121",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.65,
+      "needsReview": false,
+      "reason": "Very dark warm-toned frame with a faint horizontal smudge or mark in the center area, almost no visible content",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/27_1768755789982",
+      "newPath": "Backgrounds/Near-Black-with-Faint-Teal-Center-Marks_1768755789982",
+      "oldDisplayName": "27_1768755789982",
+      "newDisplayName": "Near-Black with Faint Teal Center Marks",
+      "oldFolderName": "27_1768755789982",
+      "newFolderName": "Near-Black-with-Faint-Teal-Center-Marks_1768755789982",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Very dark frame with tiny teal/cyan dots and a small horizontal mark in the center area, barely visible content on near-black background",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/3_1768562248501",
+      "newPath": "Backgrounds/Near-Black-with-Subtle-Central-Texture_1768562248501",
+      "oldDisplayName": "3_1768562248501",
+      "newDisplayName": "Near-Black with Subtle Central Texture",
+      "oldFolderName": "3_1768562248501",
+      "newFolderName": "Near-Black-with-Subtle-Central-Texture_1768562248501",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.65,
+      "needsReview": false,
+      "reason": "Very dark small frame with faint dot patterns and a central cluster barely visible, minimal abstract content",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/19_1768755658351",
+      "newPath": "Backgrounds/Near-Black-with-Tiny-Center-Marks_1768755658351",
+      "oldDisplayName": "19_1768755658351",
+      "newDisplayName": "Near-Black with Tiny Center Marks",
+      "oldFolderName": "19_1768755658351",
+      "newFolderName": "Near-Black-with-Tiny-Center-Marks_1768755658351",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.65,
+      "needsReview": false,
+      "reason": "Very dark frame with two tiny faint marks in the center, almost no visible content",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pr_edit_Linked_Comp_37_1768822772747",
+      "newPath": "Backgrounds/Pure-Black-Solid-Background_1768822772747",
+      "oldDisplayName": "Pr_edit_Linked_Comp_37_1768822772747",
+      "newDisplayName": "Pure Black Solid Background",
+      "oldFolderName": "Pr_edit_Linked_Comp_37_1768822772747",
+      "newFolderName": "Pure-Black-Solid-Background_1768822772747",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 1,
+      "needsReview": false,
+      "reason": "Completely black frame, pure solid color with no content",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pre_comp_5_1768764874040",
+      "newPath": "Backgrounds/Pure-Black-Solid-Background_1768764874040",
+      "oldDisplayName": "Pre_comp_5_1768764874040",
+      "newDisplayName": "Pure Black Solid Background",
+      "oldFolderName": "Pre_comp_5_1768764874040",
+      "newFolderName": "Pure-Black-Solid-Background_1768764874040",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 1,
+      "needsReview": false,
+      "reason": "Completely black frame, pure solid color with no content",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/34_1768755946987",
+      "newPath": "Backgrounds/Sawtooth-Wave-Pattern-on-Dark_1768755946987",
+      "oldDisplayName": "34_1768755946987",
+      "newDisplayName": "Sawtooth Wave Pattern on Dark",
+      "oldFolderName": "34_1768755946987",
+      "newFolderName": "Sawtooth-Wave-Pattern-on-Dark_1768755946987",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Backgrounds",
+        "Process-and-Steps"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Dark background with horizontal bands of repeating sawtooth/wave patterns in colored tones, looks like abstract decorative background",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/_16_1768563692160",
+      "newPath": "Backgrounds/Scattered-Light-Spots-Pattern-On-Dark_1768563692160",
+      "oldDisplayName": "_16_1768563692160",
+      "newDisplayName": "Scattered Light Spots Pattern On Dark",
+      "oldFolderName": "_16_1768563692160",
+      "newFolderName": "Scattered-Light-Spots-Pattern-On-Dark_1768563692160",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Dark background with small lighter spots scattered unevenly across the frame, abstract particle pattern",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/8_1768755474626",
+      "newPath": "Backgrounds/Scattered-Symbols-on-Dark-Background_1768755474626",
+      "oldDisplayName": "8_1768755474626",
+      "newDisplayName": "Scattered Symbols on Dark Background",
+      "oldFolderName": "8_1768755474626",
+      "newFolderName": "Scattered-Symbols-on-Dark-Background_1768755474626",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Backgrounds",
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.6,
+      "needsReview": false,
+      "reason": "Dark background with small scattered decorative symbols and characters, abstract pattern or texture",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/4_1768765070197",
+      "newPath": "Backgrounds/Solid-Black-Background_1768765070197",
+      "oldDisplayName": "4_1768765070197",
+      "newDisplayName": "Solid Black Background",
+      "oldFolderName": "4_1768765070197",
+      "newFolderName": "Solid-Black-Background_1768765070197",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Completely solid black frame with no visible elements, a black background placeholder",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/_2_1768565538850",
+      "newPath": "Backgrounds/Solid-Medium-Gray-Rectangular-Overlay_1768565538850",
+      "oldDisplayName": "_2_1768565538850",
+      "newDisplayName": "Solid Medium Gray Rectangular Overlay",
+      "oldFolderName": "_2_1768565538850",
+      "newFolderName": "Solid-Medium-Gray-Rectangular-Overlay_1768565538850",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Uniform gray rectangle filling the frame, solid color background or overlay with no visible features",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Black_BG_1768503359575",
+      "newPath": "Backgrounds/Solid-Near-Black-Background-With-Subtle-Texture_1768503359575",
+      "oldDisplayName": "Black_BG_1768503359575",
+      "newDisplayName": "Solid Near Black Background With Subtle Texture",
+      "oldFolderName": "Black_BG_1768503359575",
+      "newFolderName": "Solid-Near-Black-Background-With-Subtle-Texture_1768503359575",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Very dark near-black background with barely perceptible subtle variations, named Black BG suggesting a background fill",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pre_comp_6_1768506625307",
+      "newPath": "Backgrounds/Uniform-Bright-White-Background_1768506625307",
+      "oldDisplayName": "Pre_comp_6_1768506625307",
+      "newDisplayName": "Uniform Bright White Background",
+      "oldFolderName": "Pre_comp_6_1768506625307",
+      "newFolderName": "Uniform-Bright-White-Background_1768506625307",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Bright white background with very subtle edge detail, nearly uniform",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pr_edit_Linked_Comp_08_1768824126241",
+      "newPath": "Backgrounds/Uniform-Dark-Gray-Background_1768824126241",
+      "oldDisplayName": "Pr_edit_Linked_Comp_08_1768824126241",
+      "newDisplayName": "Uniform Dark Gray Background",
+      "oldFolderName": "Pr_edit_Linked_Comp_08_1768824126241",
+      "newFolderName": "Uniform-Dark-Gray-Background_1768824126241",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Uniform dark gray background with no visible content",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pre_comp_23_1768561023631",
+      "newPath": "Backgrounds/Uniform-Dark-Gray-Solid_1768561023631",
+      "oldDisplayName": "Pre_comp_23_1768561023631",
+      "newDisplayName": "Uniform Dark Gray Solid",
+      "oldFolderName": "Pre_comp_23_1768561023631",
+      "newFolderName": "Uniform-Dark-Gray-Solid_1768561023631",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.95,
+      "needsReview": false,
+      "reason": "Uniform dark gray background with no visible content or gradient",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pr_edit_Linked_Comp_27_1768822501748",
+      "newPath": "Backgrounds/White-Background-with-Center-Shadow_1768822501748",
+      "oldDisplayName": "Pr_edit_Linked_Comp_27_1768822501748",
+      "newDisplayName": "White Background with Center Shadow",
+      "oldFolderName": "Pr_edit_Linked_Comp_27_1768822501748",
+      "newFolderName": "White-Background-with-Center-Shadow_1768822501748",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Bright white background with subtle darker area in center",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pr_edit_Linked_Comp_07_1768823874959",
+      "newPath": "Backgrounds/White-Clean-Background_1768823874959",
+      "oldDisplayName": "Pr_edit_Linked_Comp_07_1768823874959",
+      "newDisplayName": "White Clean Background",
+      "oldFolderName": "Pr_edit_Linked_Comp_07_1768823874959",
+      "newFolderName": "White-Clean-Background_1768823874959",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.95,
+      "needsReview": false,
+      "reason": "Nearly all white background with subtle center shading, clean studio backdrop",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/_33_1768564226480",
+      "newPath": "Backgrounds/White-To-Dark-Gradient-Background-With-Green-Tint_1768564226480",
+      "oldDisplayName": "_33_1768564226480",
+      "newDisplayName": "White To Dark Gradient Background With Green Tint",
+      "oldFolderName": "_33_1768564226480",
+      "newFolderName": "White-To-Dark-Gradient-Background-With-Green-Tint_1768564226480",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Backgrounds"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "Smooth gradient transitioning from white at top through gray to darker area near bottom with subtle green undertone",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/18_1768645332925",
+      "newPath": "Backgrounds/White-to-Dark-Gradient-with-Purple-Tint_1768645332925",
+      "oldDisplayName": "18_1768645332925",
+      "newDisplayName": "White to Dark Gradient with Purple Tint",
+      "oldFolderName": "18_1768645332925",
+      "newFolderName": "White-to-Dark-Gradient-with-Purple-Tint_1768645332925",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Backgrounds",
+        "Overlays-and-FX"
+      ],
+      "primaryCategory": "Backgrounds",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Bright white at top that graduates to darker gray at bottom with a subtle purple tint in the lower right corner, a smooth gradient background",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/20_1768644084561",
+      "newPath": "Call-to-Actions/Red-Pill-Button-on-White_1768644084561",
+      "oldDisplayName": "20_1768644084561",
+      "newDisplayName": "Red Pill Button on White",
+      "oldFolderName": "20_1768644084561",
+      "newFolderName": "Red-Pill-Button-on-White_1768644084561",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Call-to-Actions",
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Call-to-Actions",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "White background with a bright red pill-shaped or rounded rectangle button prominently centered, looks like a subscribe or click CTA",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/14_1768765176268",
+      "newPath": "Call-to-Actions/Red-Subscribe-Button-With-White-Text-End-Screen_1768765176268",
+      "oldDisplayName": "14_1768765176268",
+      "newDisplayName": "Red Subscribe Button With White Text End Screen",
+      "oldFolderName": "14_1768765176268",
+      "newFolderName": "Red-Subscribe-Button-With-White-Text-End-Screen_1768765176268",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Call-to-Actions"
+      ],
+      "primaryCategory": "Call-to-Actions",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "White text and red button shapes on dark background with horizontal rule lines, likely subscribe button and end screen elements for YouTube",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/21_1768562840396",
+      "newPath": "Call-to-Actions/Small-Red-Pink-Pill-Button-on-Dark_1768562840396",
+      "oldDisplayName": "21_1768562840396",
+      "newDisplayName": "Small Red-Pink Pill Button on Dark",
+      "oldFolderName": "21_1768562840396",
+      "newFolderName": "Small-Red-Pink-Pill-Button-on-Dark_1768562840396",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Call-to-Actions"
+      ],
+      "primaryCategory": "Call-to-Actions",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Small dark frame with a red/pink pill-shaped button element in the center, looks like a subscribe or CTA button",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Card_1_1768566177834",
+      "newPath": "Call-to-Actions/Teal-Title-Card-With-Text-Lines-On-Dark_1768566177834",
+      "oldDisplayName": "Card_1_1768566177834",
+      "newDisplayName": "Teal Title Card With Text Lines On Dark",
+      "oldFolderName": "Card_1_1768566177834",
+      "newFolderName": "Teal-Title-Card-With-Text-Lines-On-Dark_1768566177834",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Call-to-Actions",
+        "Titles-and-Openers",
+        "Infographics"
+      ],
+      "primaryCategory": "Call-to-Actions",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "folder-name rule: Card_1_1768566177834 → Call to Actions",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/_18_1768563747047",
+      "newPath": "Callouts/Faint-Diagonal-Annotation-Line-On-Dark_1768563747047",
+      "oldDisplayName": "_18_1768563747047",
+      "newDisplayName": "Faint Diagonal Annotation Line On Dark",
+      "oldFolderName": "_18_1768563747047",
+      "newFolderName": "Faint-Diagonal-Annotation-Line-On-Dark_1768563747047",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Callouts"
+      ],
+      "primaryCategory": "Callouts",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Dark background with a faint diagonal line or pointer shape trending from upper area toward lower right",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/_14_1768563554770",
+      "newPath": "Callouts/Teal-Diagonal-Arrow-Pointing-Down-Right_1768563554770",
+      "oldDisplayName": "_14_1768563554770",
+      "newDisplayName": "Teal Diagonal Arrow Pointing Down Right",
+      "oldFolderName": "_14_1768563554770",
+      "newFolderName": "Teal-Diagonal-Arrow-Pointing-Down-Right_1768563554770",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Callouts"
+      ],
+      "primaryCategory": "Callouts",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Dark background with a diagonal teal/green line or arrow shape running from upper-left to lower-right across center",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/2_1768643443946",
+      "newPath": "Icons-and-Shapes/Complex-Decorative-Frame-on-White_1768643443946",
+      "oldDisplayName": "2_1768643443946",
+      "newDisplayName": "Complex Decorative Frame on White",
+      "oldFolderName": "2_1768643443946",
+      "newFolderName": "Complex-Decorative-Frame-on-White_1768643443946",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes",
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "White background with highly detailed decorative ornament shapes, lines, and frames - a complex composition with multiple elegant decorative elements",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/8_1_1768755495681",
+      "newPath": "Icons-and-Shapes/Cross-Plus-Symbol-with-Dot-on-Dark_1768755495681",
+      "oldDisplayName": "8_1_1768755495681",
+      "newDisplayName": "Cross Plus Symbol with Dot on Dark",
+      "oldFolderName": "8_1_1768755495681",
+      "newFolderName": "Cross-Plus-Symbol-with-Dot-on-Dark_1768755495681",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Very dark background with a small cross/plus icon and a circle/dot element above it, minimal medical or interface icon",
+      "metadata": {}
+    },
+    {
+      "oldPath": "John Ventura/Bridge_1768499673572",
+      "newPath": "Icons-and-Shapes/Dark-Rectangular-Badge-Centered-On-Transparent_1768499673572",
+      "oldDisplayName": "Bridge_1768499673572",
+      "newDisplayName": "Dark Rectangular Badge Centered On Transparent",
+      "oldFolderName": "Bridge_1768499673572",
+      "newFolderName": "Dark-Rectangular-Badge-Centered-On-Transparent_1768499673572",
+      "oldCategory": "John Ventura",
+      "categories": [
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Small centered dark rectangle on fully transparent background, simple badge or box shape",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/16_1768645126818",
+      "newPath": "Icons-and-Shapes/Decorative-Shapes-and-Swirls-on-Dark_1768645126818",
+      "oldDisplayName": "16_1768645126818",
+      "newDisplayName": "Decorative Shapes and Swirls on Dark",
+      "oldFolderName": "16_1768645126818",
+      "newFolderName": "Decorative-Shapes-and-Swirls-on-Dark_1768645126818",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes",
+        "Backgrounds"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.75,
+      "needsReview": false,
+      "reason": "Dark background with decorative abstract shapes including a diamond/lozenge and curved ornamental lines in the upper area",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/7_1768643683222",
+      "newPath": "Icons-and-Shapes/Detailed-Crest-Badge-on-Dark_1768643683222",
+      "oldDisplayName": "7_1768643683222",
+      "newDisplayName": "Detailed Crest Badge on Dark",
+      "oldFolderName": "7_1768643683222",
+      "newFolderName": "Detailed-Crest-Badge-on-Dark_1768643683222",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes",
+        "3D-and-Depth"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Dark background with an intricate shield/crest/badge design on the left side with decorative borders and internal detail",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/21_1768646355437",
+      "newPath": "Icons-and-Shapes/Downward-Pointing-Arrow-on-Dark_1768646355437",
+      "oldDisplayName": "21_1768646355437",
+      "newDisplayName": "Downward Pointing Arrow on Dark",
+      "oldFolderName": "21_1768646355437",
+      "newFolderName": "Downward-Pointing-Arrow-on-Dark_1768646355437",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes",
+        "Call-to-Actions"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "Dark background with a bright triangular arrow or chevron shape pointing downward, concentrated in the lower half with high contrast edges",
+      "metadata": {}
+    },
+    {
+      "oldPath": "John Ventura/Pt_2_1768499890777",
+      "newPath": "Icons-and-Shapes/Gold-Badge-Or-Shield-Crest-Shape-Centered_1768499890777",
+      "oldDisplayName": "Pt_2_1768499890777",
+      "newDisplayName": "Gold Badge Or Shield Crest Shape Centered",
+      "oldFolderName": "Pt_2_1768499890777",
+      "newFolderName": "Gold-Badge-Or-Shield-Crest-Shape-Centered_1768499890777",
+      "oldCategory": "John Ventura",
+      "categories": [
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "Symmetrical shield/badge shape with pointed top and broad base in gold-brown tones on transparent background",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/26_1768646554250",
+      "newPath": "Icons-and-Shapes/Gold-Scattered-Decorative-Dots-on-Dark_1768646554250",
+      "oldDisplayName": "26_1768646554250",
+      "newDisplayName": "Gold Scattered Decorative Dots on Dark",
+      "oldFolderName": "26_1768646554250",
+      "newFolderName": "Gold-Scattered-Decorative-Dots-on-Dark_1768646554250",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes",
+        "Backgrounds"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Dark background with small scattered gold/orange dots and decorative marks, like a particle or sparkle effect spread across the frame",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/3_1768755438859",
+      "newPath": "Icons-and-Shapes/Green-Geometric-Diamond-on-Dark_1768755438859",
+      "oldDisplayName": "3_1768755438859",
+      "newDisplayName": "Green Geometric Diamond on Dark",
+      "oldFolderName": "3_1768755438859",
+      "newFolderName": "Green-Geometric-Diamond-on-Dark_1768755438859",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "Dark background with a clearly visible green diamond or hexagonal geometric shape in the center, having gradient shading and clean outlines",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/11_1768562597391",
+      "newPath": "Icons-and-Shapes/Green-Small-Shapes-Cluster-On-Dark_1768562597391",
+      "oldDisplayName": "11_1768562597391",
+      "newDisplayName": "Green Small Shapes Cluster On Dark",
+      "oldFolderName": "11_1768562597391",
+      "newFolderName": "Green-Small-Shapes-Cluster-On-Dark_1768562597391",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.65,
+      "needsReview": false,
+      "reason": "Dark background with small green-toned shapes or icon elements clustered near the upper center",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/11_1768643813836",
+      "newPath": "Icons-and-Shapes/Multicolor-Icon-Row-Centered-On-White_1768643813836",
+      "oldDisplayName": "11_1768643813836",
+      "newDisplayName": "Multicolor Icon Row Centered On White",
+      "oldFolderName": "11_1768643813836",
+      "newFolderName": "Multicolor-Icon-Row-Centered-On-White_1768643813836",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "White background with a horizontal row of small multi-colored icon blocks (yellow, red, green) in lower center area",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/12_1768646203982",
+      "newPath": "Icons-and-Shapes/Orange-Shape-Element-on-Dark_1768646203982",
+      "oldDisplayName": "12_1768646203982",
+      "newDisplayName": "Orange Shape Element on Dark",
+      "oldFolderName": "12_1768646203982",
+      "newFolderName": "Orange-Shape-Element-on-Dark_1768646203982",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes",
+        "Call-to-Actions"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Dark background with a bright orange element/shape in the center area, moderately visible with some edge detail",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/3_mp4_Comp_1_1768644695171",
+      "newPath": "Icons-and-Shapes/Pinkish-Shapes-and-Badge-on-Warm-Background_1768644695171",
+      "oldDisplayName": "3_mp4_Comp_1_1768644695171",
+      "newDisplayName": "Pinkish Shapes and Badge on Warm Background",
+      "oldFolderName": "3_mp4_Comp_1_1768644695171",
+      "newFolderName": "Pinkish-Shapes-and-Badge-on-Warm-Background_1768644695171",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes",
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.75,
+      "needsReview": false,
+      "reason": "Warm pink/salmon toned background with visible shape elements, dots, and a badge-like form in the center with layered depth",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/12_1768643854283",
+      "newPath": "Icons-and-Shapes/Purple-Abstract-Cluster-on-Dark_1768643854283",
+      "oldDisplayName": "12_1768643854283",
+      "newDisplayName": "Purple Abstract Cluster on Dark",
+      "oldFolderName": "12_1768643854283",
+      "newFolderName": "Purple-Abstract-Cluster-on-Dark_1768643854283",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes",
+        "Backgrounds"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Very dark frame with a small purple/magenta abstract shape or cluster in the upper center area, almost no other visible detail",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/22_1768562876395",
+      "newPath": "Icons-and-Shapes/Row-of-Social-Media-Icons-on-Dark_1768562876395",
+      "oldDisplayName": "22_1768562876395",
+      "newDisplayName": "Row of Social Media Icons on Dark",
+      "oldFolderName": "22_1768562876395",
+      "newFolderName": "Row-of-Social-Media-Icons-on-Dark_1768562876395",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Dark background with a clearly visible row of 5 repeating small icon shapes across the middle, classic social media icon layout with equal spacing",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/22_1768562927083",
+      "newPath": "Icons-and-Shapes/Row-of-Social-Media-Icons-on-Dark_1768562927083",
+      "oldDisplayName": "22_1768562927083",
+      "newDisplayName": "Row of Social Media Icons on Dark",
+      "oldFolderName": "22_1768562927083",
+      "newFolderName": "Row-of-Social-Media-Icons-on-Dark_1768562927083",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Dark background with a clearly visible row of 5 repeating small icon shapes across the middle, classic social media icon layout (identical to previous)",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Tool_3_1768502869366",
+      "newPath": "Icons-and-Shapes/Single-Purple-Icon-Centered-on-Black_1768502869366",
+      "oldDisplayName": "Tool_3_1768502869366",
+      "newDisplayName": "Single Purple Icon Centered on Black",
+      "oldFolderName": "Tool_3_1768502869366",
+      "newFolderName": "Single-Purple-Icon-Centered-on-Black_1768502869366",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Nearly black frame with a small purple icon or shape in the very center, otherwise empty",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/_2_1768563133988",
+      "newPath": "Icons-and-Shapes/Single-Small-Light-Dot-On-Dark_1768563133988",
+      "oldDisplayName": "_2_1768563133988",
+      "newDisplayName": "Single Small Light Dot On Dark",
+      "oldFolderName": "_2_1768563133988",
+      "newFolderName": "Single-Small-Light-Dot-On-Dark_1768563133988",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.6,
+      "needsReview": false,
+      "reason": "Very dark frame with one small brighter spot near center, minimal single-element design",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/21_1768755687103",
+      "newPath": "Icons-and-Shapes/Small-Badge-or-Icon-Shapes-on-Dark_1768755687103",
+      "oldDisplayName": "21_1768755687103",
+      "newDisplayName": "Small Badge or Icon Shapes on Dark",
+      "oldFolderName": "21_1768755687103",
+      "newFolderName": "Small-Badge-or-Icon-Shapes-on-Dark_1768755687103",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Dark background with small faint icon-like shapes and a curved bracket or badge outline in the center area",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/33_1768755844836",
+      "newPath": "Icons-and-Shapes/Small-Diamond-Shapes-on-Black-Row_1768755844836",
+      "oldDisplayName": "33_1768755844836",
+      "newDisplayName": "Small Diamond Shapes on Black Row",
+      "oldFolderName": "33_1768755844836",
+      "newFolderName": "Small-Diamond-Shapes-on-Black-Row_1768755844836",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Black background with a horizontal row of small diamond/rhombus shapes in the center, very minimal design",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/5_1768644822606",
+      "newPath": "Icons-and-Shapes/Small-Glowing-Element-on-Black_1768644822606",
+      "oldDisplayName": "5_1768644822606",
+      "newDisplayName": "Small Glowing Element on Black",
+      "oldFolderName": "5_1768644822606",
+      "newFolderName": "Small-Glowing-Element-on-Black_1768644822606",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.6,
+      "needsReview": false,
+      "reason": "Almost entirely black with a tiny colored glowing element near center, very minimal single icon design",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/1_1768754997561",
+      "newPath": "Icons-and-Shapes/Small-Green-Yellow-Icons-On-Light-Background_1768754997561",
+      "oldDisplayName": "1_1768754997561",
+      "newDisplayName": "Small Green Yellow Icons On Light Background",
+      "oldFolderName": "1_1768754997561",
+      "newFolderName": "Small-Green-Yellow-Icons-On-Light-Background_1768754997561",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.6,
+      "needsReview": false,
+      "reason": "Near-white background with a couple small green-tinted icon shapes or marks in the upper area",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/_6_1768563331613",
+      "newPath": "Icons-and-Shapes/Small-Red-Dots-On-Dark-Background_1768563331613",
+      "oldDisplayName": "_6_1768563331613",
+      "newDisplayName": "Small Red Dots On Dark Background",
+      "oldFolderName": "_6_1768563331613",
+      "newFolderName": "Small-Red-Dots-On-Dark-Background_1768563331613",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.6,
+      "needsReview": false,
+      "reason": "Dark frame with a couple small reddish spots or icon shapes, possibly notification dots or small symbols",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/_23_1768563872070",
+      "newPath": "Icons-and-Shapes/Small-Red-Icon-Cluster-Centered-On-Dark_1768563872070",
+      "oldDisplayName": "_23_1768563872070",
+      "newDisplayName": "Small Red Icon Cluster Centered On Dark",
+      "oldFolderName": "_23_1768563872070",
+      "newFolderName": "Small-Red-Icon-Cluster-Centered-On-Dark_1768563872070",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.75,
+      "needsReview": false,
+      "reason": "Dark background with a small red-toned icon or symbol cluster in the center of frame",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/17_1768562728015",
+      "newPath": "Icons-and-Shapes/Small-Red-Icon-Shape-on-Dark_1768562728015",
+      "oldDisplayName": "17_1768562728015",
+      "newDisplayName": "Small Red Icon Shape on Dark",
+      "oldFolderName": "17_1768562728015",
+      "newFolderName": "Small-Red-Icon-Shape-on-Dark_1768562728015",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Small low-resolution frame (320x180) with a dark red abstract shape or icon visible in the center on a near-black background",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/5_1768562384411",
+      "newPath": "Icons-and-Shapes/Small-Sparkle-and-Icon-on-Dark_1768562384411",
+      "oldDisplayName": "5_1768562384411",
+      "newDisplayName": "Small Sparkle and Icon on Dark",
+      "oldFolderName": "5_1768562384411",
+      "newFolderName": "Small-Sparkle-and-Icon-on-Dark_1768562384411",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes",
+        "Call-to-Actions"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Almost entirely black with tiny sparkle/star shapes and a small icon element at bottom, very minimal decorative icons",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/2_1768765015750",
+      "newPath": "Icons-and-Shapes/White-Background-Social-Media-Icon-Row_1768765015750",
+      "oldDisplayName": "2_1768765015750",
+      "newDisplayName": "White Background Social Media Icon Row",
+      "oldFolderName": "2_1768765015750",
+      "newFolderName": "White-Background-Social-Media-Icon-Row_1768765015750",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Icons-and-Shapes",
+        "Call-to-Actions"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Bright white background with small red, cyan, and yellow icon shapes arranged in a horizontal row, social media or app icon set",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/17_1768643985978",
+      "newPath": "Icons-and-Shapes/Yellow-Decorative-Frame-on-White_1768643985978",
+      "oldDisplayName": "17_1768643985978",
+      "newDisplayName": "Yellow Decorative Frame on White",
+      "oldFolderName": "17_1768643985978",
+      "newFolderName": "Yellow-Decorative-Frame-on-White_1768643985978",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes",
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.75,
+      "needsReview": false,
+      "reason": "White/bright background with yellow accent shapes and ornamental border elements, including decorative corners or brackets",
+      "metadata": {}
+    },
+    {
+      "oldPath": "John Ventura/A2_1768499755972",
+      "newPath": "Icons-and-Shapes/Yellow-Green-Icon-on-Light-Gray-Background_1768499755972",
+      "oldDisplayName": "A2_1768499755972",
+      "newDisplayName": "Yellow Green Icon on Light Gray Background",
+      "oldFolderName": "A2_1768499755972",
+      "newFolderName": "Yellow-Green-Icon-on-Light-Gray-Background_1768499755972",
+      "oldCategory": "John Ventura",
+      "categories": [
+        "Icons-and-Shapes",
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Light gray background with a bright yellow-green element centered, likely an icon or small graphic",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Map_1768502933341",
+      "newPath": "Infographics/Blue-Map-Shape-on-Dark-Background_1768502933341",
+      "oldDisplayName": "Map_1768502933341",
+      "newDisplayName": "Blue Map Shape on Dark Background",
+      "oldFolderName": "Map_1768502933341",
+      "newFolderName": "Blue-Map-Shape-on-Dark-Background_1768502933341",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Infographics"
+      ],
+      "primaryCategory": "Infographics",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Dark background with blue map-like shape or region highlighted in center",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/1_1768755388931",
+      "newPath": "Infographics/Colorful-Chart-Grid-With-Cyan-Yellow-And-Green-Blocks_1768755388931",
+      "oldDisplayName": "1_1768755388931",
+      "newDisplayName": "Colorful Chart Grid With Cyan Yellow And Green Blocks",
+      "oldFolderName": "1_1768755388931",
+      "newFolderName": "Colorful-Chart-Grid-With-Cyan-Yellow-And-Green-Blocks_1768755388931",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Infographics",
+        "Backgrounds"
+      ],
+      "primaryCategory": "Infographics",
+      "confidence": 0.75,
+      "needsReview": false,
+      "reason": "Busy colorful grid pattern with cyan, yellow, and green rectangular blocks arranged in rows suggesting a chart, dashboard, or data visualization",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/graph_1768566094404",
+      "newPath": "Infographics/Faint-Chart-Lines-on-Dark-Background_1768566094404",
+      "oldDisplayName": "graph_1768566094404",
+      "newDisplayName": "Faint Chart Lines on Dark Background",
+      "oldFolderName": "graph_1768566094404",
+      "newFolderName": "Faint-Chart-Lines-on-Dark-Background_1768566094404",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Infographics"
+      ],
+      "primaryCategory": "Infographics",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Almost entirely black frame with very faint graph or chart lines barely visible",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Human_Body_1768561062551",
+      "newPath": "Infographics/Human-Body-Diagram-on-Dark-Background_1768561062551",
+      "oldDisplayName": "Human_Body_1768561062551",
+      "newDisplayName": "Human Body Diagram on Dark Background",
+      "oldFolderName": "Human_Body_1768561062551",
+      "newFolderName": "Human-Body-Diagram-on-Dark-Background_1768561062551",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Infographics"
+      ],
+      "primaryCategory": "Infographics",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "Very dark background with faint human body anatomical diagram outlines",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/_1_1768563065857",
+      "newPath": "Lower-Thirds/Bottom-Text-Bar-With-White-Text-On-Dark-Background_1768563065857",
+      "oldDisplayName": "_1_1768563065857",
+      "newDisplayName": "Bottom Text Bar With White Text On Dark Background",
+      "oldFolderName": "_1_1768563065857",
+      "newFolderName": "Bottom-Text-Bar-With-White-Text-On-Dark-Background_1768563065857",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Lower-Thirds"
+      ],
+      "primaryCategory": "Lower-Thirds",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "Mostly dark frame with a distinct text bar at the bottom containing readable text characters",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/18_1768755638624",
+      "newPath": "Lower-Thirds/Green-Accent-Lower-Third-Bars-on-Dark_1768755638624",
+      "oldDisplayName": "18_1768755638624",
+      "newDisplayName": "Green Accent Lower Third Bars on Dark",
+      "oldFolderName": "18_1768755638624",
+      "newFolderName": "Green-Accent-Lower-Third-Bars-on-Dark_1768755638624",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Lower-Thirds",
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Lower-Thirds",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "Dark background with bright green horizontal text bars and placeholder lines, a classic lower third or title bar layout with green accent color",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/26_1768755760973",
+      "newPath": "Lower-Thirds/Teal-Text-Lines-on-Dark_1768755760973",
+      "oldDisplayName": "26_1768755760973",
+      "newDisplayName": "Teal Text Lines on Dark",
+      "oldFolderName": "26_1768755760973",
+      "newFolderName": "Teal-Text-Lines-on-Dark_1768755760973",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Lower-Thirds",
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Lower-Thirds",
+      "confidence": 0.75,
+      "needsReview": false,
+      "reason": "Dark background with teal/cyan horizontal line elements at various heights, appears to be text placeholder lines or a lower third structure",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/b1_1768503526757",
+      "newPath": "Lower-Thirds/White-Text-Bottom-Bar-Lower-Third-on-Black_1768503526757",
+      "oldDisplayName": "b1_1768503526757",
+      "newDisplayName": "White Text Bottom Bar Lower Third on Black",
+      "oldFolderName": "b1_1768503526757",
+      "newFolderName": "White-Text-Bottom-Bar-Lower-Third-on-Black_1768503526757",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Lower-Thirds"
+      ],
+      "primaryCategory": "Lower-Thirds",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Near-black frame with a single line of white text at the very bottom containing special characters, a minimal lower third bar",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/zero_1768505430609",
+      "newPath": "Lower-Thirds/Wide-Gray-Text-Bar-on-Dark-Background_1768505430609",
+      "oldDisplayName": "zero_1768505430609",
+      "newDisplayName": "Wide Gray Text Bar on Dark Background",
+      "oldFolderName": "zero_1768505430609",
+      "newFolderName": "Wide-Gray-Text-Bar-on-Dark-Background_1768505430609",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Lower-Thirds",
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Lower-Thirds",
+      "confidence": 0.95,
+      "needsReview": false,
+      "reason": "Very wide and short frame, clearly a lower third text bar with gray content on dark background, high contrast horizontal text region",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/_1_1768564455228",
+      "newPath": "Icons-and-Shapes/1-1768564455228_1768564455228",
+      "oldDisplayName": "_1_1768564455228",
+      "newDisplayName": "Shaz Element Pack Item 01",
+      "oldFolderName": "_1_1768564455228",
+      "newFolderName": "1-1768564455228_1768564455228",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes",
+        "Overlays-and-FX",
+        "Pre-comps"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.5,
+      "needsReview": false,
+      "reason": "REVIEWED: 404 thumbnail. Shaz _N pack — most neighbors are small elements/icons. Icons & Shapes best default.",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/_13_1768564608227",
+      "newPath": "Icons-and-Shapes/13-1768564608227_1768564608227",
+      "oldDisplayName": "_13_1768564608227",
+      "newDisplayName": "Shaz Element Pack Item 13",
+      "oldFolderName": "_13_1768564608227",
+      "newFolderName": "13-1768564608227_1768564608227",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes",
+        "Overlays-and-FX",
+        "Pre-comps"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.5,
+      "needsReview": false,
+      "reason": "REVIEWED: 404 thumbnail. Shaz _N pack — most neighbors are small elements/icons. Icons & Shapes best default.",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/_3_1768565587833",
+      "newPath": "Icons-and-Shapes/3-1768565587833_1768565587833",
+      "oldDisplayName": "_3_1768565587833",
+      "newDisplayName": "Shaz Element Pack Item 03",
+      "oldFolderName": "_3_1768565587833",
+      "newFolderName": "3-1768565587833_1768565587833",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes",
+        "Overlays-and-FX",
+        "Pre-comps"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.5,
+      "needsReview": false,
+      "reason": "REVIEWED: 504 timeout thumbnail. Shaz _N pack — small element. Icons & Shapes best default.",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/_8_1768564511803",
+      "newPath": "Icons-and-Shapes/8-1768564511803_1768564511803",
+      "oldDisplayName": "_8_1768564511803",
+      "newDisplayName": "Shaz Element Pack Item 08",
+      "oldFolderName": "_8_1768564511803",
+      "newFolderName": "8-1768564511803_1768564511803",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes",
+        "Overlays-and-FX",
+        "Pre-comps"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.5,
+      "needsReview": false,
+      "reason": "REVIEWED: 404 thumbnail. Shaz _N pack — small element. Icons & Shapes best default.",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/4_1768643503107",
+      "newPath": "Overlays-and-FX/Bright-White-Light-Flash-Overlay_1768643503107",
+      "oldDisplayName": "4_1768643503107",
+      "newDisplayName": "Bright White Light Flash Overlay",
+      "oldFolderName": "4_1768643503107",
+      "newFolderName": "Bright-White-Light-Flash-Overlay_1768643503107",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Overlays-and-FX",
+        "Backgrounds"
+      ],
+      "primaryCategory": "Overlays-and-FX",
+      "confidence": 0.6,
+      "needsReview": false,
+      "reason": "Nearly solid white/bright frame with faint darker shapes in the center, appears to be a light flash, white overlay, or overexposed effect",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/_4_1768563255429",
+      "newPath": "Overlays-and-FX/Dark-Vignette-Overlay-Darker-At-Edges_1768563255429",
+      "oldDisplayName": "_4_1768563255429",
+      "newDisplayName": "Dark Vignette Overlay Darker At Edges",
+      "oldFolderName": "_4_1768563255429",
+      "newFolderName": "Dark-Vignette-Overlay-Darker-At-Edges_1768563255429",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Overlays-and-FX"
+      ],
+      "primaryCategory": "Overlays-and-FX",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Nearly black frame with a subtle U-shaped gradient suggesting a vignette effect darker at top and bottom edges",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/42_1768503399118",
+      "newPath": "Overlays-and-FX/Purple-Light-Leak-Volumetric-Flare_1768503399118",
+      "oldDisplayName": "42_1768503399118",
+      "newDisplayName": "Purple Light Leak Volumetric Flare",
+      "oldFolderName": "42_1768503399118",
+      "newFolderName": "Purple-Light-Leak-Volumetric-Flare_1768503399118",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Overlays-and-FX",
+        "Backgrounds"
+      ],
+      "primaryCategory": "Overlays-and-FX",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Dark background with a purple volumetric light leak or lens flare spreading from the center with soft radial falloff",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/43_1768503444062",
+      "newPath": "Overlays-and-FX/Purple-Light-Leak-Volumetric-Flare-Variation_1768503444062",
+      "oldDisplayName": "43_1768503444062",
+      "newDisplayName": "Purple Light Leak Volumetric Flare Variation",
+      "oldFolderName": "43_1768503444062",
+      "newFolderName": "Purple-Light-Leak-Volumetric-Flare-Variation_1768503444062",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Overlays-and-FX",
+        "Backgrounds"
+      ],
+      "primaryCategory": "Overlays-and-FX",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Dark background with a purple volumetric light leak similar to 42 but with slightly different flare shape and falloff pattern",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/13_1768765144020",
+      "newPath": "Overlays-and-FX/Red-Spark-Particle-Burst-on-Black_1768765144020",
+      "oldDisplayName": "13_1768765144020",
+      "newDisplayName": "Red Spark Particle Burst on Black",
+      "oldFolderName": "13_1768765144020",
+      "newFolderName": "Red-Spark-Particle-Burst-on-Black_1768765144020",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Overlays-and-FX",
+        "Transitions"
+      ],
+      "primaryCategory": "Overlays-and-FX",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Black frame with bright red/orange particles bursting outward from center like a spark or impact effect",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/19_1768644033617",
+      "newPath": "Overlays-and-FX/Single-Horizontal-Line-Overlay-on-Dark_1768644033617",
+      "oldDisplayName": "19_1768644033617",
+      "newDisplayName": "Single Horizontal Line Overlay on Dark",
+      "oldFolderName": "19_1768644033617",
+      "newFolderName": "Single-Horizontal-Line-Overlay-on-Dark_1768644033617",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Overlays-and-FX",
+        "Backgrounds"
+      ],
+      "primaryCategory": "Overlays-and-FX",
+      "confidence": 0.75,
+      "needsReview": false,
+      "reason": "Dark background with a single thin horizontal bright line or bar across the center, minimal overlay-style element",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/_21_1768563809406",
+      "newPath": "Overlays-and-FX/Very-Dark-Subtle-Texture-Or-Grain-Overlay_1768563809406",
+      "oldDisplayName": "_21_1768563809406",
+      "newDisplayName": "Very Dark Subtle Texture Or Grain Overlay",
+      "oldFolderName": "_21_1768563809406",
+      "newFolderName": "Very-Dark-Subtle-Texture-Or-Grain-Overlay_1768563809406",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Overlays-and-FX"
+      ],
+      "primaryCategory": "Overlays-and-FX",
+      "confidence": 0.55,
+      "needsReview": false,
+      "reason": "Nearly uniform dark frame with barely perceptible variations, very subtle dark overlay or texture",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/1_1768645880372",
+      "newPath": "Overlays-and-FX/Very-Dark-Warm-Tinted-Texture-Overlay_1768645880372",
+      "oldDisplayName": "1_1768645880372",
+      "newDisplayName": "Very Dark Warm Tinted Texture Overlay",
+      "oldFolderName": "1_1768645880372",
+      "newFolderName": "Very-Dark-Warm-Tinted-Texture-Overlay_1768645880372",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Overlays-and-FX"
+      ],
+      "primaryCategory": "Overlays-and-FX",
+      "confidence": 0.55,
+      "needsReview": false,
+      "reason": "Extremely dark frame with faint orange-brown warm undertones, very subtle texture or gradient barely visible",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Video_1_Linked_Comp_09_1768825464628",
+      "newPath": "Pre-comps/Bright-Center-4K-Video-Frame_1768825464628",
+      "oldDisplayName": "Video_1_Linked_Comp_09_1768825464628",
+      "newDisplayName": "Bright Center 4K Video Frame",
+      "oldFolderName": "Video_1_Linked_Comp_09_1768825464628",
+      "newFolderName": "Bright-Center-4K-Video-Frame_1768825464628",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Detailed 4K video frame with very bright warm center, lighter top-left corner, darker bottom-right",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Usama Ahmad/Video_4_Linked_Comp_06_1768760910974",
+      "newPath": "Pre-comps/Bright-Composition-with-Centered-Element_1768760910974",
+      "oldDisplayName": "Video_4_Linked_Comp_06_1768760910974",
+      "newDisplayName": "Bright Composition with Centered Element",
+      "oldFolderName": "Video_4_Linked_Comp_06_1768760910974",
+      "newFolderName": "Bright-Composition-with-Centered-Element_1768760910974",
+      "oldCategory": "Usama Ahmad",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Mostly bright/white composition with a centered graphic element or badge, clean layout with minimal decoration",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Usama Ahmad/Video_4_Linked_Comp_11_1768761004538",
+      "newPath": "Pre-comps/Bright-Composition-with-Diamond-Shape_1768761004538",
+      "oldDisplayName": "Video_4_Linked_Comp_11_1768761004538",
+      "newDisplayName": "Bright Composition with Diamond Shape",
+      "oldFolderName": "Video_4_Linked_Comp_11_1768761004538",
+      "newFolderName": "Bright-Composition-with-Diamond-Shape_1768761004538",
+      "oldCategory": "Usama Ahmad",
+      "categories": [
+        "Pre-comps",
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Bright/white background with a centered diamond or geometric shape element, appears to be a composition with a single prominent graphic",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/4_1768562331357",
+      "newPath": "Pre-comps/Character-Scene-with-Cross-and-Star-Elements_1768562331357",
+      "oldDisplayName": "4_1768562331357",
+      "newDisplayName": "Character Scene with Cross and Star Elements",
+      "oldFolderName": "4_1768562331357",
+      "newFolderName": "Character-Scene-with-Cross-and-Star-Elements_1768562331357",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Complex scene with a character/figure silhouette, star/sparkle shapes, a cross element, and possible text labels on dark background. Looks like a full pre-comp assembly",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Usama Ahmad/Video_4_Linked_Comp_14_1768761040147",
+      "newPath": "Pre-comps/Clean-Composition-with-Badge-Element_1768761040147",
+      "oldDisplayName": "Video_4_Linked_Comp_14_1768761040147",
+      "newDisplayName": "Clean Composition with Badge Element",
+      "oldFolderName": "Video_4_Linked_Comp_14_1768761040147",
+      "newFolderName": "Clean-Composition-with-Badge-Element_1768761040147",
+      "oldCategory": "Usama Ahmad",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Bright background with a centered badge/emblem design element, clean uncluttered composition",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pr_edit_Linked_Comp_12_1768821891892",
+      "newPath": "Pre-comps/Colorful-Text-Header-on-Dark-Frame_1768821891892",
+      "oldDisplayName": "Pr_edit_Linked_Comp_12_1768821891892",
+      "newDisplayName": "Colorful Text Header on Dark Frame",
+      "oldFolderName": "Pr_edit_Linked_Comp_12_1768821891892",
+      "newFolderName": "Colorful-Text-Header-on-Dark-Frame_1768821891892",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps",
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "folder-name rule: Pr_edit_Linked_Comp_12_1768821891892 → Pre-comps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/3_1768756094785",
+      "newPath": "Pre-comps/Complex-Symbol-Grid-on-Gray-Background_1768756094785",
+      "oldDisplayName": "3_1768756094785",
+      "newDisplayName": "Complex Symbol Grid on Gray Background",
+      "oldFolderName": "3_1768756094785",
+      "newFolderName": "Complex-Symbol-Grid-on-Gray-Background_1768756094785",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Pre-comps",
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Medium gray background with an extremely dense pattern of small repeating symbols, icons, and text-like elements arranged in a grid - appears to be a pre-comp or asset catalog",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pre_comp_23_1768825528482",
+      "newPath": "Pre-comps/Corrupted-Thumbnail-Comp-23_1768825528482",
+      "oldDisplayName": "Pre_comp_23_1768825528482",
+      "newDisplayName": "Linked Build Block 23 Assembly",
+      "oldFolderName": "Pre_comp_23_1768825528482",
+      "newFolderName": "Corrupted-Thumbnail-Comp-23_1768825528482",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "REVIEWED: Corrupted thumbnail but folder name Pre_comp strongly signals Pre-comps. High confidence from naming.",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pr_edit_Linked_Comp_38_1768822889818",
+      "newPath": "Pre-comps/Corrupted-Thumbnail-Placeholder_1768822889818",
+      "oldDisplayName": "Pr_edit_Linked_Comp_38_1768822889818",
+      "newDisplayName": "Premiere Linked Comp 38 Assembly",
+      "oldFolderName": "Pr_edit_Linked_Comp_38_1768822889818",
+      "newFolderName": "Corrupted-Thumbnail-Placeholder_1768822889818",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "REVIEWED: Corrupted thumbnail but folder name Pr_edit_Linked_Comp strongly signals Pre-comps. High confidence.",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Video_4_Linked_Comp_03_1768760845934",
+      "newPath": "Pre-comps/Dark-4K-Video-Frame-with-Orange-Warm-Tones_1768760845934",
+      "oldDisplayName": "Video_4_Linked_Comp_03_1768760845934",
+      "newDisplayName": "Dark 4K Video Frame with Orange Warm Tones",
+      "oldFolderName": "Video_4_Linked_Comp_03_1768760845934",
+      "newFolderName": "Dark-4K-Video-Frame-with-Orange-Warm-Tones_1768760845934",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "4K video frame with dark overall tone, warm orange-brown patches in upper area, very dark bottom",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Video_4_Linked_Comp_02_1768760815750",
+      "newPath": "Pre-comps/Dark-4K-Video-Frame-with-Warm-Highlights_1768760815750",
+      "oldDisplayName": "Video_4_Linked_Comp_02_1768760815750",
+      "newDisplayName": "Dark 4K Video Frame with Warm Highlights",
+      "oldFolderName": "Video_4_Linked_Comp_02_1768760815750",
+      "newFolderName": "Dark-4K-Video-Frame-with-Warm-Highlights_1768760815750",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "4K video frame with dark overall tone, warm orange-brown highlights near top, very dark lower area",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pr_edit_Linked_Comp_11_1768821742863",
+      "newPath": "Pre-comps/Dark-Background-Bright-Title-Intro_1768821742863",
+      "oldDisplayName": "Pr_edit_Linked_Comp_11_1768821742863",
+      "newDisplayName": "Dark Background Bright Title Intro",
+      "oldFolderName": "Pr_edit_Linked_Comp_11_1768821742863",
+      "newFolderName": "Dark-Background-Bright-Title-Intro_1768821742863",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps",
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "folder-name rule: Pr_edit_Linked_Comp_11_1768821742863 → Pre-comps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/freelancer_1768501682170",
+      "newPath": "Pre-comps/Dark-Background-Text-Title-Screen_1768501682170",
+      "oldDisplayName": "freelancer_1768501682170",
+      "newDisplayName": "Dark Background Text Title Screen",
+      "oldFolderName": "freelancer_1768501682170",
+      "newFolderName": "Dark-Background-Text-Title-Screen_1768501682170",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps",
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "folder-name rule: freelancer_1768501682170 → Pre-comps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pr_edit_Linked_Comp_16_1768822188280",
+      "newPath": "Pre-comps/Dark-Background-with-Dim-Center-Spot_1768822188280",
+      "oldDisplayName": "Pr_edit_Linked_Comp_16_1768822188280",
+      "newDisplayName": "Dark Background with Dim Center Spot",
+      "oldFolderName": "Pr_edit_Linked_Comp_16_1768822188280",
+      "newFolderName": "Dark-Background-with-Dim-Center-Spot_1768822188280",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps",
+        "Backgrounds"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "folder-name rule: Pr_edit_Linked_Comp_16_1768822188280 → Pre-comps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pr_edit_Linked_Comp_08_1768566318153",
+      "newPath": "Pre-comps/Dark-Background-with-Subtle-Center-Glow_1768566318153",
+      "oldDisplayName": "Pr_edit_Linked_Comp_08_1768566318153",
+      "newDisplayName": "Dark Background with Subtle Center Glow",
+      "oldFolderName": "Pr_edit_Linked_Comp_08_1768566318153",
+      "newFolderName": "Dark-Background-with-Subtle-Center-Glow_1768566318153",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps",
+        "Backgrounds"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "folder-name rule: Pr_edit_Linked_Comp_08_1768566318153 → Pre-comps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pre_comp_6_1768560986519",
+      "newPath": "Pre-comps/Dark-Blue-Purple-Gradient-Background_1768560986519",
+      "oldDisplayName": "Pre_comp_6_1768560986519",
+      "newDisplayName": "Dark Blue Purple Gradient Background",
+      "oldFolderName": "Pre_comp_6_1768560986519",
+      "newFolderName": "Dark-Blue-Purple-Gradient-Background_1768560986519",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps",
+        "Backgrounds"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "folder-name rule: Pre_comp_6_1768560986519 → Pre-comps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pre_comp_4_1768503584060",
+      "newPath": "Pre-comps/Dark-Frame-Purple-Centered-Element_1768503584060",
+      "oldDisplayName": "Pre_comp_4_1768503584060",
+      "newDisplayName": "Dark Frame Purple Centered Element",
+      "oldFolderName": "Pre_comp_4_1768503584060",
+      "newFolderName": "Dark-Frame-Purple-Centered-Element_1768503584060",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps",
+        "Titles-and-Openers",
+        "Call-to-Actions"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "folder-name rule: Pre_comp_4_1768503584060 → Pre-comps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Edit_pr_1_Linked_Comp_09_1768764808665",
+      "newPath": "Pre-comps/Dark-Frame-Text-Overlay-Title-Card_1768764808665",
+      "oldDisplayName": "Edit_pr_1_Linked_Comp_09_1768764808665",
+      "newDisplayName": "Dark Frame Text Overlay Title Card",
+      "oldFolderName": "Edit_pr_1_Linked_Comp_09_1768764808665",
+      "newFolderName": "Dark-Frame-Text-Overlay-Title-Card_1768764808665",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps",
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "folder-name rule: Edit_pr_1_Linked_Comp_09_1768764808665 → Pre-comps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/video_Linked_Comp_17_1768760503706",
+      "newPath": "Pre-comps/Dark-Frame-with-Bright-Pink-Center-Element_1768760503706",
+      "oldDisplayName": "video_Linked_Comp_17_1768760503706",
+      "newDisplayName": "Dark Frame with Bright Pink Center Element",
+      "oldFolderName": "video_Linked_Comp_17_1768760503706",
+      "newFolderName": "Dark-Frame-with-Bright-Pink-Center-Element_1768760503706",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Very dark frame with a bright pink-red element in the center area, some contrast in upper portion",
+      "metadata": {}
+    },
+    {
+      "oldPath": "John Ventura/3",
+      "newPath": "Pre-comps/Dark-Frame-with-Purple-Magenta-Colored-Element_3",
+      "oldDisplayName": "3",
+      "newDisplayName": "Dark Frame with Purple Magenta Colored Element",
+      "oldFolderName": "3",
+      "newFolderName": "Dark-Frame-with-Purple-Magenta-Colored-Element_3",
+      "oldCategory": "John Ventura",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Dark frame with a purple-magenta colored area covering much of the center, moderate detail throughout",
+      "metadata": {}
+    },
+    {
+      "oldPath": "John Ventura/4",
+      "newPath": "Pre-comps/Dark-Frame-with-Red-Colored-Content_4",
+      "oldDisplayName": "4",
+      "newDisplayName": "Dark Frame with Red Colored Content",
+      "oldFolderName": "4",
+      "newFolderName": "Dark-Frame-with-Red-Colored-Content_4",
+      "oldCategory": "John Ventura",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Dark frame with reddish-warm colored content throughout, brighter in upper portion, very dark lower portion",
+      "metadata": {}
+    },
+    {
+      "oldPath": "John Ventura/6",
+      "newPath": "Pre-comps/Dark-Frame-with-Subtle-Blue-Center-Tint_6",
+      "oldDisplayName": "6",
+      "newDisplayName": "Dark Frame with Subtle Blue Center Tint",
+      "oldFolderName": "6",
+      "newFolderName": "Dark-Frame-with-Subtle-Blue-Center-Tint_6",
+      "oldCategory": "John Ventura",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.6,
+      "needsReview": false,
+      "reason": "Dark frame with a subtle blue tint at center, slight radial gradient pattern",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/video_Linked_Comp_03_1768760207703",
+      "newPath": "Pre-comps/Dark-Green-Toned-Video-Frame_1768760207703",
+      "oldDisplayName": "video_Linked_Comp_03_1768760207703",
+      "newDisplayName": "Dark Green Toned Video Frame",
+      "oldFolderName": "video_Linked_Comp_03_1768760207703",
+      "newFolderName": "Dark-Green-Toned-Video-Frame_1768760207703",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Dark greenish video frame with slight brightness variation, some content visible in lower area",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/video_Linked_Comp_07_1768760312597",
+      "newPath": "Pre-comps/Dark-Green-Video-Frame-with-Bright-Band_1768760312597",
+      "oldDisplayName": "video_Linked_Comp_07_1768760312597",
+      "newDisplayName": "Dark Green Video Frame with Bright Band",
+      "oldFolderName": "video_Linked_Comp_07_1768760312597",
+      "newFolderName": "Dark-Green-Video-Frame-with-Bright-Band_1768760312597",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Dark greenish video frame with a high contrast bright horizontal band in the upper-middle area",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/video_Linked_Comp_11_1768760599898",
+      "newPath": "Pre-comps/Dark-Green-Video-Frame-with-Center-Detail_1768760599898",
+      "oldDisplayName": "video_Linked_Comp_11_1768760599898",
+      "newDisplayName": "Dark Green Video Frame with Center Detail",
+      "oldFolderName": "video_Linked_Comp_11_1768760599898",
+      "newFolderName": "Dark-Green-Video-Frame-with-Center-Detail_1768760599898",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Dark greenish video frame with a brighter green patch in center area, darker corners and edges",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/video_Linked_Comp_11_1768760621144",
+      "newPath": "Pre-comps/Dark-Green-Video-Frame-with-Center-Detail_1768760621144",
+      "oldDisplayName": "video_Linked_Comp_11_1768760621144",
+      "newDisplayName": "Dark Green Video Frame with Center Detail",
+      "oldFolderName": "video_Linked_Comp_11_1768760621144",
+      "newFolderName": "Dark-Green-Video-Frame-with-Center-Detail_1768760621144",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Dark greenish video frame with a brighter green patch in center area, darker corners and edges",
+      "metadata": {}
+    },
+    {
+      "oldPath": "John Ventura/Pre_comp_4_1768764063115",
+      "newPath": "Pre-comps/Dark-Header-Bar-With-Layered-Text-Shapes_1768764063115",
+      "oldDisplayName": "Pre_comp_4_1768764063115",
+      "newDisplayName": "Dark Header Bar With Layered Text Shapes",
+      "oldFolderName": "Pre_comp_4_1768764063115",
+      "newFolderName": "Dark-Header-Bar-With-Layered-Text-Shapes_1768764063115",
+      "oldCategory": "John Ventura",
+      "categories": [
+        "Pre-comps",
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "folder-name rule: Pre_comp_4_1768764063115 → Pre-comps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pre_comp_17_1768559664458",
+      "newPath": "Pre-comps/Dark-Purple-Glow-Centered-Title_1768559664458",
+      "oldDisplayName": "Pre_comp_17_1768559664458",
+      "newDisplayName": "Dark Purple Glow Centered Title",
+      "oldFolderName": "Pre_comp_17_1768559664458",
+      "newFolderName": "Dark-Purple-Glow-Centered-Title_1768559664458",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps",
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "folder-name rule: Pre_comp_17_1768559664458 → Pre-comps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pr_edit_Linked_Comp_14_1768566394303",
+      "newPath": "Pre-comps/Dark-Teal-Center-Glow-Background_1768566394303",
+      "oldDisplayName": "Pr_edit_Linked_Comp_14_1768566394303",
+      "newDisplayName": "Dark Teal Center Glow Background",
+      "oldFolderName": "Pr_edit_Linked_Comp_14_1768566394303",
+      "newFolderName": "Dark-Teal-Center-Glow-Background_1768566394303",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps",
+        "Backgrounds"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "folder-name rule: Pr_edit_Linked_Comp_14_1768566394303 → Pre-comps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Video_1_Linked_Comp_12_1768825549835",
+      "newPath": "Pre-comps/Dark-Warm-Tone-4K-Video-Frame_1768825549835",
+      "oldDisplayName": "Video_1_Linked_Comp_12_1768825549835",
+      "newDisplayName": "Dark Warm Tone 4K Video Frame",
+      "oldFolderName": "Video_1_Linked_Comp_12_1768825549835",
+      "newFolderName": "Dark-Warm-Tone-4K-Video-Frame_1768825549835",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Detailed 4K video frame with darker warm tones, red-brown center, varied scene detail throughout",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Video_1_Linked_Comp_23_1768825827663",
+      "newPath": "Pre-comps/Detailed-4K-Video-Frame-with-Green-Warm-Tones_1768825827663",
+      "oldDisplayName": "Video_1_Linked_Comp_23_1768825827663",
+      "newDisplayName": "Detailed 4K Video Frame with Green Warm Tones",
+      "oldFolderName": "Video_1_Linked_Comp_23_1768825827663",
+      "newFolderName": "Detailed-4K-Video-Frame-with-Green-Warm-Tones_1768825827663",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Detailed 4K video frame with green and warm tones, brighter center area, very complex scene",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Usama Ahmad/Pre_comp_6_1768760035112",
+      "newPath": "Pre-comps/Detailed-Composition-with-Decorative-Elements_1768760035112",
+      "oldDisplayName": "Pre_comp_6_1768760035112",
+      "newDisplayName": "Detailed Composition with Decorative Elements",
+      "oldFolderName": "Pre_comp_6_1768760035112",
+      "newFolderName": "Detailed-Composition-with-Decorative-Elements_1768760035112",
+      "oldCategory": "Usama Ahmad",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Bright complex composition with multiple elements including decorative borders, text areas, and layered design elements",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/video_Linked_Comp_05_1768760266014",
+      "newPath": "Pre-comps/Detailed-Video-Frame-with-Bright-Upper-Area_1768760266014",
+      "oldDisplayName": "video_Linked_Comp_05_1768760266014",
+      "newDisplayName": "Detailed Video Frame with Bright Upper Area",
+      "oldFolderName": "video_Linked_Comp_05_1768760266014",
+      "newFolderName": "Detailed-Video-Frame-with-Bright-Upper-Area_1768760266014",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Large video frame with bright greenish upper-middle area, very dark bottom, complex scene detail at 1920x1080",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pre_comp_6_1768824306607",
+      "newPath": "Pre-comps/Empty-Black-Composition_1768824306607",
+      "oldDisplayName": "Pre_comp_6_1768824306607",
+      "newDisplayName": "Empty Black Composition",
+      "oldFolderName": "Pre_comp_6_1768824306607",
+      "newFolderName": "Empty-Black-Composition_1768824306607",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 1,
+      "needsReview": false,
+      "reason": "Completely black frame, zero pixel variation, appears to be an empty nested composition",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/assemble_Linked_Comp_06_1768504330313",
+      "newPath": "Pre-comps/Empty-Black-Pre-comp-Placeholder_1768504330313",
+      "oldDisplayName": "assemble_Linked_Comp_06_1768504330313",
+      "newDisplayName": "Empty Black Pre-comp Placeholder",
+      "oldFolderName": "assemble_Linked_Comp_06_1768504330313",
+      "newFolderName": "Empty-Black-Pre-comp-Placeholder_1768504330313",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps",
+        "Backgrounds"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Completely solid black frame, an empty pre-comp or black solid placeholder with no content",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/assemble_Linked_Comp_12_1768506205399",
+      "newPath": "Pre-comps/Empty-Black-Pre-comp-Placeholder_1768506205399",
+      "oldDisplayName": "assemble_Linked_Comp_12_1768506205399",
+      "newDisplayName": "Empty Black Pre-comp Placeholder",
+      "oldFolderName": "assemble_Linked_Comp_12_1768506205399",
+      "newFolderName": "Empty-Black-Pre-comp-Placeholder_1768506205399",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps",
+        "Backgrounds"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Completely solid black frame, an empty pre-comp or black solid placeholder",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/P1_1768566256793",
+      "newPath": "Pre-comps/Empty-Black-Pre-comp-Placeholder_1768566256793",
+      "oldDisplayName": "P1_1768566256793",
+      "newDisplayName": "Empty Black Pre-comp Placeholder",
+      "oldFolderName": "P1_1768566256793",
+      "newFolderName": "Empty-Black-Pre-comp-Placeholder_1768566256793",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Almost completely black frame with no visible content, appears to be an empty composition placeholder",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pre_comp_4_1768764574595",
+      "newPath": "Pre-comps/Faint-White-Text-on-Dark-Background_1768764574595",
+      "oldDisplayName": "Pre_comp_4_1768764574595",
+      "newDisplayName": "Faint White Text on Dark Background",
+      "oldFolderName": "Pre_comp_4_1768764574595",
+      "newFolderName": "Faint-White-Text-on-Dark-Background_1768764574595",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps",
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "folder-name rule: Pre_comp_4_1768764574595 → Pre-comps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pre_comp_6_1768503635987",
+      "newPath": "Pre-comps/Gradient-Background-with-Text-Layer_1768503635987",
+      "oldDisplayName": "Pre_comp_6_1768503635987",
+      "newDisplayName": "Gradient Background with Text Layer",
+      "oldFolderName": "Pre_comp_6_1768503635987",
+      "newFolderName": "Gradient-Background-with-Text-Layer_1768503635987",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps",
+        "Titles-and-Openers",
+        "Lower-Thirds"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "folder-name rule: Pre_comp_6_1768503635987 → Pre-comps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pr_edit_Linked_Comp_23_1768566597549",
+      "newPath": "Pre-comps/Gradient-Fade-Scene-Comp-23_1768566597549",
+      "oldDisplayName": "Pr_edit_Linked_Comp_23_1768566597549",
+      "newDisplayName": "Gradient Fade Scene Comp 23",
+      "oldFolderName": "Pr_edit_Linked_Comp_23_1768566597549",
+      "newFolderName": "Gradient-Fade-Scene-Comp-23_1768566597549",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "Video footage composition with gradient fade to dark at bottom and edges",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pr_edit_Linked_Comp_25_1768566678428",
+      "newPath": "Pre-comps/Gradient-Fade-Scene-Comp-25_1768566678428",
+      "oldDisplayName": "Pr_edit_Linked_Comp_25_1768566678428",
+      "newDisplayName": "Gradient Fade Scene Comp 25",
+      "oldFolderName": "Pr_edit_Linked_Comp_25_1768566678428",
+      "newFolderName": "Gradient-Fade-Scene-Comp-25_1768566678428",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "Video footage composition with gradient fade to dark at bottom",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Edit_pr_1_Linked_Comp_08_1768764752394",
+      "newPath": "Pre-comps/Gradient-Fade-Video-Layer-Stack_1768764752394",
+      "oldDisplayName": "Edit_pr_1_Linked_Comp_08_1768764752394",
+      "newDisplayName": "Gradient Fade Video Layer Stack",
+      "oldFolderName": "Edit_pr_1_Linked_Comp_08_1768764752394",
+      "newFolderName": "Gradient-Fade-Video-Layer-Stack_1768764752394",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "Video footage bright on left fading to dark on right with layered composition elements, appears to be a Premiere-linked multi-layer assembly",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pr_edit_Linked_Comp_02_1768823511667",
+      "newPath": "Pre-comps/Gradient-Fade-Video-Scene-Assembly_1768823511667",
+      "oldDisplayName": "Pr_edit_Linked_Comp_02_1768823511667",
+      "newDisplayName": "Gradient Fade Video Scene Assembly",
+      "oldFolderName": "Pr_edit_Linked_Comp_02_1768823511667",
+      "newFolderName": "Gradient-Fade-Video-Scene-Assembly_1768823511667",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "Video footage with gradual vignette effect fading to dark at edges, layered Premiere composition",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pr_edit_Linked_Comp_34_1768822653867",
+      "newPath": "Pre-comps/Green-Center-Text-on-Dark-with-Particles_1768822653867",
+      "oldDisplayName": "Pr_edit_Linked_Comp_34_1768822653867",
+      "newDisplayName": "Green Center Text on Dark with Particles",
+      "oldFolderName": "Pr_edit_Linked_Comp_34_1768822653867",
+      "newFolderName": "Green-Center-Text-on-Dark-with-Particles_1768822653867",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps",
+        "Titles-and-Openers",
+        "Overlays-and-FX"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "folder-name rule: Pr_edit_Linked_Comp_34_1768822653867 → Pre-comps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pr_edit_Linked_Comp_43_1768823009924",
+      "newPath": "Pre-comps/Green-Grading-Video-Layer-Stack_1768823009924",
+      "oldDisplayName": "Pr_edit_Linked_Comp_43_1768823009924",
+      "newDisplayName": "Green Grading Video Layer Stack",
+      "oldFolderName": "Pr_edit_Linked_Comp_43_1768823009924",
+      "newFolderName": "Green-Grading-Video-Layer-Stack_1768823009924",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "Green-teal graded video footage with layered composition and strong edge detail throughout",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Wylie_Faith5_Linked_Comp_22_1768765303418",
+      "newPath": "Pre-comps/Green-Screen-Chroma-Key-Video-Frame_1768765303418",
+      "oldDisplayName": "Wylie_Faith5_Linked_Comp_22_1768765303418",
+      "newDisplayName": "Green Screen Chroma Key Video Frame",
+      "oldFolderName": "Wylie_Faith5_Linked_Comp_22_1768765303418",
+      "newFolderName": "Green-Screen-Chroma-Key-Video-Frame_1768765303418",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Bright frame with vivid green and blue elements, appears to be a green screen chroma key video with bright colored foreground",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Wylie_Faith5_Linked_Comp_22_1768765352777",
+      "newPath": "Pre-comps/Green-Screen-Chroma-Key-Video-Frame_1768765352777",
+      "oldDisplayName": "Wylie_Faith5_Linked_Comp_22_1768765352777",
+      "newDisplayName": "Green Screen Chroma Key Video Frame",
+      "oldFolderName": "Wylie_Faith5_Linked_Comp_22_1768765352777",
+      "newFolderName": "Green-Screen-Chroma-Key-Video-Frame_1768765352777",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Bright frame with vivid green and blue elements, appears to be a green screen chroma key video with bright colored foreground",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Wylie_Faith5_Linked_Comp_22_1768765397369",
+      "newPath": "Pre-comps/Green-Screen-Chroma-Key-Video-Frame_1768765397369",
+      "oldDisplayName": "Wylie_Faith5_Linked_Comp_22_1768765397369",
+      "newDisplayName": "Green Screen Chroma Key Video Frame",
+      "oldFolderName": "Wylie_Faith5_Linked_Comp_22_1768765397369",
+      "newFolderName": "Green-Screen-Chroma-Key-Video-Frame_1768765397369",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Bright frame with vivid green and blue elements, appears to be a green screen chroma key video with bright colored foreground",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Wylie_Faith5_Linked_Comp_22_1768765425426",
+      "newPath": "Pre-comps/Green-Screen-Chroma-Key-Video-Frame_1768765425426",
+      "oldDisplayName": "Wylie_Faith5_Linked_Comp_22_1768765425426",
+      "newDisplayName": "Green Screen Chroma Key Video Frame",
+      "oldFolderName": "Wylie_Faith5_Linked_Comp_22_1768765425426",
+      "newFolderName": "Green-Screen-Chroma-Key-Video-Frame_1768765425426",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Bright frame with vivid green and blue elements, appears to be a green screen chroma key video with bright colored foreground",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pr_edit_Linked_Comp_07_1768821612888",
+      "newPath": "Pre-comps/Green-Tint-Video-Footage-Assembly_1768821612888",
+      "oldDisplayName": "Pr_edit_Linked_Comp_07_1768821612888",
+      "newDisplayName": "Green Tint Video Footage Assembly",
+      "oldFolderName": "Pr_edit_Linked_Comp_07_1768821612888",
+      "newFolderName": "Green-Tint-Video-Footage-Assembly_1768821612888",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "Green-tinted video footage with layered composition elements and strong vignette to dark borders",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/video_Linked_Comp_01_1768760162191",
+      "newPath": "Pre-comps/High-Contrast-Video-Frame-with-Bright-Center_1768760162191",
+      "oldDisplayName": "video_Linked_Comp_01_1768760162191",
+      "newDisplayName": "High Contrast Video Frame with Bright Center",
+      "oldFolderName": "video_Linked_Comp_01_1768760162191",
+      "newFolderName": "High-Contrast-Video-Frame-with-Bright-Center_1768760162191",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Small video frame with extreme contrast, very bright center area, very dark top and bottom edges, strong spotlight effect",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pr_edit_Linked_Comp_21_1768822371461",
+      "newPath": "Pre-comps/High-Detail-Video-Overlay-Stack_1768822371461",
+      "oldDisplayName": "Pr_edit_Linked_Comp_21_1768822371461",
+      "newDisplayName": "High Detail Video Overlay Stack",
+      "oldFolderName": "Pr_edit_Linked_Comp_21_1768822371461",
+      "newFolderName": "High-Detail-Video-Overlay-Stack_1768822371461",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "Video footage with high-detail composition overlay, bright areas with complex texture",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/Pre_comp_2_1768565459114",
+      "newPath": "Pre-comps/Layered-Composition-with-Gradients-and-Text_1768565459114",
+      "oldDisplayName": "Pre_comp_2_1768565459114",
+      "newDisplayName": "Layered Composition with Gradients and Text",
+      "oldFolderName": "Pre_comp_2_1768565459114",
+      "newFolderName": "Layered-Composition-with-Gradients-and-Text_1768565459114",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Bright complex layered composition with multiple design elements, gradient overlays, and text areas assembled together",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Video_1_Linked_Comp_08_1768825396589",
+      "newPath": "Pre-comps/Medium-Brightness-4K-Video-Frame-with-Warm-Tones_1768825396589",
+      "oldDisplayName": "Video_1_Linked_Comp_08_1768825396589",
+      "newDisplayName": "Medium Brightness 4K Video Frame with Warm Tones",
+      "oldFolderName": "Video_1_Linked_Comp_08_1768825396589",
+      "newFolderName": "Medium-Brightness-4K-Video-Frame-with-Warm-Tones_1768825396589",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Detailed 4K video frame with warm natural tones, bright center area, darker edges, varied scene content",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pr_edit_Linked_Comp_21_1768566508135",
+      "newPath": "Pre-comps/Midtone-Video-Layer-Assembly_1768566508135",
+      "oldDisplayName": "Pr_edit_Linked_Comp_21_1768566508135",
+      "newDisplayName": "Midtone Video Layer Assembly",
+      "oldFolderName": "Pr_edit_Linked_Comp_21_1768566508135",
+      "newFolderName": "Midtone-Video-Layer-Assembly_1768566508135",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "Video footage composition with midtone brightness fading to dark at bottom, layered Premiere comp",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/8_1768643729319",
+      "newPath": "Pre-comps/Mobile-App-Screen-Mockup_1768643729319",
+      "oldDisplayName": "8_1768643729319",
+      "newDisplayName": "Mobile App Screen Mockup",
+      "oldFolderName": "8_1768643729319",
+      "newFolderName": "Mobile-App-Screen-Mockup_1768643729319",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Bright composition showing a detailed mobile app interface with screen panels, buttons, navigation elements, and content areas",
+      "metadata": {}
+    },
+    {
+      "oldPath": "John Ventura/Pre_comp_1_1768763995645",
+      "newPath": "Pre-comps/Multi-Layer-Composition-With-Video-And-Graphics-Overlays_1768763995645",
+      "oldDisplayName": "Pre_comp_1_1768763995645",
+      "newDisplayName": "Multi Layer Composition With Video And Graphics Overlays",
+      "oldFolderName": "Pre_comp_1_1768763995645",
+      "newFolderName": "Multi-Layer-Composition-With-Video-And-Graphics-Overlays_1768763995645",
+      "oldCategory": "John Ventura",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "Complex composition on transparent background with text layers, colored shapes, and multiple overlapping elements",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Usama Ahmad/Video_4_Linked_Comp_17_1768759906026",
+      "newPath": "Pre-comps/Multi-Clip-Video-Grid-Collage_1768759906026",
+      "oldDisplayName": "Video_4_Linked_Comp_17_1768759906026",
+      "newDisplayName": "Multi-Clip Video Grid Collage",
+      "oldFolderName": "Video_4_Linked_Comp_17_1768759906026",
+      "newFolderName": "Multi-Clip-Video-Grid-Collage_1768759906026",
+      "oldCategory": "Usama Ahmad",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "Multiple video footage placeholders arranged in a grid pattern on dark background, overlapping clips in a multi-screen composite layout, nested composition with several video layers",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Usama Ahmad/Video_4_Linked_Comp_17_1768759947042",
+      "newPath": "Pre-comps/Multi-Clip-Video-Grid-Collage_1768759947042",
+      "oldDisplayName": "Video_4_Linked_Comp_17_1768759947042",
+      "newDisplayName": "Multi-Clip Video Grid Collage",
+      "oldFolderName": "Video_4_Linked_Comp_17_1768759947042",
+      "newFolderName": "Multi-Clip-Video-Grid-Collage_1768759947042",
+      "oldCategory": "Usama Ahmad",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "Multiple video footage placeholders arranged in a grid pattern on dark background, overlapping clips in a multi-screen composite layout, nested composition with several video layers",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/13_1768756223320",
+      "newPath": "Pre-comps/Multi-Layer-Composition-with-Gradient-Panels_1768756223320",
+      "oldDisplayName": "13_1768756223320",
+      "newDisplayName": "Multi-Layer Composition with Gradient Panels",
+      "oldFolderName": "13_1768756223320",
+      "newFolderName": "Multi-Layer-Composition-with-Gradient-Panels_1768756223320",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Pre-comps",
+        "Titles-and-Openers",
+        "Backgrounds"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Complex multi-toned frame with distinct horizontal bands and varying density levels, appears to be a nested composition with multiple elements stacked vertically",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Video_4_Linked_Comp_01_1768760769254",
+      "newPath": "Pre-comps/Near-White-4K-Frame-with-Darker-Center_1768760769254",
+      "oldDisplayName": "Video_4_Linked_Comp_01_1768760769254",
+      "newDisplayName": "Near White 4K Frame with Darker Center",
+      "oldFolderName": "Video_4_Linked_Comp_01_1768760769254",
+      "newFolderName": "Near-White-4K-Frame-with-Darker-Center_1768760769254",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Nearly uniform warm gray-white frame with a slightly darker gray center, very simple composition",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pic_montage_1768566127931",
+      "newPath": "Pre-comps/Photo-Montage-Image-Grid-Assembly_1768566127931",
+      "oldDisplayName": "Pic_montage_1768566127931",
+      "newDisplayName": "Photo Montage Image Grid Assembly",
+      "oldFolderName": "Pic_montage_1768566127931",
+      "newFolderName": "Photo-Montage-Image-Grid-Assembly_1768566127931",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Multi-image photo montage with layered pictures arranged on dark background in grid layout",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Usama Ahmad/Video_4_Linked_Comp_17_1768759764667",
+      "newPath": "Pre-comps/Progress-and-Loading-Bar-Template_1768759764667",
+      "oldDisplayName": "Video_4_Linked_Comp_17_1768759764667",
+      "newDisplayName": "Progress and Loading Bar Template",
+      "oldFolderName": "Video_4_Linked_Comp_17_1768759764667",
+      "newFolderName": "Progress-and-Loading-Bar-Template_1768759764667",
+      "oldCategory": "Usama Ahmad",
+      "categories": [
+        "Pre-comps",
+        "Process-and-Steps",
+        "Lower-Thirds"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "folder-name rule: Video_4_Linked_Comp_17_1768759764667 → Pre-comps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Usama Ahmad/Video_4_Linked_Comp_17_1768759845043",
+      "newPath": "Pre-comps/Progress-Bar-Template-with-Labels_1768759845043",
+      "oldDisplayName": "Video_4_Linked_Comp_17_1768759845043",
+      "newDisplayName": "Progress Bar Template with Labels",
+      "oldFolderName": "Video_4_Linked_Comp_17_1768759845043",
+      "newFolderName": "Progress-Bar-Template-with-Labels_1768759845043",
+      "oldCategory": "Usama Ahmad",
+      "categories": [
+        "Pre-comps",
+        "Process-and-Steps",
+        "Lower-Thirds"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "folder-name rule: Video_4_Linked_Comp_17_1768759845043 → Pre-comps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Usama Ahmad/Video_4_Linked_Comp_17_1768759861818",
+      "newPath": "Pre-comps/Progress-Indicator-Layout_1768759861818",
+      "oldDisplayName": "Video_4_Linked_Comp_17_1768759861818",
+      "newDisplayName": "Progress Indicator Layout",
+      "oldFolderName": "Video_4_Linked_Comp_17_1768759861818",
+      "newFolderName": "Progress-Indicator-Layout_1768759861818",
+      "oldCategory": "Usama Ahmad",
+      "categories": [
+        "Pre-comps",
+        "Process-and-Steps",
+        "Lower-Thirds"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "folder-name rule: Video_4_Linked_Comp_17_1768759861818 → Pre-comps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/assemble_Linked_Comp_14_1768506422599",
+      "newPath": "Pre-comps/Scene-Assembly-Dark-Gray-With-Small-Highlight-Elements_1768506422599",
+      "oldDisplayName": "assemble_Linked_Comp_14_1768506422599",
+      "newDisplayName": "Scene Assembly Dark Gray With Small Highlight Elements",
+      "oldFolderName": "assemble_Linked_Comp_14_1768506422599",
+      "newFolderName": "Scene-Assembly-Dark-Gray-With-Small-Highlight-Elements_1768506422599",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Very dark gray composition with small subtle brighter shapes suggesting layered elements in a pre-comp",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/assemble_Linked_Comp_02_1768505520529",
+      "newPath": "Pre-comps/Scene-Assembly-Dark-Purple-With-Portrait-Placeholder_1768505520529",
+      "oldDisplayName": "assemble_Linked_Comp_02_1768505520529",
+      "newDisplayName": "Scene Assembly Dark Purple With Portrait Placeholder",
+      "oldFolderName": "assemble_Linked_Comp_02_1768505520529",
+      "newFolderName": "Scene-Assembly-Dark-Purple-With-Portrait-Placeholder_1768505520529",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Dark purple scene assembly with multiple composited layers including what appears to be a portrait frame, text bars, and graphic elements",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/assemble_Linked_Comp_30_1768506962343",
+      "newPath": "Pre-comps/Scene-Assembly-Dark-With-Gray-Gradient-Shapes_1768506962343",
+      "oldDisplayName": "assemble_Linked_Comp_30_1768506962343",
+      "newDisplayName": "Scene Assembly Dark With Gray Gradient Shapes",
+      "oldFolderName": "assemble_Linked_Comp_30_1768506962343",
+      "newFolderName": "Scene-Assembly-Dark-With-Gray-Gradient-Shapes_1768506962343",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Dark composition with gray gradient bars and shapes stacked vertically, layered pre-comp with multiple element types",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/assemble_Linked_Comp_39_1768507064934",
+      "newPath": "Pre-comps/Scene-Assembly-Dark-With-Text-And-Graphic-Bars_1768507064934",
+      "oldDisplayName": "assemble_Linked_Comp_39_1768507064934",
+      "newDisplayName": "Scene Assembly Dark With Text And Graphic Bars",
+      "oldFolderName": "assemble_Linked_Comp_39_1768507064934",
+      "newFolderName": "Scene-Assembly-Dark-With-Text-And-Graphic-Bars_1768507064934",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps",
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Dark multi-layer composition with horizontal text bars, percentage-like elements, and graphic blocks arranged in a structured layout",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/assemble_Linked_Comp_02_1768505171855",
+      "newPath": "Pre-comps/Scene-Assembly-Desert-Warm-Tones-With-Text-Placeholders_1768505171855",
+      "oldDisplayName": "assemble_Linked_Comp_02_1768505171855",
+      "newDisplayName": "Scene Assembly Desert Warm Tones With Text Placeholders",
+      "oldFolderName": "assemble_Linked_Comp_02_1768505171855",
+      "newFolderName": "Scene-Assembly-Desert-Warm-Tones-With-Text-Placeholders_1768505171855",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Dense warm-toned composition with multiple layered elements, footage placeholders, and text areas assembled into a scene, clearly a nested pre-comp",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Edit_pr_1_Linked_Comp_04_1768764668019",
+      "newPath": "Pre-comps/Scene-Assembly-Edit-With-Dark-Layered-Elements_1768764668019",
+      "oldDisplayName": "Edit_pr_1_Linked_Comp_04_1768764668019",
+      "newDisplayName": "Scene Assembly Edit With Dark Layered Elements",
+      "oldFolderName": "Edit_pr_1_Linked_Comp_04_1768764668019",
+      "newFolderName": "Scene-Assembly-Edit-With-Dark-Layered-Elements_1768764668019",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Dense multi-layer composition with magazine-like layout combining text blocks, image areas, and graphic bars in a layered scene assembly",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/assemble_Linked_Comp_03_1768504610830",
+      "newPath": "Pre-comps/Scene-Assembly-Purple-Accent-White-Canvas-Layout_1768504610830",
+      "oldDisplayName": "assemble_Linked_Comp_03_1768504610830",
+      "newDisplayName": "Scene Assembly Purple Accent White Canvas Layout",
+      "oldFolderName": "assemble_Linked_Comp_03_1768504610830",
+      "newFolderName": "Scene-Assembly-Purple-Accent-White-Canvas-Layout_1768504610830",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Bright white canvas with a large purple circular element and dark text blocks, a scene assembly with multiple graphic placeholders",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/assemble_Linked_Comp_04_1768504514072",
+      "newPath": "Pre-comps/Scene-Assembly-Purple-Dark-Layered-Elements_1768504514072",
+      "oldDisplayName": "assemble_Linked_Comp_04_1768504514072",
+      "newDisplayName": "Scene Assembly Purple Dark Layered Elements",
+      "oldFolderName": "assemble_Linked_Comp_04_1768504514072",
+      "newFolderName": "Scene-Assembly-Purple-Dark-Layered-Elements_1768504514072",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Dark composition with purple layered elements stacked vertically, multiple text and shape layers combined in a nested composition",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/assemble_Linked_Comp_23_1768506718538",
+      "newPath": "Pre-comps/Scene-Assembly-Purple-Tones-With-Portrait-Frame_1768506718538",
+      "oldDisplayName": "assemble_Linked_Comp_23_1768506718538",
+      "newDisplayName": "Scene Assembly Purple Tones With Portrait Frame",
+      "oldFolderName": "assemble_Linked_Comp_23_1768506718538",
+      "newFolderName": "Scene-Assembly-Purple-Tones-With-Portrait-Frame_1768506718538",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Purple-toned multi-layer composition with portrait frame areas, text bars, and stacked graphic elements in a nested scene",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/assemble_Linked_Comp_05_1768505761245",
+      "newPath": "Pre-comps/Scene-Assembly-White-Canvas-Minimal-Gray-Elements_1768505761245",
+      "oldDisplayName": "assemble_Linked_Comp_05_1768505761245",
+      "newDisplayName": "Scene Assembly White Canvas Minimal Gray Elements",
+      "oldFolderName": "assemble_Linked_Comp_05_1768505761245",
+      "newFolderName": "Scene-Assembly-White-Canvas-Minimal-Gray-Elements_1768505761245",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "White background with small gray text blocks and minimal graphic elements arranged in a simple scene composition",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/assemble_Linked_Comp_05_1768504396929",
+      "newPath": "Pre-comps/Scene-Assembly-White-Canvas-With-Purple-Circle-And-Text_1768504396929",
+      "oldDisplayName": "assemble_Linked_Comp_05_1768504396929",
+      "newDisplayName": "Scene Assembly White Canvas With Purple Circle And Text",
+      "oldFolderName": "assemble_Linked_Comp_05_1768504396929",
+      "newFolderName": "Scene-Assembly-White-Canvas-With-Purple-Circle-And-Text_1768504396929",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "White background with a small purple circular element and some dark text regions, a clean scene assembly with placeholder content",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/assemble_Linked_Comp_09_1768505980723",
+      "newPath": "Pre-comps/Scene-Assembly-White-Canvas-With-Small-Dark-Elements_1768505980723",
+      "oldDisplayName": "assemble_Linked_Comp_09_1768505980723",
+      "newDisplayName": "Scene Assembly White Canvas With Small Dark Elements",
+      "oldFolderName": "assemble_Linked_Comp_09_1768505980723",
+      "newFolderName": "Scene-Assembly-White-Canvas-With-Small-Dark-Elements_1768505980723",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Almost entirely white background with small dark text blocks and a subtle circular graphic, minimal scene assembly",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/Pre_comp_15_1768755571305",
+      "newPath": "Pre-comps/Small-Centered-Icon-on-Transparent_1768755571305",
+      "oldDisplayName": "Pre_comp_15_1768755571305",
+      "newDisplayName": "Small Centered Icon on Transparent",
+      "oldFolderName": "Pre_comp_15_1768755571305",
+      "newFolderName": "Small-Centered-Icon-on-Transparent_1768755571305",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Pre-comps",
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "folder-name rule: Pre_comp_15_1768755571305 → Pre-comps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Usama Ahmad/Pre_comp_1_1768759990369",
+      "newPath": "Pre-comps/Small-Crest-Emblem-on-Transparent_1768759990369",
+      "oldDisplayName": "Pre_comp_1_1768759990369",
+      "newDisplayName": "Small Crest Emblem on Transparent",
+      "oldFolderName": "Pre_comp_1_1768759990369",
+      "newFolderName": "Small-Crest-Emblem-on-Transparent_1768759990369",
+      "oldCategory": "Usama Ahmad",
+      "categories": [
+        "Pre-comps",
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "folder-name rule: Pre_comp_1_1768759990369 → Pre-comps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/clinets_1768501938619",
+      "newPath": "Pre-comps/Small-White-Text-Clients-Label-on-Black_1768501938619",
+      "oldDisplayName": "clinets_1768501938619",
+      "newDisplayName": "Small White Text Clients Label on Black",
+      "oldFolderName": "clinets_1768501938619",
+      "newFolderName": "Small-White-Text-Clients-Label-on-Black_1768501938619",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps",
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "folder-name rule: clinets_1768501938619 → Pre-comps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pr_edit_Linked_Comp_04_1768823683056",
+      "newPath": "Pre-comps/Teal-Center-Video-Frame-on-Dark_1768823683056",
+      "oldDisplayName": "Pr_edit_Linked_Comp_04_1768823683056",
+      "newDisplayName": "Teal Center Video Frame on Dark",
+      "oldFolderName": "Pr_edit_Linked_Comp_04_1768823683056",
+      "newFolderName": "Teal-Center-Video-Frame-on-Dark_1768823683056",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Dark frame with bright teal-green video footage or graphic element centered in the middle",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/5_1768643566288",
+      "newPath": "Pre-comps/UI-Screen-Layout-with-Panels_1768643566288",
+      "oldDisplayName": "5_1768643566288",
+      "newDisplayName": "UI Screen Layout with Panels",
+      "oldFolderName": "5_1768643566288",
+      "newFolderName": "UI-Screen-Layout-with-Panels_1768643566288",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Bright complex composition showing a UI/app screen layout with multiple panels, buttons, and interface elements",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/video_Linked_Comp_03_1768760578800",
+      "newPath": "Pre-comps/Uniform-Dark-Green-Frame_1768760578800",
+      "oldDisplayName": "video_Linked_Comp_03_1768760578800",
+      "newDisplayName": "Uniform Dark Green Frame",
+      "oldFolderName": "video_Linked_Comp_03_1768760578800",
+      "newFolderName": "Uniform-Dark-Green-Frame_1768760578800",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Very uniform dark green frame with almost no visible detail or contrast, could be a green screen or dark scene",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/video_Linked_Comp_15_1768760396915",
+      "newPath": "Pre-comps/Very-Dark-Frame-with-Bright-Center-Spot_1768760396915",
+      "oldDisplayName": "video_Linked_Comp_15_1768760396915",
+      "newDisplayName": "Very Dark Frame with Bright Center Spot",
+      "oldFolderName": "video_Linked_Comp_15_1768760396915",
+      "newFolderName": "Very-Dark-Frame-with-Bright-Center-Spot_1768760396915",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Very dark frame, almost black, with a single bright white spot at center, very low detail",
+      "metadata": {}
+    },
+    {
+      "oldPath": "John Ventura/1",
+      "newPath": "Pre-comps/Very-Dark-Frame-with-Small-Blue-Light-Elements_1",
+      "oldDisplayName": "1",
+      "newDisplayName": "Very Dark Frame with Small Blue Light Elements",
+      "oldFolderName": "1",
+      "newFolderName": "Very-Dark-Frame-with-Small-Blue-Light-Elements_1",
+      "oldCategory": "John Ventura",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Nearly black frame with two small bright blue light elements in the lower-middle area, very sparse",
+      "metadata": {}
+    },
+    {
+      "oldPath": "John Ventura/7",
+      "newPath": "Pre-comps/Very-Dark-Frame-with-Small-Green-Element-at-Center_7",
+      "oldDisplayName": "7",
+      "newDisplayName": "Very Dark Frame with Small Green Element at Center",
+      "oldFolderName": "7",
+      "newFolderName": "Very-Dark-Frame-with-Small-Green-Element-at-Center_7",
+      "oldCategory": "John Ventura",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Nearly black frame with a small dark green element concentrated in the center area, very minimal detail",
+      "metadata": {}
+    },
+    {
+      "oldPath": "John Ventura/5",
+      "newPath": "Pre-comps/Very-Dark-Frame-with-Subtle-Warm-Brown-Center_5",
+      "oldDisplayName": "5",
+      "newDisplayName": "Very Dark Frame with Subtle Warm Brown Center",
+      "oldFolderName": "5",
+      "newFolderName": "Very-Dark-Frame-with-Subtle-Warm-Brown-Center_5",
+      "oldCategory": "John Ventura",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.6,
+      "needsReview": false,
+      "reason": "Very dark frame with a small warm brown element concentrated at center, minimal detail",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pr_edit_Linked_Comp_26_1768566776941",
+      "newPath": "Pre-comps/Video-Footage-with-Particle-Overlay_1768566776941",
+      "oldDisplayName": "Pr_edit_Linked_Comp_26_1768566776941",
+      "newDisplayName": "Video Footage with Particle Overlay",
+      "oldFolderName": "Pr_edit_Linked_Comp_26_1768566776941",
+      "newFolderName": "Video-Footage-with-Particle-Overlay_1768566776941",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps",
+        "Overlays-and-FX"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "Video footage composition with particle overlay elements fading to dark at bottom",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Video_1_Linked_Comp_14_1768825615323",
+      "newPath": "Pre-comps/Warm-Center-4K-Video-Frame-with-Detail_1768825615323",
+      "oldDisplayName": "Video_1_Linked_Comp_14_1768825615323",
+      "newDisplayName": "Warm Center 4K Video Frame with Detail",
+      "oldFolderName": "Video_1_Linked_Comp_14_1768825615323",
+      "newFolderName": "Warm-Center-4K-Video-Frame-with-Detail_1768825615323",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Detailed 4K video frame with warm golden-brown center, varied brightness levels across frame",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Video_1_Linked_Comp_05_1768825345942",
+      "newPath": "Pre-comps/Warm-Tone-4K-Video-Frame-with-Detailed-Scene_1768825345942",
+      "oldDisplayName": "Video_1_Linked_Comp_05_1768825345942",
+      "newDisplayName": "Warm Tone 4K Video Frame with Detailed Scene",
+      "oldFolderName": "Video_1_Linked_Comp_05_1768825345942",
+      "newFolderName": "Warm-Tone-4K-Video-Frame-with-Detailed-Scene_1768825345942",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "Detailed 4K video frame with warm brown and green tones, appears to be interior scene with varied content throughout",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pre_comp_33_1768825219156",
+      "newPath": "Pre-comps/White-Background-Subtle-Dust-Particles_1768825219156",
+      "oldDisplayName": "Pre_comp_33_1768825219156",
+      "newDisplayName": "White Background Subtle Dust Particles",
+      "oldFolderName": "Pre_comp_33_1768825219156",
+      "newFolderName": "White-Background-Subtle-Dust-Particles_1768825219156",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps",
+        "Overlays-and-FX",
+        "Backgrounds"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "folder-name rule: Pre_comp_33_1768825219156 → Pre-comps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Video_1_Linked_Comp_21_1768825763560",
+      "newPath": "Pre-comps/White-Frame-with-Dark-Horizontal-Bar-Pattern_1768825763560",
+      "oldDisplayName": "Video_1_Linked_Comp_21_1768825763560",
+      "newDisplayName": "White Frame with Dark Horizontal Bar Pattern",
+      "oldFolderName": "Video_1_Linked_Comp_21_1768825763560",
+      "newFolderName": "White-Frame-with-Dark-Horizontal-Bar-Pattern_1768825763560",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Very bright white frame with dark horizontal bands in upper-middle and lower-middle areas, simple bar pattern",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/Sam_Zia_Shorts_1_Linked_Comp_04_1768565660657",
+      "newPath": "Pre-comps/YouTube-Shorts-Content-Layout_1768565660657",
+      "oldDisplayName": "Sam_Zia_Shorts_1_Linked_Comp_04_1768565660657",
+      "newDisplayName": "YouTube Shorts Content Layout",
+      "oldFolderName": "Sam_Zia_Shorts_1_Linked_Comp_04_1768565660657",
+      "newFolderName": "YouTube-Shorts-Content-Layout_1768565660657",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "YouTube Shorts portrait composition with structured layout zones, text areas, and visual elements for short video content",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/Sam_Zia_Shorts_1_Linked_Comp_15_1768565860654",
+      "newPath": "Pre-comps/YouTube-Shorts-Design-Layout_1768565860654",
+      "oldDisplayName": "Sam_Zia_Shorts_1_Linked_Comp_15_1768565860654",
+      "newDisplayName": "YouTube Shorts Design Layout",
+      "oldFolderName": "Sam_Zia_Shorts_1_Linked_Comp_15_1768565860654",
+      "newFolderName": "YouTube-Shorts-Design-Layout_1768565860654",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "YouTube Shorts portrait composition with gradient background, text areas, and decorative design elements",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/Sam_Zia_Shorts_1_Linked_Comp_07_1768565758631",
+      "newPath": "Pre-comps/YouTube-Shorts-Detail-Template-with-Bottom-Bar_1768565758631",
+      "oldDisplayName": "Sam_Zia_Shorts_1_Linked_Comp_07_1768565758631",
+      "newDisplayName": "YouTube Shorts Detail Template with Bottom Bar",
+      "oldFolderName": "Sam_Zia_Shorts_1_Linked_Comp_07_1768565758631",
+      "newFolderName": "YouTube-Shorts-Detail-Template-with-Bottom-Bar_1768565758631",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Pre-comps",
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "YouTube Shorts portrait composition with prominent bottom bar, text areas, and multiple visual elements in a complex layout",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/Sam_Zia_Shorts_1_Linked_Comp_14_1768565816655",
+      "newPath": "Pre-comps/YouTube-Shorts-Gradient-Template_1768565816655",
+      "oldDisplayName": "Sam_Zia_Shorts_1_Linked_Comp_14_1768565816655",
+      "newDisplayName": "YouTube Shorts Gradient Template",
+      "oldFolderName": "Sam_Zia_Shorts_1_Linked_Comp_14_1768565816655",
+      "newFolderName": "YouTube-Shorts-Gradient-Template_1768565816655",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "YouTube Shorts portrait composition with gradient bands, text placeholder areas, and structured layout",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/Sam_Zia_Shorts_1_Linked_Comp_18_1768565900870",
+      "newPath": "Pre-comps/YouTube-Shorts-Portrait-Template_1768565900870",
+      "oldDisplayName": "Sam_Zia_Shorts_1_Linked_Comp_18_1768565900870",
+      "newDisplayName": "YouTube Shorts Portrait Template",
+      "oldFolderName": "Sam_Zia_Shorts_1_Linked_Comp_18_1768565900870",
+      "newFolderName": "YouTube-Shorts-Portrait-Template_1768565900870",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "YouTube Shorts portrait composition with structured layout zones for text and visual content placement",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/Sam_Zia_Shorts_1_Linked_Comp_06_1768565709264",
+      "newPath": "Pre-comps/YouTube-Shorts-Template-with-Text-Areas_1768565709264",
+      "oldDisplayName": "Sam_Zia_Shorts_1_Linked_Comp_06_1768565709264",
+      "newDisplayName": "YouTube Shorts Template with Text Areas",
+      "oldFolderName": "Sam_Zia_Shorts_1_Linked_Comp_06_1768565709264",
+      "newFolderName": "YouTube-Shorts-Template-with-Text-Areas_1768565709264",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "YouTube Shorts portrait composition with text overlay areas, decorative elements, and visual layout for short-form content",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/Sam_Zia_Shorts_1_Linked_Comp_03_1768565610137",
+      "newPath": "Pre-comps/YouTube-Shorts-Video-Template_1768565610137",
+      "oldDisplayName": "Sam_Zia_Shorts_1_Linked_Comp_03_1768565610137",
+      "newDisplayName": "YouTube Shorts Video Template",
+      "oldFolderName": "Sam_Zia_Shorts_1_Linked_Comp_03_1768565610137",
+      "newFolderName": "YouTube-Shorts-Video-Template_1768565610137",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Pre-comps"
+      ],
+      "primaryCategory": "Pre-comps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "YouTube Shorts (9:16 portrait) composition with text placement areas, gradient bands, and layout structure for short-form video content",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/18_1768765205179",
+      "newPath": "Process-and-Steps/Blue-Gray-Name-Bar-Full-Width-Lower-Third_1768765205179",
+      "oldDisplayName": "18_1768765205179",
+      "newDisplayName": "Blue Gray Name Bar Full Width Lower Third",
+      "oldFolderName": "18_1768765205179",
+      "newFolderName": "Blue-Gray-Name-Bar-Full-Width-Lower-Third_1768765205179",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Process-and-Steps",
+        "Lower-Thirds"
+      ],
+      "primaryCategory": "Process-and-Steps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "progress bar detected → Process & Steps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/10_1768644959574",
+      "newPath": "Process-and-Steps/Blue-Horizontal-Subscribe-Or-Action-Bar-Centered_1768644959574",
+      "oldDisplayName": "10_1768644959574",
+      "newDisplayName": "Blue Horizontal Subscribe Or Action Bar Centered",
+      "oldFolderName": "10_1768644959574",
+      "newFolderName": "Blue-Horizontal-Subscribe-Or-Action-Bar-Centered_1768644959574",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Process-and-Steps",
+        "Call-to-Actions"
+      ],
+      "primaryCategory": "Process-and-Steps",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "progress bar detected → Process & Steps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/4_steps__1768501821432",
+      "newPath": "Process-and-Steps/Cyan-Step-Progress-Flow-Four-Vertical-Stages_1768501821432",
+      "oldDisplayName": "4_steps__1768501821432",
+      "newDisplayName": "Cyan Step Progress Flow Four Vertical Stages",
+      "oldFolderName": "4_steps__1768501821432",
+      "newFolderName": "Cyan-Step-Progress-Flow-Four-Vertical-Stages_1768501821432",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Process-and-Steps"
+      ],
+      "primaryCategory": "Process-and-Steps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Dark background with cyan step indicators arranged vertically down the frame showing a four-stage sequential process flow",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/4_steps_2_1768502322704",
+      "newPath": "Process-and-Steps/Cyan-Step-Progress-Flow-Four-Vertical-Stages-Alternative_1768502322704",
+      "oldDisplayName": "4_steps_2_1768502322704",
+      "newDisplayName": "Cyan Step Progress Flow Four Vertical Stages Alternative",
+      "oldFolderName": "4_steps_2_1768502322704",
+      "newFolderName": "Cyan-Step-Progress-Flow-Four-Vertical-Stages-Alternative_1768502322704",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Process-and-Steps"
+      ],
+      "primaryCategory": "Process-and-Steps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Dark background with cyan step indicators in a vertical sequential layout similar to the other steps template, showing process progression",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/14_1768560909177",
+      "newPath": "Process-and-Steps/Dual-Horizontal-Info-Bars-Dark-Blue_1768560909177",
+      "oldDisplayName": "14_1768560909177",
+      "newDisplayName": "Dual Horizontal Info Bars Dark Blue",
+      "oldFolderName": "14_1768560909177",
+      "newFolderName": "Dual-Horizontal-Info-Bars-Dark-Blue_1768560909177",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Process-and-Steps",
+        "Lower-Thirds",
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Process-and-Steps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "progress bar detected → Process & Steps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/client_1_Linked_Comp_02_1768757321459",
+      "newPath": "Process-and-Steps/Full-Video-Composition-with-Timeline-and-UI_1768757321459",
+      "oldDisplayName": "client_1_Linked_Comp_02_1768757321459",
+      "newDisplayName": "Full Video Composition with Timeline and UI",
+      "oldFolderName": "client_1_Linked_Comp_02_1768757321459",
+      "newFolderName": "Full-Video-Composition-with-Timeline-and-UI_1768757321459",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Process-and-Steps",
+        "Pre-comps"
+      ],
+      "primaryCategory": "Process-and-Steps",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "progress bar detected → Process & Steps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/_15_1768563629001",
+      "newPath": "Process-and-Steps/Green-Horizontal-Progress-Bar-Centered_1768563629001",
+      "oldDisplayName": "_15_1768563629001",
+      "newDisplayName": "Green Horizontal Progress Bar Centered",
+      "oldFolderName": "_15_1768563629001",
+      "newFolderName": "Green-Horizontal-Progress-Bar-Centered_1768563629001",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Process-and-Steps"
+      ],
+      "primaryCategory": "Process-and-Steps",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Dark background with a thin horizontal teal/green progress-style bar across the center of frame",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/9_1768755542107",
+      "newPath": "Process-and-Steps/Horizontal-Text-Banner-on-Dark_1768755542107",
+      "oldDisplayName": "9_1768755542107",
+      "newDisplayName": "Horizontal Text Banner on Dark",
+      "oldFolderName": "9_1768755542107",
+      "newFolderName": "Horizontal-Text-Banner-on-Dark_1768755542107",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Process-and-Steps",
+        "Titles-and-Openers",
+        "Lower-Thirds"
+      ],
+      "primaryCategory": "Process-and-Steps",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "progress bar detected → Process & Steps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "John Ventura/John_Ventura_20_AI_Tools_Every_Insurance_Agent_Should_Try_V1_Linked_Comp_01_1768763829585",
+      "newPath": "Process-and-Steps/Multi-Track-Video-Editing-Timeline-Assembly_1768763829585",
+      "oldDisplayName": "John_Ventura_20_AI_Tools_Every_Insurance_Agent_Should_Try_V1_Linked_Comp_01_1768763829585",
+      "newDisplayName": "Multi Track Video Editing Timeline Assembly",
+      "oldFolderName": "John_Ventura_20_AI_Tools_Every_Insurance_Agent_Should_Try_V1_Linked_Comp_01_1768763829585",
+      "newFolderName": "Multi-Track-Video-Editing-Timeline-Assembly_1768763829585",
+      "oldCategory": "John Ventura",
+      "categories": [
+        "Process-and-Steps",
+        "Pre-comps"
+      ],
+      "primaryCategory": "Process-and-Steps",
+      "confidence": 0.95,
+      "needsReview": false,
+      "reason": "progress bar detected → Process & Steps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/process_1768566227666",
+      "newPath": "Process-and-Steps/Near-White-Frame-with-Gray-Center-Element_1768566227666",
+      "oldDisplayName": "process_1768566227666",
+      "newDisplayName": "Near White Frame with Gray Center Element",
+      "oldFolderName": "process_1768566227666",
+      "newFolderName": "Near-White-Frame-with-Gray-Center-Element_1768566227666",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Process-and-Steps",
+        "Pre-comps",
+        "Backgrounds"
+      ],
+      "primaryCategory": "Process-and-Steps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "folder-name rule: process_1768566227666 → Process & Steps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/15_1768562665272",
+      "newPath": "Process-and-Steps/Near-Black-with-Subtle-Center-Dots_1768562665272",
+      "oldDisplayName": "15_1768562665272",
+      "newDisplayName": "Near-Black with Subtle Center Dots",
+      "oldFolderName": "15_1768562665272",
+      "newFolderName": "Near-Black-with-Subtle-Center-Dots_1768562665272",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Process-and-Steps",
+        "Backgrounds",
+        "Overlays-and-FX"
+      ],
+      "primaryCategory": "Process-and-Steps",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "progress bar detected → Process & Steps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/2_1768645974378",
+      "newPath": "Process-and-Steps/Orange-Lower-Third-Bar-with-Text-Lines_1768645974378",
+      "oldDisplayName": "2_1768645974378",
+      "newDisplayName": "Orange Lower Third Bar with Text Lines",
+      "oldFolderName": "2_1768645974378",
+      "newFolderName": "Orange-Lower-Third-Bar-with-Text-Lines_1768645974378",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Process-and-Steps",
+        "Lower-Thirds",
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Process-and-Steps",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "progress bar detected → Process & Steps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/25_1768644187630",
+      "newPath": "Process-and-Steps/Red-Horizontal-CTA-Bar-on-White_1768644187630",
+      "oldDisplayName": "25_1768644187630",
+      "newDisplayName": "Red Horizontal CTA Bar on White",
+      "oldFolderName": "25_1768644187630",
+      "newFolderName": "Red-Horizontal-CTA-Bar-on-White_1768644187630",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Process-and-Steps",
+        "Call-to-Actions"
+      ],
+      "primaryCategory": "Process-and-Steps",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "progress bar detected → Process & Steps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/6_1768646147849",
+      "newPath": "Process-and-Steps/Thick-Gradient-Horizontal-Bar-Centered_1768646147849",
+      "oldDisplayName": "6_1768646147849",
+      "newDisplayName": "Thick Gradient Horizontal Bar Centered",
+      "oldFolderName": "6_1768646147849",
+      "newFolderName": "Thick-Gradient-Horizontal-Bar-Centered_1768646147849",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Process-and-Steps",
+        "Icons-and-Shapes",
+        "Lower-Thirds"
+      ],
+      "primaryCategory": "Process-and-Steps",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "progress bar detected → Process & Steps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/16_1768646266366",
+      "newPath": "Process-and-Steps/Vertical-Line-Accent-with-Bottom-Text-Bar_1768646266366",
+      "oldDisplayName": "16_1768646266366",
+      "newDisplayName": "Vertical Line Accent with Bottom Text Bar",
+      "oldFolderName": "16_1768646266366",
+      "newFolderName": "Vertical-Line-Accent-with-Bottom-Text-Bar_1768646266366",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Process-and-Steps",
+        "Lower-Thirds"
+      ],
+      "primaryCategory": "Process-and-Steps",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "progress bar detected → Process & Steps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Usama Ahmad/Video_4_Linked_Comp_05_1768760885646",
+      "newPath": "Process-and-Steps/Video-Editing-Timeline-Composition_1768760885646",
+      "oldDisplayName": "Video_4_Linked_Comp_05_1768760885646",
+      "newDisplayName": "Video Editing Timeline Composition",
+      "oldFolderName": "Video_4_Linked_Comp_05_1768760885646",
+      "newFolderName": "Video-Editing-Timeline-Composition_1768760885646",
+      "oldCategory": "Usama Ahmad",
+      "categories": [
+        "Process-and-Steps",
+        "Pre-comps",
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Process-and-Steps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "progress bar detected → Process & Steps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Usama Ahmad/Video_4_Linked_Comp_10_1768760981171",
+      "newPath": "Process-and-Steps/Video-Timeline-Layout-with-Text-Labels_1768760981171",
+      "oldDisplayName": "Video_4_Linked_Comp_10_1768760981171",
+      "newDisplayName": "Video Timeline Layout with Text Labels",
+      "oldFolderName": "Video_4_Linked_Comp_10_1768760981171",
+      "newFolderName": "Video-Timeline-Layout-with-Text-Labels_1768760981171",
+      "oldCategory": "Usama Ahmad",
+      "categories": [
+        "Process-and-Steps",
+        "Pre-comps",
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Process-and-Steps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "progress bar detected → Process & Steps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Step_1_1768503294408",
+      "newPath": "Process-and-Steps/White-Centered-Number-on-Dark-Background_1768503294408",
+      "oldDisplayName": "Step_1_1768503294408",
+      "newDisplayName": "White Centered Number on Dark Background",
+      "oldFolderName": "Step_1_1768503294408",
+      "newFolderName": "White-Centered-Number-on-Dark-Background_1768503294408",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Process-and-Steps",
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Process-and-Steps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "folder-name rule: Step_1_1768503294408 → Process & Steps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Process_1768566299865",
+      "newPath": "Process-and-Steps/White-Frame-with-Small-Cyan-Center-Dot_1768566299865",
+      "oldDisplayName": "Process_1768566299865",
+      "newDisplayName": "White Frame with Small Cyan Center Dot",
+      "oldFolderName": "Process_1768566299865",
+      "newFolderName": "White-Frame-with-Small-Cyan-Center-Dot_1768566299865",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Process-and-Steps",
+        "Pre-comps"
+      ],
+      "primaryCategory": "Process-and-Steps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "folder-name rule: Process_1768566299865 → Process & Steps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/step_1_process_1768764633571",
+      "newPath": "Process-and-Steps/White-Pre-composition-with-Green-Tint_1768764633571",
+      "oldDisplayName": "step_1_process_1768764633571",
+      "newDisplayName": "White Pre-composition with Green Tint",
+      "oldFolderName": "step_1_process_1768764633571",
+      "newFolderName": "White-Pre-composition-with-Green-Tint_1768764633571",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Process-and-Steps",
+        "Pre-comps"
+      ],
+      "primaryCategory": "Process-and-Steps",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "folder-name rule: step_1_process_1768764633571 → Process & Steps",
+      "metadata": {}
+    },
+    {
+      "oldPath": "John Ventura/2",
+      "newPath": "Titles-and-Openers/Bright-White-Centered-Element-on-Black-Background_2",
+      "oldDisplayName": "2",
+      "newDisplayName": "Bright White Centered Element on Black Background",
+      "oldFolderName": "2",
+      "newFolderName": "Bright-White-Centered-Element-on-Black-Background_2",
+      "oldCategory": "John Ventura",
+      "categories": [
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Titles-and-Openers",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Almost entirely black frame with a bright white element centered, slight blue tint on one side, likely text or logo",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pr_edit_Linked_Comp_03_1768821422780",
+      "newPath": "Titles-and-Openers/Colorful-Gradient-Banner-Title-Card_1768821422780",
+      "oldDisplayName": "Pr_edit_Linked_Comp_03_1768821422780",
+      "newDisplayName": "Colorful Gradient Banner Title Card",
+      "oldFolderName": "Pr_edit_Linked_Comp_03_1768821422780",
+      "newFolderName": "Colorful-Gradient-Banner-Title-Card_1768821422780",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Titles-and-Openers",
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Titles-and-Openers",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "Colorful title card with rainbow gradient background, bright white to blue transition with text overlay at top",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pre_comp_4_1768822307191",
+      "newPath": "Titles-and-Openers/Colorful-Header-Graphics-Title-Card_1768822307191",
+      "oldDisplayName": "Pre_comp_4_1768822307191",
+      "newDisplayName": "Colorful Header Graphics Title Card",
+      "oldFolderName": "Pre_comp_4_1768822307191",
+      "newFolderName": "Colorful-Header-Graphics-Title-Card_1768822307191",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Titles-and-Openers",
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Titles-and-Openers",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "Colorful graphics and shapes on dark background with bright green center element and gradient right side",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/3_1768765038862",
+      "newPath": "Titles-and-Openers/Dark-Card-With-White-Text-Lines-Box-Layout_1768765038862",
+      "oldDisplayName": "3_1768765038862",
+      "newDisplayName": "Dark Card With White Text Lines Box Layout",
+      "oldFolderName": "3_1768765038862",
+      "newFolderName": "Dark-Card-With-White-Text-Lines-Box-Layout_1768765038862",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Titles-and-Openers",
+        "Infographics"
+      ],
+      "primaryCategory": "Titles-and-Openers",
+      "confidence": 0.9,
+      "needsReview": false,
+      "reason": "White text on dark rounded rectangle card with multiple lines of text content, card-style title or information overlay",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/Pre_comp_2_1768560949632",
+      "newPath": "Titles-and-Openers/Dark-Frame-Centered-White-Title-Card_1768560949632",
+      "oldDisplayName": "Pre_comp_2_1768560949632",
+      "newDisplayName": "Dark Frame Centered White Title Card",
+      "oldFolderName": "Pre_comp_2_1768560949632",
+      "newFolderName": "Dark-Frame-Centered-White-Title-Card_1768560949632",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Titles-and-Openers",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "Dark gray frame with bright white centered element, appears to be centered title text",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/text_1768502214785",
+      "newPath": "Titles-and-Openers/Dark-Text-Element-with-Center-Content_1768502214785",
+      "oldDisplayName": "text_1768502214785",
+      "newDisplayName": "Dark Text Element with Center Content",
+      "oldFolderName": "text_1768502214785",
+      "newFolderName": "Dark-Text-Element-with-Center-Content_1768502214785",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Titles-and-Openers",
+        "Lower-Thirds"
+      ],
+      "primaryCategory": "Titles-and-Openers",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Small dark frame with dense text-like high contrast horizontal patterns in center, dark teal tones",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/6_1768644900663",
+      "newPath": "Titles-and-Openers/Faint-Row-Elements-on-Dark_1768644900663",
+      "oldDisplayName": "6_1768644900663",
+      "newDisplayName": "Faint Row Elements on Dark",
+      "oldFolderName": "6_1768644900663",
+      "newFolderName": "Faint-Row-Elements-on-Dark_1768644900663",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Titles-and-Openers",
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Titles-and-Openers",
+      "confidence": 0.65,
+      "needsReview": false,
+      "reason": "text content detected → Titles & Openers",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/12_1768645017709",
+      "newPath": "Titles-and-Openers/Light-Frame-with-Text-Placeholder-Bars_1768645017709",
+      "oldDisplayName": "12_1768645017709",
+      "newDisplayName": "Light Frame with Text Placeholder Bars",
+      "oldFolderName": "12_1768645017709",
+      "newFolderName": "Light-Frame-with-Text-Placeholder-Bars_1768645017709",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Titles-and-Openers",
+        "Backgrounds"
+      ],
+      "primaryCategory": "Titles-and-Openers",
+      "confidence": 0.75,
+      "needsReview": false,
+      "reason": "Bright white/light blue background with two horizontal darker bands across the middle, suggesting text placeholder bars for titles",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/27_1768644248245",
+      "newPath": "Titles-and-Openers/Magenta-Decorative-Badge-on-White_1768644248245",
+      "oldDisplayName": "27_1768644248245",
+      "newDisplayName": "Magenta Decorative Badge on White",
+      "oldFolderName": "27_1768644248245",
+      "newFolderName": "Magenta-Decorative-Badge-on-White_1768644248245",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Titles-and-Openers",
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Titles-and-Openers",
+      "confidence": 0.65,
+      "needsReview": false,
+      "reason": "text content detected → Titles & Openers",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/text_1768505305891",
+      "newPath": "Titles-and-Openers/Minimal-Purple-Text-on-Black-Background_1768505305891",
+      "oldDisplayName": "text_1768505305891",
+      "newDisplayName": "Minimal Purple Text on Black Background",
+      "oldFolderName": "text_1768505305891",
+      "newFolderName": "Minimal-Purple-Text-on-Black-Background_1768505305891",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Titles-and-Openers",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Almost entirely black frame with a single small purple-white element at center, very sparse",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/4_1768755076440",
+      "newPath": "Titles-and-Openers/Multi-Line-Text-Layout-on-Dark_1768755076440",
+      "oldDisplayName": "4_1768755076440",
+      "newDisplayName": "Multi-Line Text Layout on Dark",
+      "oldFolderName": "4_1768755076440",
+      "newFolderName": "Multi-Line-Text-Layout-on-Dark_1768755076440",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Titles-and-Openers",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Dark background with multiple horizontal bands of varying thickness suggesting text lines, has structured layout with wide and narrow bands",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/1_1768559590327",
+      "newPath": "Titles-and-Openers/Purple-Gradient-Background-With-Centered-White-Text_1768559590327",
+      "oldDisplayName": "1_1768559590327",
+      "newDisplayName": "Purple Gradient Background With Centered White Text",
+      "oldFolderName": "1_1768559590327",
+      "newFolderName": "Purple-Gradient-Background-With-Centered-White-Text_1768559590327",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Titles-and-Openers",
+        "Backgrounds"
+      ],
+      "primaryCategory": "Titles-and-Openers",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Dark purple gradient background with a horizontal bright band across the middle and text-like characters in the illuminated zone",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/4_1768646083594",
+      "newPath": "Titles-and-Openers/Tall-Vertical-Bar-Element-on-Dark_1768646083594",
+      "oldDisplayName": "4_1768646083594",
+      "newDisplayName": "Tall Vertical Bar Element on Dark",
+      "oldFolderName": "4_1768646083594",
+      "newFolderName": "Tall-Vertical-Bar-Element-on-Dark_1768646083594",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Titles-and-Openers",
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Titles-and-Openers",
+      "confidence": 0.65,
+      "needsReview": false,
+      "reason": "text content detected → Titles & Openers",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/_30_1768564014411",
+      "newPath": "Titles-and-Openers/Teal-Text-Box-With-Placeholder-Lines-Centered_1768564014411",
+      "oldDisplayName": "_30_1768564014411",
+      "newDisplayName": "Teal Text Box With Placeholder Lines Centered",
+      "oldFolderName": "_30_1768564014411",
+      "newFolderName": "Teal-Text-Box-With-Placeholder-Lines-Centered_1768564014411",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Titles-and-Openers",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Dark background with a centered rectangular text box area containing rows of placeholder dots or text lines in teal",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/24_1768755719238",
+      "newPath": "Titles-and-Openers/Text-Lines-and-Bars-on-Dark_1768755719238",
+      "oldDisplayName": "24_1768755719238",
+      "newDisplayName": "Text Lines and Bars on Dark",
+      "oldFolderName": "24_1768755719238",
+      "newFolderName": "Text-Lines-and-Bars-on-Dark_1768755719238",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Titles-and-Openers",
+        "Lower-Thirds"
+      ],
+      "primaryCategory": "Titles-and-Openers",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Dark background with multiple bright text/shape elements at different horizontal positions, appears to be a title or text composition with stacked lines",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/13_1768646229951",
+      "newPath": "Titles-and-Openers/Warm-Yellow-Text-Frame-with-Decorative-Border_1768646229951",
+      "oldDisplayName": "13_1768646229951",
+      "newDisplayName": "Warm Yellow Text Frame with Decorative Border",
+      "oldFolderName": "13_1768646229951",
+      "newFolderName": "Warm-Yellow-Text-Frame-with-Decorative-Border_1768646229951",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Titles-and-Openers",
+        "Backgrounds"
+      ],
+      "primaryCategory": "Titles-and-Openers",
+      "confidence": 0.75,
+      "needsReview": false,
+      "reason": "Warm yellow/cream background with visible text frame or decorative border pattern in the center, looks like a title card layout",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/1_1768821523412",
+      "newPath": "Titles-and-Openers/White-Bold-Text-Centered-on-Black-Slide-In_1768821523412",
+      "oldDisplayName": "1_1768821523412",
+      "newDisplayName": "White Bold Text Centered on Black Slide In",
+      "oldFolderName": "1_1768821523412",
+      "newFolderName": "White-Bold-Text-Centered-on-Black-Slide-In_1768821523412",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Titles-and-Openers",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Near-black frame with a bright white text shape in the exact center appearing to slide or fade in",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/1_1768503481030",
+      "newPath": "Titles-and-Openers/White-Centered-Text-Fade-In-on-Black_1768503481030",
+      "oldDisplayName": "1_1768503481030",
+      "newDisplayName": "White Centered Text Fade In on Black",
+      "oldFolderName": "1_1768503481030",
+      "newFolderName": "White-Centered-Text-Fade-In-on-Black_1768503481030",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Titles-and-Openers",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "Very dark frame with small white text-like shapes centered horizontally, tiny text or logo mark in the middle of black background",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/3_1768559817777",
+      "newPath": "Titles-and-Openers/White-Centered-Text-With-Horizontal-Lines-Frame_1768559817777",
+      "oldDisplayName": "3_1768559817777",
+      "newDisplayName": "White Centered Text With Horizontal Lines Frame",
+      "oldFolderName": "3_1768559817777",
+      "newFolderName": "White-Centered-Text-With-Horizontal-Lines-Frame_1768559817777",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Titles-and-Openers",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Dark background with two horizontal ruled lines and white text centered between them, classic title reveal with decorative lines",
+      "metadata": {}
+    },
+    {
+      "oldPath": "John Ventura/A6_1768500006367",
+      "newPath": "Titles-and-Openers/White-Frame-Title-With-Top-Logo-And-Bottom-Accent_1768500006367",
+      "oldDisplayName": "A6_1768500006367",
+      "newDisplayName": "White Frame Title With Top Logo And Bottom Accent",
+      "oldFolderName": "A6_1768500006367",
+      "newFolderName": "White-Frame-Title-With-Top-Logo-And-Bottom-Accent_1768500006367",
+      "oldCategory": "John Ventura",
+      "categories": [
+        "Titles-and-Openers",
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Titles-and-Openers",
+      "confidence": 0.6,
+      "needsReview": false,
+      "reason": "White background with small text/logo at top left and a dark bar/shape element in mid-frame",
+      "metadata": {}
+    },
+    {
+      "oldPath": "John Ventura/A6_1768500269619",
+      "newPath": "Titles-and-Openers/White-Frame-Title-With-Top-Logo-And-Bottom-Accent_1768500269619",
+      "oldDisplayName": "A6_1768500269619",
+      "newDisplayName": "White Frame Title With Top Logo And Bottom Accent",
+      "oldFolderName": "A6_1768500269619",
+      "newFolderName": "White-Frame-Title-With-Top-Logo-And-Bottom-Accent_1768500269619",
+      "oldCategory": "John Ventura",
+      "categories": [
+        "Titles-and-Openers",
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Titles-and-Openers",
+      "confidence": 0.6,
+      "needsReview": false,
+      "reason": "Duplicate of A6_1768500006367 -- white background with text/logo at top left and dark bar in mid-frame",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Dominate Media/4_1768559865016",
+      "newPath": "Titles-and-Openers/White-Text-Inside-Dark-Framed-Border-Box_1768559865016",
+      "oldDisplayName": "4_1768559865016",
+      "newDisplayName": "White Text Inside Dark Framed Border Box",
+      "oldFolderName": "4_1768559865016",
+      "newFolderName": "White-Text-Inside-Dark-Framed-Border-Box_1768559865016",
+      "oldCategory": "Dominate Media",
+      "categories": [
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Titles-and-Openers",
+      "confidence": 0.8,
+      "needsReview": false,
+      "reason": "Dark background with a rectangular frame border drawn in white, containing multiline white text centered inside the frame",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/14_1768643920849",
+      "newPath": "Titles-and-Openers/White-Text-Lines-on-Dark-Centered-Title_1768643920849",
+      "oldDisplayName": "14_1768643920849",
+      "newDisplayName": "White Text Lines on Dark Centered Title",
+      "oldFolderName": "14_1768643920849",
+      "newFolderName": "White-Text-Lines-on-Dark-Centered-Title_1768643920849",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Titles-and-Openers"
+      ],
+      "primaryCategory": "Titles-and-Openers",
+      "confidence": 0.85,
+      "needsReview": false,
+      "reason": "Dark background with bright text-like shapes concentrated in the upper-center area, multiple lines of varying length suggesting a multi-line title composition",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/_9_1768563392116",
+      "newPath": "Titles-and-Openers/Yellow-Gold-Icon-Cluster-Or-Badges-Centered_1768563392116",
+      "oldDisplayName": "_9_1768563392116",
+      "newDisplayName": "Yellow Gold Icon Cluster Or Badges Centered",
+      "oldFolderName": "_9_1768563392116",
+      "newFolderName": "Yellow-Gold-Icon-Cluster-Or-Badges-Centered_1768563392116",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Titles-and-Openers",
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Titles-and-Openers",
+      "confidence": 0.65,
+      "needsReview": false,
+      "reason": "text content detected → Titles & Openers",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/_31_1768564136921",
+      "newPath": "Transitions/Faint-Small-Mark-Centered-On-Dark_1768564136921",
+      "oldDisplayName": "_31_1768564136921",
+      "newDisplayName": "Faint Small Mark Centered On Dark",
+      "oldFolderName": "_31_1768564136921",
+      "newFolderName": "Faint-Small-Mark-Centered-On-Dark_1768564136921",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Transitions",
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Transitions",
+      "confidence": 0.55,
+      "needsReview": false,
+      "reason": "tiny element + short → Transition",
+      "metadata": {}
+    },
+    {
+      "oldPath": "John Ventura/A4_1768499935304",
+      "newPath": "Transitions/Green-Accent-Small-Centered-Logo_1768499935304",
+      "oldDisplayName": "A4_1768499935304",
+      "newDisplayName": "Green Accent Small Centered Logo",
+      "oldFolderName": "A4_1768499935304",
+      "newFolderName": "Green-Accent-Small-Centered-Logo_1768499935304",
+      "oldCategory": "John Ventura",
+      "categories": [
+        "Transitions",
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Transitions",
+      "confidence": 0.55,
+      "needsReview": false,
+      "reason": "tiny element + short → Transition",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/1_1768561862505",
+      "newPath": "Transitions/Single-Tiny-Light-Spot-On-Dark_1768561862505",
+      "oldDisplayName": "1_1768561862505",
+      "newDisplayName": "Single Tiny Light Spot On Dark",
+      "oldFolderName": "1_1768561862505",
+      "newFolderName": "Single-Tiny-Light-Spot-On-Dark_1768561862505",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Transitions",
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Transitions",
+      "confidence": 0.55,
+      "needsReview": false,
+      "reason": "tiny element + short → Transition",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/_25_1768563932661",
+      "newPath": "Transitions/Single-Tiny-Teal-Dot-On-Dark_1768563932661",
+      "oldDisplayName": "_25_1768563932661",
+      "newDisplayName": "Single Tiny Teal Dot On Dark",
+      "oldFolderName": "_25_1768563932661",
+      "newFolderName": "Single-Tiny-Teal-Dot-On-Dark_1768563932661",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Transitions",
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Transitions",
+      "confidence": 0.55,
+      "needsReview": false,
+      "reason": "tiny element + short → Transition",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/1_1768756033786",
+      "newPath": "Transitions/Tiny-Blue-Mark-Near-Bottom-On-White_1768756033786",
+      "oldDisplayName": "1_1768756033786",
+      "newDisplayName": "Tiny Blue Mark Near Bottom On White",
+      "oldFolderName": "1_1768756033786",
+      "newFolderName": "Tiny-Blue-Mark-Near-Bottom-On-White_1768756033786",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Transitions",
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Transitions",
+      "confidence": 0.55,
+      "needsReview": false,
+      "reason": "tiny element + short → Transition",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/_10_1768563481972",
+      "newPath": "Transitions/Tiny-Green-Dot-Centered-On-Dark_1768563481972",
+      "oldDisplayName": "_10_1768563481972",
+      "newDisplayName": "Tiny Green Dot Centered On Dark",
+      "oldFolderName": "_10_1768563481972",
+      "newFolderName": "Tiny-Green-Dot-Centered-On-Dark_1768563481972",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Transitions",
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Transitions",
+      "confidence": 0.55,
+      "needsReview": false,
+      "reason": "tiny element + short → Transition",
+      "metadata": {}
+    },
+    {
+      "oldPath": "John Ventura/C6_1768500178157",
+      "newPath": "Transitions/Tiny-Yellow-Green-Dot-Centered_1768500178157",
+      "oldDisplayName": "C6_1768500178157",
+      "newDisplayName": "Tiny Yellow Green Dot Centered",
+      "oldFolderName": "C6_1768500178157",
+      "newFolderName": "Tiny-Yellow-Green-Dot-Centered_1768500178157",
+      "oldCategory": "John Ventura",
+      "categories": [
+        "Transitions",
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Transitions",
+      "confidence": 0.55,
+      "needsReview": false,
+      "reason": "tiny element + short → Transition",
+      "metadata": {}
+    },
+    {
+      "oldPath": "Shaz/17_1768645297631",
+      "newPath": "Icons-and-Shapes/Missing-Thumbnail_1768645297631",
+      "oldDisplayName": "17_1768645297631",
+      "newDisplayName": "Small Glowing Element on Black",
+      "oldFolderName": "17_1768645297631",
+      "newFolderName": "Missing-Thumbnail_1768645297631",
+      "oldCategory": "Shaz",
+      "categories": [
+        "Icons-and-Shapes"
+      ],
+      "primaryCategory": "Icons-and-Shapes",
+      "confidence": 0.7,
+      "needsReview": false,
+      "reason": "RECOVERED: Originally flagged as empty/missing-thumbnail but files rescued. Small glowing element on black background — Icons & Shapes.",
+      "metadata": {}
+    }
+  ],
+  "summary": {
+    "total": 248,
+    "autoClassified": 248,
+    "needsReview": 0,
+    "byCategory": {
+      "3D-and-Depth": 5,
+      "Backgrounds": 36,
+      "Call-to-Actions": 4,
+      "Callouts": 2,
+      "Icons-and-Shapes": 34,
+      "Infographics": 4,
+      "Lower-Thirds": 5,
+      "Overlays-and-FX": 8,
+      "Pre-comps": 99,
+      "Process-and-Steps": 20,
+      "Titles-and-Openers": 24,
+      "Transitions": 7
+    },
+    "autoPct": 100,
+    "reviewPct": 0,
+    "generatedAt": "2026-05-06T16:31:10.293Z"
+  },
+  "generatedAt": "2026-05-06T07:05:48.000Z"
+}

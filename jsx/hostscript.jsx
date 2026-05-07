@@ -3393,3 +3393,99 @@ function getActiveCompInfo() {
         return 'null';
     }
 }
+
+// ── Local Library Mirror ──────────────────────────────────────────
+// ExtendScript helpers for the local mirror at ~/Blitzkrieg Library/.
+// Called by js/local-sync.js via safeEvalScript. All functions return
+// a JSON string: {ok:true} on success, {error:"message"} on failure.
+
+/** Create a directory and any missing parents. Returns JSON. */
+function blitzLocalMkdir(rawPath) {
+    try {
+        var f = new Folder(rawPath);
+        if (!f.exists) {
+            if (!f.create()) return JSON.stringify({ error: 'Cannot create: ' + rawPath });
+        }
+        return JSON.stringify({ ok: true });
+    } catch (e) { return JSON.stringify({ error: e + '' }); }
+}
+
+/** Write text content to a file with UTF-8 encoding. Returns JSON. */
+function blitzLocalWriteFile(rawPath, content) {
+    try {
+        var f = new File(rawPath);
+        f.encoding = 'UTF-8';
+        f.open('w');
+        if (!f.write(content)) {
+            f.close();
+            return JSON.stringify({ error: 'Write failed: ' + rawPath });
+        }
+        f.close();
+        return JSON.stringify({ ok: true });
+    } catch (e) { return JSON.stringify({ error: e + '' }); }
+}
+
+/** Write binary content (base64 encoded) to a file. Returns JSON. */
+function blitzLocalWriteBinary(rawPath, base64Content) {
+    try {
+        var f = new File(rawPath);
+        f.encoding = 'BINARY';
+        f.open('w');
+        // Decode base64 to raw bytes, write each char code
+        var raw = '';
+        try { raw = atob(base64Content); } catch (_) {}
+        if (!f.write(raw)) {
+            f.close();
+            return JSON.stringify({ error: 'Binary write failed: ' + rawPath });
+        }
+        f.close();
+        return JSON.stringify({ ok: true });
+    } catch (e) { return JSON.stringify({ error: e + '' }); }
+}
+
+/** Check if a file or folder exists at rawPath. Returns JSON {exists:bool}. */
+function blitzLocalExists(rawPath) {
+    try {
+        var f = new File(rawPath);
+        if (f.exists) return JSON.stringify({ exists: true });
+        var d = new Folder(rawPath);
+        return JSON.stringify({ exists: d.exists });
+    } catch (e) { return JSON.stringify({ exists: false }); }
+}
+
+/** Delete a folder and its contents recursively. Returns JSON. */
+function blitzLocalRemoveDir(rawPath) {
+    try {
+        var f = new Folder(rawPath);
+        if (f.exists) {
+            if (!f.remove()) return JSON.stringify({ error: 'Cannot delete: ' + rawPath });
+        }
+        return JSON.stringify({ ok: true });
+    } catch (e) { return JSON.stringify({ error: e + '' }); }
+}
+
+/** Get the user's home directory. Returns a path string. */
+function blitzGetHomeDir() {
+    try { return Folder.myDocuments.parent.fsName; } catch (_) { return '~'; }
+}
+
+function blitzPickFolder() {
+    try {
+        var f = Folder.selectDialog('Select Blitzkrieg Library folder');
+        if (f) return f.fsName;
+        return '';
+    } catch (_) { return 'Error: ' + _.message; }
+}
+
+function blitzLocalListAep(rawPath) {
+    try {
+        var f = new Folder(rawPath);
+        if (!f.exists) return JSON.stringify({ files: [] });
+        var aepFiles = [];
+        var all = f.getFiles('*.aep');
+        for (var i = 0; i < all.length; i++) {
+            if (all[i] instanceof File) aepFiles.push(all[i].name);
+        }
+        return JSON.stringify({ files: aepFiles });
+    } catch (_) { return JSON.stringify({ error: _.message }); }
+}

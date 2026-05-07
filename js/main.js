@@ -194,6 +194,36 @@
     // on every keystroke / modal open / keyboard shortcut; caching eliminates
     // that O(n) work from the hot path.
     var _cachedCategoryList = null;
+    // URL-safe → human-readable mapping for the 12 animation-type categories.
+    // Storage paths use dashes (e.g. "Titles-and-Openers") because Supabase
+    // treats & as a query delimiter and spaces break HTTP. The sidebar shows
+    // human-readable names ("Titles & Openers").
+    var CATEGORY_DISPLAY_NAMES = {
+        '3D-and-Depth': '3D & Depth',
+        'Backgrounds': 'Backgrounds',
+        'Call-to-Actions': 'Call to Actions',
+        'Callouts': 'Callouts',
+        'Icons-and-Shapes': 'Icons & Shapes',
+        'Infographics': 'Infographics',
+        'Lower-Thirds': 'Lower Thirds',
+        'Overlays-and-FX': 'Overlays & FX',
+        'Pre-comps': 'Pre-comps',
+        'Process-and-Steps': 'Process & Steps',
+        'Titles-and-Openers': 'Titles & Openers',
+        'Transitions': 'Transitions'
+    };
+    function categoryDisplayName(storageName) {
+        return CATEGORY_DISPLAY_NAMES[storageName] || storageName;
+    }
+
+    // Convert a user-provided category name to a URL-safe storage path name.
+    // Supabase Storage interprets & as query delimiter — replace with "and".
+    // Spaces are tolerated by storage but stripped for consistency with the
+    // 12 classification-plan categories (all use dashes).
+    function sanitizeCategoryName(name) {
+        return name.replace(/&/g, 'and').replace(/\s+/g, '-');
+    }
+
     function getUniqueCategories() {
         if (_cachedCategoryList) return _cachedCategoryList;
         var seen = {};
@@ -565,6 +595,118 @@
 
         // Apply initial grid size
         handleGridSizeChange(currentGridSize);
+    }
+
+    /**
+     * Initialize the local library sync UI: sync badge, path setting, buttons.
+     * Reads current localSync state and wires up click handlers.
+     */
+    function initSyncSettings() {
+        var badge = document.getElementById('sync-badge');
+        var settings = document.getElementById('sync-settings');
+        var pathInput = document.getElementById('sync-library-path');
+        var browseBtn = document.getElementById('sync-path-browse');
+        var saveBtn = document.getElementById('sync-path-save');
+        var forceBtn = document.getElementById('sync-force-all');
+
+        if (!badge || !settings) return;
+
+        // Show sync UI if localSync is available
+        if (window.localSync) {
+            var currentPath = window.localSync.getLibraryPath();
+            if (currentPath) {
+                badge.style.display = 'flex';
+                settings.style.display = 'block';
+                if (pathInput) pathInput.value = currentPath;
+                _updateSyncBadge();
+                // Show default path suggestion if not set
+                window.localSync.getDefaultPath().then(function(defPath) {
+                    if (!pathInput.value && defPath) {
+                        pathInput.placeholder = defPath;
+                    }
+                }).catch(function() {});
+            } else {
+                badge.style.display = 'flex';
+                badge.className = 'sync-badge sync-badge-none';
+                badge.title = 'Set a local library path to enable fast imports';
+                badge.innerHTML = '<svg class="sync-badge-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><span>Set library path</span>';
+                settings.style.display = 'block';
+                // Show default path suggestion
+                window.localSync.getDefaultPath().then(function(defPath) {
+                    if (defPath && pathInput) pathInput.placeholder = defPath;
+                }).catch(function() {});
+            }
+
+            // Badge click toggles settings visibility
+            badge.addEventListener('click', function() {
+                settings.style.display = settings.style.display === 'none' ? 'block' : 'none';
+            });
+
+            // Save path button
+            if (saveBtn) {
+                saveBtn.addEventListener('click', function() {
+                    var path = (pathInput && pathInput.value.trim()) || pathInput.placeholder;
+                    if (!path) { showToast('Enter a library path first', true); return; }
+                    window.localSync.setLibraryPath(path).then(function(savedPath) {
+                        showToast('Library path set: ' + savedPath);
+                        settings.style.display = 'none';
+                        _updateSyncBadge();
+                    }).catch(function(err) {
+                        showToast('Failed: ' + (err && err.message || err), true);
+                    });
+                });
+            }
+
+            // Browse button
+            if (browseBtn) {
+                browseBtn.addEventListener('click', function() {
+                    if (!window.__adobe_cep__) {
+                        showToast('Browse only available inside After Effects', true);
+                        return;
+                    }
+                    safeEvalScript('blitzPickFolder()', function(result) {
+                        if (result && result.indexOf && result.indexOf('Error') !== 0 && result.length > 0) {
+                            var picked = result;
+                            // Strip surrounding quotes if present
+                            if (picked.charAt(0) === '"' && picked.charAt(picked.length - 1) === '"') {
+                                picked = picked.substring(1, picked.length - 1);
+                            }
+                            if (pathInput) pathInput.value = picked;
+                        }
+                    });
+                });
+            }
+
+            // Force sync all button
+            if (forceBtn) {
+                forceBtn.addEventListener('click', function() {
+                    if (!window.localSync.getLibraryPath()) {
+                        showToast('Set a library path first', true);
+                        return;
+                    }
+                    var paths = [];
+                    for (var fsi = 0; fsi < allComps.length; fsi++) {
+                        if (allComps[fsi].storagePath) paths.push(allComps[fsi].storagePath);
+                    }
+                    if (paths.length === 0) { showToast('No templates to sync', true); return; }
+                    showToast('Starting full library sync...');
+                    forceBtn.disabled = true;
+                    forceBtn.textContent = 'Syncing...';
+                    window.localSync.syncAll(paths, function(progress) {
+                        if (progress.done >= progress.total) {
+                            forceBtn.disabled = false;
+                            forceBtn.textContent = 'Sync All';
+                            showToast('Library sync complete: ' + progress.done + ' templates');
+                            _updateSyncBadge();
+                        }
+                    }).catch(function(err) {
+                        forceBtn.disabled = false;
+                        forceBtn.textContent = 'Sync All';
+                        showToast('Sync failed: ' + (err && err.message || err), true);
+                    });
+                });
+            }
+        }
     }
 
     /* --------- Persistent Settings Storage --------- */
@@ -950,6 +1092,9 @@
         // Initialize sorting and grid size controls
         initSortAndGridControls();
 
+        // Initialize local library sync UI
+        initSyncSettings();
+
         // Auto-refresh library when panel gains focus (ensures categories stay in sync)
         // Debounced: 5-minute cooldown to avoid hammering Supabase on every AE focus switch
         var _lastFocusLoad = Date.now(); // Prevent immediate re-load after initial load
@@ -1236,21 +1381,22 @@
             // two parallel placeholder uploads back-to-back (upsert makes storage
             // idempotent but the analytics trackAccessChange still fires twice).
             if (createCategory._running) return;
-            var name = input.value.trim();
-            if (!name) {
+            var rawName = input.value.trim();
+            if (!rawName) {
                 showToast('Category name cannot be empty.', true);
                 return;
             }
-            var nameErr = validateName(name);
+            var nameErr = validateName(rawName);
             if (nameErr) {
                 showToast(nameErr, true);
                 return;
             }
+            var name = sanitizeCategoryName(rawName);
             // Check if category already exists — do this BEFORE setting
             // _running so a duplicate name doesn't soft-lock the form.
             var existing = allComps.some(function(c) { return c.category.toLowerCase() === name.toLowerCase(); });
             if (existing) {
-                showToast('Category "' + name + '" already exists.', true);
+                showToast('Category "' + rawName + '" already exists.', true);
                 return;
             }
 
@@ -1262,7 +1408,7 @@
 
             createCategory._running = true;
             if (saveBtn) saveBtn.disabled = true;
-            showToast('Creating category "' + name + '"...');
+            showToast('Creating category "' + rawName + '"...');
             // Upload a placeholder file to create the folder in Supabase storage
             var placeholder = new Blob([''], { type: 'text/plain' });
             function _createDone() {
@@ -1334,6 +1480,27 @@
 
             // Update admin bar with missing thumbnail count
             updateAdminBarLabel();
+
+            // Background sync: queue local mirror downloads for any templates
+            // not yet cached locally. Runs after grid render so UI stays responsive.
+            if (window.localSync && window.localSync.getLibraryPath() && allComps.length > 0) {
+                setTimeout(function () {
+                    var paths = [];
+                    for (var bsi = 0; bsi < allComps.length; bsi++) {
+                        if (allComps[bsi].storagePath) paths.push(allComps[bsi].storagePath);
+                    }
+                    if (paths.length > 0) {
+                        window.localSync.syncAll(paths).then(function (result) {
+                            if (result && result.synced > 0) {
+                                debugLog('Background sync: ' + result.synced + ' synced' + (result.failed ? ', ' + result.failed + ' failed' : ''));
+                                _updateSyncBadge();
+                            }
+                        }).catch(function (err) {
+                            debugLog('Background sync error: ' + (err && err.message || err), 'warn');
+                        });
+                    }
+                }, 3000);
+            }
 
             if (pendingLibraryReload) {
                 pendingLibraryReload = false;
@@ -1510,7 +1677,9 @@
             _categoryCounts[_ccCat] = (_categoryCounts[_ccCat] || 0) + 1;
         }
         categoryFiltersContainer.innerHTML = categories.map(function(cat) {
+            var displayLabel = categoryDisplayName(cat);
             var safeCat = escapeHTML(cat);
+            var safeLabel = escapeHTML(displayLabel);
             var count = _categoryCounts[cat] || 0;
             var isActive = cat === activeCategory;
             var renameBtnHtml = sidebarSignedIn ? (
@@ -1530,7 +1699,7 @@
                 '<svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
                     '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>' +
                 '</svg>' +
-                '<span class="nav-label">' + safeCat + '</span>' +
+                '<span class="nav-label">' + safeLabel + '</span>' +
                 '<span class="nav-count">' + count + '</span>' +
                 actionBtns +
             '</div>';
@@ -1849,11 +2018,49 @@
     }
 
     /**
+     * Update the local sync badge in the sidebar. Shows synced/total
+     * count and progress state. No-op if localSync not configured.
+     */
+    function _updateSyncBadge() {
+        var badge = document.getElementById('sync-badge');
+        if (!badge) return;
+        if (!window.localSync || !window.localSync.getLibraryPath()) {
+            badge.style.display = 'none';
+            return;
+        }
+        var state = window.localSync.getSyncState();
+        var synced = (state && typeof state.synced === 'number') ? state.synced : 0;
+        var cloudComps = allComps.filter(function(c) { return !!c.storagePath; });
+        var total = cloudComps.length;
+        var displaySynced = Math.min(synced, total); // clamp — cloud deletions can make synced > total
+
+        badge.style.display = 'flex';
+        if (total === 0) {
+            badge.className = 'sync-badge sync-badge-none';
+            badge.title = 'No templates to sync';
+            badge.innerHTML = '<svg class="sync-badge-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><span>No templates</span>';
+        } else if (displaySynced >= total) {
+            badge.className = 'sync-badge sync-badge-complete';
+            badge.title = 'Library fully synced — ' + displaySynced + '/' + total;
+            badge.innerHTML = '<svg class="sync-badge-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg><span>' + displaySynced + '/' + total + ' synced</span>';
+        } else if (displaySynced > 0) {
+            badge.className = 'sync-badge sync-badge-partial';
+            badge.title = 'Syncing — ' + displaySynced + '/' + total + ' cached locally. Click to sync all.';
+            badge.innerHTML = '<svg class="sync-badge-icon sync-spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg><span>' + displaySynced + '/' + total + ' synced</span>';
+        } else {
+            badge.className = 'sync-badge sync-badge-none';
+            badge.title = 'Nothing synced yet. Click to start.';
+            badge.innerHTML = '<svg class="sync-badge-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><span>0/' + total + ' synced</span>';
+        }
+    }
+
+    /**
      * Build HTML string for a single comp card (extracted for reuse in pagination)
      */
     function buildCompCardHtml(comp) {
         var safeUniqueId = escapeHTML(comp.uniqueId);
         var safeCategory = escapeHTML(comp.category);
+        var safeCategoryDisplay = escapeHTML(categoryDisplayName(comp.category));
         var safeAepPath = escapeHTML(comp.aepPath || '');
         var safeStoragePath = escapeHTML(comp.storagePath || '');
         var safeName = escapeHTML(comp.name);
@@ -1926,7 +2133,7 @@
 
         var bulkCheckbox = isAdmin ? '<div class="bulk-select-checkbox" data-unique-id="' + safeUniqueId + '"></div>' : '';
         var metaParts = [];
-        if (comp.category) metaParts.push('<span class="item-category" title="' + safeCategory + '">' + safeCategory + '</span>');
+        if (comp.category) metaParts.push('<span class="item-category" title="' + safeCategoryDisplay + '">' + safeCategoryDisplay + '</span>');
         if (comp.duration) {
             var durationLabel = comp.duration >= 60
                 ? Math.floor(comp.duration / 60) + 'm ' + Math.round(comp.duration % 60) + 's'
@@ -1956,10 +2163,12 @@
 
     function buildSearchText(comp) {
         if (comp._searchText) return comp._searchText;
+        // Strip timestamps from folderName so raw digits don't pollute search
+        var cleanFolder = (comp.folderName || '').replace(/[_-]\d{10,}/g, '').replace(/[_-]+/g, ' ').replace(/_\d{1,3}$/, '');
         var parts = [
             comp.name || '',
             comp.category || '',
-            comp.folderName || '',
+            cleanFolder,
             comp.uniqueId || ''
         ];
         if (comp.duration) parts.push(Math.round(comp.duration) + 's');
@@ -2057,7 +2266,7 @@
             var matchesCategory = (activeCategory === 'All') ||
                                   (activeCategory === 'Favorites' && isFavorite(comp.uniqueId)) ||
                                   (activeCategory === 'Recent' && isRecent(comp.uniqueId)) ||
-                                  (comp.category === activeCategory);
+                                  (comp.categories && comp.categories.indexOf(activeCategory) !== -1);
             // Filter by search — indexOf instead of ES6 .includes() for CEP 8/9 compat
             var matchesSearch = !searchTerm || buildSearchText(comp).indexOf(searchTerm) !== -1;
             return matchesCategory && matchesSearch;
@@ -2625,8 +2834,16 @@
     /* --------- add/rename/delete/import flows --------- */
     function addSelectedComp() {
         if (!ensureCepBridgeForAction('Adding comps')) return;
+
+        // Require authentication — uploads and DB inserts need a valid user session
+        var user = window.blitzkriegAuth && window.blitzkriegAuth.getUser && window.blitzkriegAuth.getUser();
+        if (!user) {
+            showToast('Please log in before submitting. Your session may have expired.', true);
+            return;
+        }
+
         var categories = getUniqueCategories();
-        existingCategorySelect.innerHTML = categories.map(function (cat) { return '<option value="' + escapeHTML(cat) + '">' + escapeHTML(cat) + '</option>'; }).join('');
+        existingCategorySelect.innerHTML = categories.map(function (cat) { return '<option value="' + escapeHTML(cat) + '">' + escapeHTML(categoryDisplayName(cat)) + '</option>'; }).join('');
         existingCategorySelect.disabled = categories.length === 0;
         if (categories.length === 0) { existingCategorySelect.innerHTML = '<option value="">No categories yet</option>'; }
         newCategoryInput.value = '';
@@ -2636,23 +2853,32 @@
             var addSignedIn = window.blitzkriegAuth && window.blitzkriegAuth.getUser && !!window.blitzkriegAuth.getUser();
             newCatGroup.style.display = addSignedIn ? '' : 'none';
         }
+
+        // Update confirm button to match role: admin = "Add Comp", everyone else = "Submit for Review"
+        var isAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
+        confirmAddBtn.textContent = isAdmin ? 'Add Comp' : 'Submit for Review';
+
         addCompModal.style.display = 'flex';
     }
 
     function executeAddComp() {
         var newCatName = newCategoryInput.value.trim();
         var existingCatName = existingCategorySelect.value;
-        var categoryName = newCatName || existingCatName;
+        var rawCategory = newCatName || existingCatName;
 
-        if (!categoryName) {
+        if (!rawCategory) {
             showToast('Please select or create a category.', true);
             return;
         }
-        var nameErr = validateName(categoryName);
+        var nameErr = validateName(rawCategory);
         if (nameErr) {
             showToast(nameErr, true);
             return;
         }
+
+        // Store under URL-safe name so new categories follow the same convention
+        // as the 12 classification-plan categories (no &, dashes for spaces).
+        var categoryName = sanitizeCategoryName(rawCategory);
 
         addCompModal.style.display = 'none';
         setStashInProgress(true);
@@ -2682,6 +2908,7 @@
                     }
 
                     var tempPath = parsed.tempPath;
+                    showToast('Exporting composition...');
                     var files = await readTempFiles(tempPath, categoryName);
 
                     {
@@ -2702,6 +2929,7 @@
                         var sb = window.blitzkriegSupabase;
 
                         // Upload AEP to pending path
+                        showToast('Uploading composition file...');
                         var aepUpload = await sb.storage.from('blitzkrieg')
                             .upload(pendingBasePath + '/' + files.folderName + '.aep', files.aepBlob, {
                                 contentType: 'application/octet-stream',
@@ -2745,6 +2973,7 @@
 
                         // Upload metadata
                         if (files.metadata) {
+                            showToast('Uploading metadata...');
                             files.metadata.bundleAssetCount = files.bundleFiles ? files.bundleFiles.length : 0;
                             var metaBlob = new Blob([JSON.stringify(files.metadata)], { type: 'application/json' });
                             await sb.storage.from('blitzkrieg')
@@ -2773,7 +3002,14 @@
                         userId = liveUser.id;
 
                         // Create submission record
+                        showToast('Saving submission...');
                         var submissionName = (files.metadata && (files.metadata.displayName || files.metadata.name)) || files.folderName;
+                        // Sanitize: strip #/@ prefix, trim bare numbers
+                        if (submissionName && /^[#@]/.test(submissionName)) submissionName = submissionName.replace(/^[#@]+/, '').trim();
+                        if (submissionName && /^\d+$/.test(submissionName.trim()) && files.metadata && files.metadata.displayName) {
+                            // If the metadata displayName is just a number, derive from folder name instead
+                            submissionName = files.folderName.replace(/[_-]\d{10,}/g, '').replace(/[_-]+$/, '').replace(/_\d{1,3}$/, '').replace(/[_-]/g, ' ').trim() || submissionName;
+                        }
                         if (submissionName && submissionName.length > 255) submissionName = submissionName.substring(0, 255);
                         var insertResult = await sb.from('blitzkrieg_template_submissions').insert({
                             user_id: userId,
@@ -3319,6 +3555,98 @@
     }
 
     /**
+     * Import from a local AEP file — no download needed.
+     * Shared by local-mirror fast path and sync-then-import flows.
+     */
+    function _doImportLocalAep(aepPath, uniqueId, _trackComp, storagePath) {
+        showSpinner();
+        setStashInProgress(true, 'import');
+        var safePath = escapeForExtendScript(aepPath);
+        var safeDisplayName = _trackComp ? escapeForExtendScript(_trackComp.name) : '';
+        safeEvalScript('importComp("' + safePath + '","' + safeDisplayName + '")', function(result) {
+            setStashInProgress(false);
+            hideSpinner();
+            if (result && result.indexOf('Success') === 0) {
+                showToast('Imported from local library!');
+                if (uniqueId) addToRecent(uniqueId);
+                if (window.blitzkriegAnalytics && _trackComp) {
+                    window.blitzkriegAnalytics.trackImport(_trackComp.name, _trackComp.category, storagePath);
+                }
+                if (window.blitzkriegTelemetry && _trackComp) {
+                    window.blitzkriegTelemetry.trackTemplateImport(_trackComp.name, _trackComp.category, storagePath, _trackComp);
+                }
+            } else {
+                showToast('Import failed: ' + (result || 'Unknown error'), true);
+            }
+        });
+    }
+
+    /**
+     * Cloud download + import — the original path. Downloads AEP + footage
+     * from Supabase to a temp directory, imports from there, cleans up.
+     */
+    function _doCloudImport(storagePath, uniqueId, _trackComp) {
+        showSpinner();
+        setStashInProgress(true, 'import');
+        showToast('Downloading template...');
+        debugLog('IMPORT: starting cloud import for ' + storagePath);
+
+        var importTempDir = null;
+        getTempDir().then(function(sysTempDir) {
+            debugLog('IMPORT: temp dir = ' + sysTempDir);
+            importTempDir = sysTempDir + '/blitzkrieg_import_' + Date.now() + '_' + Math.floor(Math.random() * 0x7fffffff).toString(36);
+            return window.cloudLibrary.downloadTemplate(storagePath);
+        }).then(function(downloaded) {
+            debugLog('IMPORT: downloaded ' + downloaded.fileName + ' (' + (downloaded.blob.size / 1024).toFixed(0) + 'KB, assets: ' + ((downloaded.extraFiles && downloaded.extraFiles.length) || 0) + ')');
+            return writeDownloadedTemplateBundle(downloaded, importTempDir).then(function(aepDiskPath) {
+                debugLog('IMPORT: written to disk, calling importComp...');
+                return new Promise(function(resolve, reject) {
+                    var safePath = escapeForExtendScript(aepDiskPath);
+                    var safeDisplayName = _trackComp ? escapeForExtendScript(_trackComp.name) : '';
+                    safeEvalScript('importComp("' + safePath + '","' + safeDisplayName + '")', function(result) {
+                        setTimeout(function() {
+                            safeEvalScript('cleanupTempStash("' + escapeForExtendScript(importTempDir) + '")', function(cleanResult) {
+                                if (cleanResult && cleanResult.indexOf('Error') === 0) {
+                                    debugLog('IMPORT: temp cleanup failed: ' + cleanResult, 'warn');
+                                }
+                            });
+                        }, 5000);
+
+                        if (result && result.indexOf('Success') === 0) {
+                            hideSpinner();
+                            showToast('Imported full bundle and opened in timeline!');
+                            if (uniqueId) addToRecent(uniqueId);
+                            if (window.blitzkriegAnalytics && _trackComp) {
+                                window.blitzkriegAnalytics.trackImport(_trackComp.name, _trackComp.category, storagePath);
+                            }
+                            if (window.blitzkriegTelemetry && _trackComp) {
+                                window.blitzkriegTelemetry.trackTemplateImport(_trackComp.name, _trackComp.category, storagePath, _trackComp);
+                            }
+                            resolve();
+                        } else {
+                            reject(new Error(result || 'Import failed'));
+                        }
+                    });
+                });
+            });
+        }).then(function() {
+            setStashInProgress(false);
+        }, function (err) {
+            setStashInProgress(false);
+            hideSpinner();
+            debugLog('IMPORT FAIL: ' + err.message, 'error');
+            showToast('Import failed: ' + err.message, true);
+            if (importTempDir) {
+                safeEvalScript('cleanupTempStash("' + escapeForExtendScript(importTempDir) + '")', function(cleanResult) {
+                    if (cleanResult && cleanResult.indexOf('Error') === 0) {
+                        debugLog('IMPORT: temp cleanup on error failed: ' + cleanResult, 'warn');
+                    }
+                });
+            }
+        });
+    }
+
+    /**
      * Import a composition and track it as recent
      * @param {string} aepPath - Path to the AEP file
      * @param {string} uniqueId - Optional unique ID for tracking
@@ -3337,58 +3665,46 @@
 
         // Cloud import path
         if (storagePath && window.cloudLibrary) {
-            showSpinner();
-            setStashInProgress(true, 'import'); // Block focus-triggered loadLibrary during import
-            showToast('Downloading template...');
-            debugLog('IMPORT: starting cloud import for ' + storagePath);
-
-            var importTempDir = null;
-            getTempDir().then(function(sysTempDir) {
-                debugLog('IMPORT: temp dir = ' + sysTempDir);
-                importTempDir = sysTempDir + '/blitzkrieg_import_' + Date.now() + '_' + Math.floor(Math.random() * 0x7fffffff).toString(36);
-                return window.cloudLibrary.downloadTemplate(storagePath);
-            }).then(function(downloaded) {
-                debugLog('IMPORT: downloaded ' + downloaded.fileName + ' (' + (downloaded.blob.size / 1024).toFixed(0) + 'KB, assets: ' + ((downloaded.extraFiles && downloaded.extraFiles.length) || 0) + ')');
-                return writeDownloadedTemplateBundle(downloaded, importTempDir).then(function(aepDiskPath) {
-                    debugLog('IMPORT: written to disk, calling importComp...');
-                    return new Promise(function(resolve, reject) {
-                        var safePath = escapeForExtendScript(aepDiskPath);
-                        var safeDisplayName = _trackComp ? escapeForExtendScript(_trackComp.name) : '';
-                        safeEvalScript('importComp("' + safePath + '","' + safeDisplayName + '")', function(result) {
-                            // Delay cleanup so AE's scheduleTask can finish opening the comp
-                            setTimeout(function() {
-                                try { safeEvalScript('cleanupTempStash("' + escapeForExtendScript(importTempDir) + '")'); } catch(e) {}
-                            }, 5000);
-
-                            if (result && result.indexOf('Success') === 0) {
-                                hideSpinner();
-                                showToast('Imported full bundle and opened in timeline!');
-                                if (uniqueId) addToRecent(uniqueId);
-                                if (window.blitzkriegAnalytics && _trackComp) {
-                                    window.blitzkriegAnalytics.trackImport(_trackComp.name, _trackComp.category, storagePath);
-                                }
-                                if (window.blitzkriegTelemetry && _trackComp) {
-                                    window.blitzkriegTelemetry.trackTemplateImport(_trackComp.name, _trackComp.category, storagePath, _trackComp);
-                                }
-                                resolve();
-                            } else {
-                                // hideSpinner called by outer error handler
-                                reject(new Error(result || 'Import failed'));
-                            }
-                        });
+            // Local mirror fast path — skip cloud download if already synced.
+            // Falls back to sync-then-import for unsynced templates, and to
+            // the original cloud-download path if localSync is unavailable.
+            if (window.localSync && window.localSync.getLibraryPath()) {
+                window.localSync.checkLocal(storagePath).then(function(info) {
+                    if (info.exists && info.complete && info.aepPath) {
+                        // Fast path: template already in local mirror
+                        debugLog('IMPORT: local fast path — ' + info.aepPath);
+                        _doImportLocalAep(info.aepPath, uniqueId, _trackComp, storagePath);
+                        return;
+                    }
+                    // Template not synced — sync to local mirror first, then import
+                    debugLog('IMPORT: syncing ' + storagePath + ' to local mirror');
+                    showSpinner();
+                    setStashInProgress(true, 'import');
+                    showToast('Syncing to library...');
+                    window.localSync.syncTemplate(storagePath).then(function(result) {
+                        if (result && result.localAepPath) {
+                            // _doImportLocalAep manages its own spinner + stashInProgress lifecycle
+                            _doImportLocalAep(result.localAepPath, uniqueId, _trackComp, storagePath);
+                        } else {
+                            throw new Error('AEP not found after sync');
+                        }
+                    }).then(null, function(err) {
+                        // Only reach here if syncTemplate failed or AEP not found.
+                        // _doImportLocalAep success path is handled by its internal callback.
+                        setStashInProgress(false);
+                        hideSpinner();
+                        debugLog('IMPORT FAIL (sync): ' + err.message, 'error');
+                        showToast('Import failed: ' + err.message, true);
                     });
+                }).catch(function() {
+                    // localSync failed — fall back to cloud download path
+                    _doCloudImport(storagePath, uniqueId, _trackComp);
                 });
-            }).then(function() {
-                setStashInProgress(false);
-            }, function (err) {
-                setStashInProgress(false);
-                hideSpinner();
-                debugLog('IMPORT FAIL: ' + err.message, 'error');
-                showToast('Import failed: ' + err.message, true);
-                if (importTempDir) {
-                    try { safeEvalScript('cleanupTempStash("' + escapeForExtendScript(importTempDir) + '")'); } catch(cleanErr) {}
-                }
-            });
+                return;
+            }
+
+            // No localSync available — traditional cloud download
+            _doCloudImport(storagePath, uniqueId, _trackComp);
             return;
         }
 
@@ -3472,17 +3788,19 @@
             return;
         }
 
+        var safeNewName = sanitizeCategoryName(newName);
+
         renameCategoryModal.style.display = 'none';
         showSpinner();
 
         // Cloud rename: move all files from old category folder to new
         if (window.cloudLibrary && window.cloudLibrary.renameCategory) {
-            window.cloudLibrary.renameCategory(info.category, newName).then(function() {
+            window.cloudLibrary.renameCategory(info.category, safeNewName).then(function() {
                 hideSpinner();
                 currentCategoryRenameInfo = null;
                 showToast('Category renamed successfully.');
                 if (activeCategory === info.category) {
-                    activeCategory = newName;
+                    activeCategory = safeNewName;
                 }
                 loadLibrary();
             }).catch(function(err) {
@@ -3536,7 +3854,7 @@
         var otherCategories = categories.filter(function(cat) { return cat !== categoryName; });
         if (transferToCategorySelect) {
             transferToCategorySelect.innerHTML = otherCategories.map(function(cat) {
-                return '<option value="' + escapeHTML(cat) + '">' + escapeHTML(cat) + '</option>';
+                return '<option value="' + escapeHTML(cat) + '">' + escapeHTML(categoryDisplayName(cat)) + '</option>';
             }).join('');
             if (otherCategories.length === 0) {
                 transferToCategorySelect.innerHTML = '<option value="">No other categories</option>';
@@ -3680,7 +3998,7 @@
 
         if (moveToCategorySelect) {
             moveToCategorySelect.innerHTML = otherCategories.map(function(cat) {
-                return '<option value="' + escapeHTML(cat) + '">' + escapeHTML(cat) + '</option>';
+                return '<option value="' + escapeHTML(cat) + '">' + escapeHTML(categoryDisplayName(cat)) + '</option>';
             }).join('');
             moveToCategorySelect.disabled = otherCategories.length === 0;
             if (otherCategories.length === 0) {
@@ -3704,18 +4022,21 @@
         var info = currentMoveCompInfo;
         if (!info) return;
 
-        var newCategoryName = moveToNewCategoryInput.value.trim();
+        var rawNewCategory = moveToNewCategoryInput.value.trim();
         var existingCategory = moveToCategorySelect.value;
-        var targetCategory = newCategoryName || existingCategory;
+
+        if (rawNewCategory) {
+            var moveNameErr = validateName(rawNewCategory);
+            if (moveNameErr) {
+                showToast(moveNameErr, true);
+                return;
+            }
+        }
+
+        var targetCategory = rawNewCategory ? sanitizeCategoryName(rawNewCategory) : existingCategory;
 
         if (!targetCategory) {
             showToast('Please select or create a category.', true);
-            return;
-        }
-
-        var moveNameErr = validateName(targetCategory);
-        if (moveNameErr) {
-            showToast(moveNameErr, true);
             return;
         }
 
@@ -3857,7 +4178,7 @@
         var categories = getUniqueCategories();
         if (bulkMoveCategorySelect) {
             bulkMoveCategorySelect.innerHTML = categories.map(function(cat) {
-                return '<option value="' + escapeHTML(cat) + '">' + escapeHTML(cat) + '</option>';
+                return '<option value="' + escapeHTML(cat) + '">' + escapeHTML(categoryDisplayName(cat)) + '</option>';
             }).join('');
         }
         if (bulkMoveModal) bulkMoveModal.style.display = 'flex';
@@ -4156,6 +4477,67 @@
     };
 
     /**
+     * Full submission health check — verifies auth, RLS, storage, and DB state.
+     * Call from console: window.__blitzDiagnoseSubmissions()
+     */
+    window.__blitzDiagnoseSubmissions = function() {
+        var sb = window.blitzkriegSupabase;
+        var report = {};
+        console.log('%c=== Submission Health Check ===', 'font-weight:bold;color:#4ADE80');
+
+        // 1. Auth check
+        var user = window.blitzkriegAuth && window.blitzkriegAuth.getUser && window.blitzkriegAuth.getUser();
+        var teamMember = window.blitzkriegAuth && window.blitzkriegAuth.getTeamMember && window.blitzkriegAuth.getTeamMember();
+        console.log('Auth user:', user ? user.id + ' (' + user.email + ')' : 'MISSING');
+        console.log('Team member:', teamMember ? (teamMember.full_name || teamMember.slack_email) + ' (access=' + teamMember.blitzkrieg_access + ', admin=' + teamMember.blitzkrieg_admin + ')' : 'MISSING');
+        report.auth = { userId: user && user.id, email: user && user.email, teamMemberId: teamMember && teamMember.id, hasAccess: !!(teamMember && teamMember.blitzkrieg_access), isAdmin: !!(teamMember && teamMember.blitzkrieg_admin) };
+
+        // 2. RPC check
+        return sb.rpc('debug_blitzkrieg_admin_status').then(function(rpcRes) {
+            console.log('RPC result:', rpcRes.data || rpcRes.error);
+            report.rpc = rpcRes.data || rpcRes.error;
+
+            // 3. Direct DB query (what the review grid actually queries)
+            return sb.from('blitzkrieg_template_submissions').select('*', { count: 'exact' }).order('created_at', { ascending: false }).limit(5);
+        }).then(function(dbRes) {
+            console.log('DB query:', dbRes.data ? dbRes.count + ' total, ' + dbRes.data.length + ' returned' : 'ERROR: ' + (dbRes.error && dbRes.error.message));
+            if (dbRes.data && dbRes.data.length > 0) {
+                console.table(dbRes.data.map(function(s) { return { id: s.id, template_name: s.template_name, status: s.status, user_id: s.user_id, created_at: s.created_at }; }));
+            }
+            report.dbCount = dbRes.count || 0;
+            report.dbError = dbRes.error ? dbRes.error.message : null;
+            report.dbSample = (dbRes.data || []).slice(0, 5);
+
+            // 4. Check pending/ storage (if any submissions exist)
+            if (dbRes.data && dbRes.data.length > 0) {
+                console.log('%cStorage check:', 'font-weight:bold');
+                dbRes.data.forEach(function(sub) {
+                    sb.storage.from('blitzkrieg').list(sub.storage_path || '').then(function(listRes) {
+                        console.log('  ' + sub.storage_path + ':', listRes.data ? listRes.data.length + ' files' : 'ERROR: ' + (listRes.error && listRes.error.message));
+                    }).catch(function(e) {
+                        console.warn('  ' + sub.storage_path + ': list failed — ' + e.message);
+                    });
+                });
+            }
+
+            // 5. Summary
+            console.log('%cSummary:', 'font-weight:bold');
+            console.log('  Auth: ' + (report.auth.userId ? 'OK' : 'MISSING'));
+            console.log('  Access: ' + (report.auth.hasAccess ? 'OK' : 'NO'));
+            console.log('  Admin: ' + (report.auth.isAdmin ? 'OK' : 'NO'));
+            console.log('  Submissions in DB: ' + report.dbCount);
+            console.log('  DB error: ' + (report.dbError || 'none'));
+            if (report.dbCount === 0) {
+                console.warn('⚠ ZERO submissions exist. Team members may be hitting errors during submit — check AE console logs.');
+            }
+
+            return report;
+        }).catch(function(err) {
+            console.error('Diagnose failed:', err.message);
+        });
+    };
+
+    /**
      * Load and render submissions grid with visual thumbnails + preview frames
      * @param {string} statusFilter - 'pending', 'approved', 'rejected', or 'pending_review' (admin view)
      */
@@ -4186,6 +4568,26 @@
             }
 
             var submissions = res.data || [];
+            // Sanitize template_name — old submissions can have raw AE comp names (#12, bare numbers)
+            submissions.forEach(function(sub) {
+                var originalName = sub.template_name || '';
+                var name = originalName;
+                if (/^[#@]/.test(name)) name = name.replace(/^[#@]+/, '').trim();
+                if (/^\d+$/.test(name.trim()) || name.trim().length < 2) {
+                    // Derive a fallback from storage_path folder name
+                    var parts = (sub.storage_path || '').split('/');
+                    var folderName = parts[parts.length - 1];
+                    if (folderName) {
+                        name = folderName.replace(/[_-]\d{10,}/g, '').replace(/[_-]+$/, '').replace(/_\d{1,3}$/, '').replace(/[_-]/g, ' ').trim();
+                    }
+                }
+                if (!name) name = 'Untitled';
+                if (name !== originalName) {
+                    debugLog('Sanitized submission name: "' + originalName + '" -> "' + name + '"');
+                }
+                sub.template_name = name;
+            });
+
             if (submissions.length === 0) {
                 hideSpinner();
                 var msg = isReviewMode ? 'No submissions pending review.' : 'No ' + statusFilter + ' submissions.';
@@ -6245,6 +6647,8 @@
 
     var _updateInProgress = false;
     var _updateWatchdog = null; // setTimeout handle — fires _failUpdate if the install hangs silently
+    var _consecutiveCheckFailures = 0; // track repeated version-check failures across 30-min intervals
+    var _pendingUpdateIntegrity = null; // SHA-256 integrity map for the update being installed
 
     // Persistent failed-version record. Survives panel reload so a release that
     // fails to install (e.g. UTF-8 mangle, network blocked, ZXP host bug) does
@@ -6432,6 +6836,38 @@
         }
     }
 
+    // Subtle non-blocking indicator when version checks keep failing.
+    // After 3+ consecutive failures a small warning dot appears on the
+    // settings icon so the editor knows something is wrong without a
+    // modal or banner taking over the UI. Clicking it runs a forced check.
+    function _updateCheckFailedVisible(visible) {
+        var dot = document.getElementById('blitz-check-fail-dot');
+        if (visible) {
+            if (!dot) {
+                var settingsBtn = document.getElementById('settings-btn');
+                if (!settingsBtn) return;
+                dot = document.createElement('span');
+                dot.id = 'blitz-check-fail-dot';
+                dot.title = 'Version check failing — click to retry';
+                dot.style.cssText = 'position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:#F87171;cursor:pointer;z-index:10';
+                dot.onclick = function(e) {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    _consecutiveCheckFailures = 0;
+                    _updateCheckFailedVisible(false);
+                    checkForUpdates(true);
+                };
+                // Settings button needs position:relative for the dot to anchor
+                var pos = window.getComputedStyle(settingsBtn).position;
+                if (pos === 'static') settingsBtn.style.position = 'relative';
+                settingsBtn.appendChild(dot);
+            }
+            dot.style.display = 'block';
+        } else if (dot) {
+            dot.style.display = 'none';
+        }
+    }
+
     function checkForUpdates(force) {
         if (_updateInProgress) return;
         // Don't pound user with retries during stash/generate — they're writing to disk too
@@ -6440,9 +6876,56 @@
             return;
         }
 
-        fetch(ghRawUrl('version.json'), { cache: 'no-store' }).then(function(res) {
-            if (!res.ok) throw new Error('HTTP ' + res.status);
-            return res.json();
+        var VERSION_CACHE_KEY = 'blitzkrieg_version_cache';
+        var MAX_CACHE_AGE_MS = 24 * 60 * 60 * 1000; // 24h fallback window
+
+        // Fetch with retry — a single network blip shouldn't force a 30-min wait.
+        // Exponential backoff with jitter, same pattern as fetchTextWithRetry.
+        function _fetchVersion(attempt, maxAttempts) {
+            attempt = attempt || 1;
+            maxAttempts = maxAttempts || 3;
+            return fetch(ghRawUrl('version.json'), { cache: 'no-store' }).then(function(res) {
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                return res.json();
+            }).catch(function(err) {
+                if (attempt < maxAttempts) {
+                    var delay = Math.min(10000, 500 * Math.pow(2, attempt)) + Math.random() * 500;
+                    debugLog('Version fetch attempt ' + attempt + ' failed, retrying in ' + Math.round(delay) + 'ms: ' + (err && err.message || err), 'warn');
+                    return new Promise(function(resolve) {
+                        setTimeout(function() { resolve(_fetchVersion(attempt + 1, maxAttempts)); }, delay);
+                    });
+                }
+                throw err;
+            });
+        }
+
+        _fetchVersion().then(function(manifest) {
+            // Cache the successful fetch so we have a fallback next time GitHub is unreachable
+            try {
+                manifest._cachedAt = Date.now();
+                localStorage.setItem(VERSION_CACHE_KEY, JSON.stringify(manifest));
+            } catch(e) { /* quota exceeded — non-critical */ }
+            _consecutiveCheckFailures = 0;
+            _updateCheckFailedVisible(false);
+            return Promise.resolve(manifest);
+        }).catch(function(err) {
+            _consecutiveCheckFailures = (_consecutiveCheckFailures || 0) + 1;
+            debugLog('Version check failed (' + _consecutiveCheckFailures + ' consecutive): ' + (err && err.message || err), 'warn');
+
+            // Fallback: use cached version manifest if GitHub is unreachable.
+            // This keeps the panel updating even during GitHub raw outages,
+            // as long as we got at least one successful fetch in the last 24h.
+            try {
+                var cached = JSON.parse(localStorage.getItem(VERSION_CACHE_KEY) || 'null');
+                if (cached && cached.version && cached._cachedAt && (Date.now() - cached._cachedAt < MAX_CACHE_AGE_MS)) {
+                    debugLog('Using cached version manifest (age ' + Math.round((Date.now() - cached._cachedAt) / 60000) + 'min)', 'info');
+                    if (_consecutiveCheckFailures >= 6) _updateCheckFailedVisible(true);
+                    return Promise.resolve(cached);
+                }
+            } catch(e) { /* corrupt cache */ }
+
+            if (_consecutiveCheckFailures >= 3) _updateCheckFailedVisible(true);
+            return Promise.reject(err);
         }).then(function(manifest) {
             var remoteVersion = manifest && manifest.version;
             if (!remoteVersion || !isNewerVersion(remoteVersion, BLITZKRIEG_LOCAL_VERSION)) return;
@@ -6473,6 +6956,7 @@
             }
 
             _updateInProgress = true;
+            _pendingUpdateIntegrity = manifest.integrity || null;
             showUpdatingBanner(remoteVersion);
             installUpdate(remoteVersion, files);
         }).catch(function(err) {
@@ -6496,6 +6980,27 @@
             return btoa(unescape(encodeURIComponent(str)));
         } catch (e) {
             return null;
+        }
+    }
+
+    // SHA-256 integrity verification for OTA downloads. Uses SubtleCrypto
+    // (available in Chromium 37+, CEP 8+ ships Chromium 57+). Returns a
+    // Promise that resolves to 'sha256-<hex>' or rejects if unavailable.
+    function computeSha256(text) {
+        try {
+            if (typeof crypto === 'undefined' || !crypto.subtle || !crypto.subtle.digest) {
+                return Promise.reject(new Error('SubtleCrypto unavailable'));
+            }
+            var encoded = unescape(encodeURIComponent(text));
+            var bytes = new Uint8Array(encoded.length);
+            for (var i = 0; i < encoded.length; i++) bytes[i] = encoded.charCodeAt(i);
+            return crypto.subtle.digest('SHA-256', bytes.buffer).then(function(hashBuffer) {
+                var hashArray = Array.prototype.slice.call(new Uint8Array(hashBuffer));
+                var hex = hashArray.map(function(b) { return ('00' + b.toString(16)).slice(-2); }).join('');
+                return 'sha256-' + hex;
+            });
+        } catch(e) {
+            return Promise.reject(e);
         }
     }
 
@@ -6724,6 +7229,22 @@
                 var stagingPath = stagingRoot + separator + fileName.replace(/\//g, separator);
                 var finalPath = rootPath + separator + fileName.replace(/\//g, separator);
                 fetchTextWithRetry(ghRawUrl(fileName), 3, 30000).then(function(text) {
+                    // SHA-256 integrity check — skip if manifest has no hashes
+                    // or if SubtleCrypto is unavailable (graceful degradation).
+                    var expectedHash = _pendingUpdateIntegrity && _pendingUpdateIntegrity[fileName];
+                    if (!expectedHash) return text;
+                    return computeSha256(text).then(function(actualHash) {
+                        if (actualHash !== expectedHash) {
+                            throw new Error('integrity mismatch for ' + fileName + ' (expected ' + expectedHash.substring(0,16) + '..., got ' + actualHash.substring(0,16) + '...)');
+                        }
+                        return text;
+                    }).catch(function(shaErr) {
+                        if (shaErr && shaErr.message && shaErr.message.indexOf('integrity mismatch') === 0) throw shaErr;
+                        // SubtleCrypto unavailable — skip, not fail
+                        debugLog('Integrity check skipped for ' + fileName + ': ' + (shaErr && shaErr.message || shaErr), 'warn');
+                        return text;
+                    });
+                }).then(function(text) {
                     return writeFileViaCepBase64(stagingPath, text);
                 }).then(function(err) {
                     if (err) {
@@ -6755,6 +7276,7 @@
                         }
                         // Wipe the persistent failure record so the post-reload
                         // panel boots with a clean slate.
+                        _pendingUpdateIntegrity = null;
                         clearFailedRecord();
                         // Order matters: setUpdateBannerStatus reads
                         // banner.dataset.version and re-arms the watchdog
@@ -6812,6 +7334,7 @@
 
     function _failUpdate(version, errMsg) {
         debugLog('Update v' + version + ' failed: ' + errMsg, 'error');
+        _pendingUpdateIntegrity = null;
         if (window.blitzkriegAnalytics) {
             window.blitzkriegAnalytics.trackAccessChange(null, 'update_failed', null);
         }
