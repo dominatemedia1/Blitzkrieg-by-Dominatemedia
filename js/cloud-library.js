@@ -406,7 +406,7 @@
             var meta = mr.metadata;
 
             // Guard against missing required fields — metadata.json could be corrupt/partial
-            var displayName = deriveDisplayName(mr.folderName) || meta.displayName || meta.name || 'Untitled';
+            var displayName = meta.displayName || meta.name || deriveDisplayName(mr.folderName) || 'Untitled';
             if (typeof displayName !== 'string') displayName = String(displayName);
 
             var parts = mr.folderName.split('_');
