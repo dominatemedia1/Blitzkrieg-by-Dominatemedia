@@ -59,6 +59,26 @@ jobs:
 
           echo "new_version=$new" >> "$GITHUB_OUTPUT"
 
+      - name: Regenerate integrity hashes
+        run: |
+          # Recompute SHA-256 hashes for every file in version.json's files
+          # list (excluding version.json itself — self-referential). Hashes
+          # are verified by the panel during OTA install.
+          node -e "
+          const fs = require('fs');
+          const crypto = require('crypto');
+          const v = JSON.parse(fs.readFileSync('version.json', 'utf8'));
+          const integrity = {};
+          const otaFiles = v.files.filter(f => f !== 'version.json');
+          for (const f of otaFiles) {
+            const content = fs.readFileSync(f, 'utf8');
+            integrity[f] = 'sha256-' + crypto.createHash('sha256').update(content).digest('hex');
+          }
+          v.integrity = integrity;
+          fs.writeFileSync('version.json', JSON.stringify(v, null, 2) + '\n');
+          console.log('Regenerated ' + Object.keys(integrity).length + ' integrity hashes');
+          "
+
       - name: Commit + push bump + tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

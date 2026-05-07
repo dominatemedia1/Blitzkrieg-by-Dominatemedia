@@ -4079,6 +4079,118 @@ body.debug-panel-open #app {
     color: var(--error);
 }
 
+/* ── Local Library Sync ─────────────────────────────────────────── */
+
+.sync-section {
+    padding: var(--sp-3) var(--sp-4);
+    border-top: 1px solid var(--border-subtle);
+    background: var(--bg-sidebar);
+}
+
+.sync-badge {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: var(--sp-2) var(--sp-3);
+    border-radius: var(--radius-md);
+    font-size: 11px;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    transition: background var(--transition-fast), color var(--transition-fast);
+    user-select: none;
+}
+
+.sync-badge:hover {
+    background: var(--bg-elevated);
+    color: var(--text-secondary);
+}
+
+.sync-badge-icon {
+    flex-shrink: 0;
+    color: var(--icon-default);
+}
+
+.sync-badge-complete .sync-badge-icon {
+    color: var(--success);
+}
+
+.sync-badge-partial .sync-badge-icon {
+    color: var(--accent-green-text);
+}
+
+.sync-badge-none .sync-badge-icon {
+    color: var(--text-muted);
+}
+
+.sync-spin {
+    animation: blitz-spin 2s linear infinite;
+}
+
+.sync-settings {
+    margin-top: var(--sp-3);
+}
+
+.sync-label {
+    display: block;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    margin-bottom: var(--sp-2);
+}
+
+.sync-path-row {
+    display: flex;
+    gap: var(--sp-2);
+}
+
+.sync-path-input {
+    flex: 1;
+    background: var(--bg-input);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: var(--sp-2) var(--sp-3);
+    font-size: 11px;
+    font-family: var(--font-family, 'Inter', sans-serif);
+    color: var(--text-primary);
+    outline: none;
+    transition: border-color var(--transition-fast);
+}
+
+.sync-path-input:focus {
+    border-color: var(--border-default);
+}
+
+.sync-path-input::placeholder {
+    color: var(--text-faint);
+}
+
+.sync-path-btn {
+    flex-shrink: 0;
+    font-size: 11px;
+    padding: var(--sp-2) var(--sp-3);
+    white-space: nowrap;
+}
+
+.sync-actions {
+    display: flex;
+    gap: var(--sp-2);
+    margin-top: var(--sp-2);
+}
+
+.sync-save-btn,
+.sync-force-btn {
+    font-size: 11px;
+    padding: var(--sp-2) var(--sp-3);
+    white-space: nowrap;
+}
+
+.sync-force-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
 @keyframes blitz-spin {
     to { transform: rotate(360deg); }
 }

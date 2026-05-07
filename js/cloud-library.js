@@ -428,9 +428,12 @@
             // or via stash upload (previewFrameCount > 0 means thumbnail was included)
             var thumbnailVerified = !!(meta.cloudThumbnailGenerated || previewFrameCount > 0);
 
+            var categories = (mr.metadata && mr.metadata.categories) || [mr.categoryName];
+
             allComps.push({
                 name: displayName,
                 category: mr.categoryName,
+                categories: categories,
                 uniqueId: uniqueId,
                 folderName: mr.folderName,
                 thumbUrl: thumbUrl,
@@ -602,8 +605,16 @@
             _log('fetchAllMetadata: bucket root is EMPTY — no categories found', 'warn');
         }
 
+        // Legacy editor-name categories — preserved as backup but excluded from
+        // the UI so the panel shows only the 12 animation-type categories.
+        var HIDDEN_CATEGORIES = {
+            'dominate media': 1, 'john ventura': 1, 'shaz': 1, 'usama ahmad': 1, 'sign': 1
+        };
         var categories = allRootItems.filter(function (item) {
-            return item.id === null && item.name !== 'pending' && item.name !== '.emptyFolderPlaceholder' && item.name !== MANIFEST_KEY;
+            if (item.id !== null) return false;
+            if (item.name === 'pending' || item.name === '.emptyFolderPlaceholder' || item.name === MANIFEST_KEY) return false;
+            if (HIDDEN_CATEGORIES[item.name.toLowerCase()]) return false;
+            return true;
         });
         _log('fetchAllMetadata: ' + categories.length + ' categories found: [' + categories.map(function(c) { return c.name; }).join(', ') + ']', 'info');
 
@@ -1222,6 +1233,58 @@
         };
     }
 
+    // Download ALL files for a template — thumbnails, previews, metadata,
+    // footage, and AEP. Unlike downloadTemplate() which only returns the
+    // import-essential bundle (AEP + footage), this returns every file in
+    // the template folder for a complete local mirror. Used by local-sync.js.
+    async function mirrorTemplate(storagePath) {
+        var allFiles = await collectAllFiles(storagePath);
+        if (allFiles.length === 0) {
+            throw new Error('No files found in template folder: ' + storagePath);
+        }
+        var downloaded = await downloadStorageFiles(allFiles, storagePath, 6);
+        var aepPath = '';
+        var totalSize = 0;
+        for (var i = 0; i < downloaded.length; i++) {
+            totalSize += downloaded[i].blob.size;
+            if (!aepPath && isAepPath(downloaded[i].path)) {
+                aepPath = downloaded[i].path;
+            }
+        }
+        _log('mirrorTemplate: downloaded ' + downloaded.length + ' files (' + (totalSize / 1024 / 1024).toFixed(1) + 'MB) for ' + storagePath, 'info');
+        return {
+            files: downloaded,
+            aepBlob: null,
+            fileCount: downloaded.length,
+            sizeBytes: totalSize
+        };
+    }
+
+    // Verify a local mirror folder has the essential files needed for import.
+    // Checks: at least one .aep exists, plus metadata.json.
+    // Called by local-sync.js after sync to confirm integrity.
+    // storagePath is "Category/FolderName", checks are done via localSync.
+    function verifyTemplateIntegrity(localBasePath, storagePath) {
+        var fullPath = localBasePath + '/' + storagePath;
+        var checks = [
+            { name: 'metadata.json', path: fullPath + '/metadata.json', required: true },
+            { name: 'template.aep', path: fullPath + '/template.aep', required: true }
+        ];
+        return {
+            checks: checks,
+            fullPath: fullPath
+        };
+    }
+
+    // Get the list of files in a template folder (lightweight — no download).
+    // Returns array of relative paths. Used by local-sync.js for sync planning.
+    async function getTemplateFileList(storagePath) {
+        var allFiles = await collectAllFiles(storagePath);
+        return allFiles.map(function(f) {
+            return f.substring(storagePath.length + 1);
+        });
+    }
+
     async function uploadBundleFiles(basePath, bundleFiles) {
         if (!bundleFiles || bundleFiles.length === 0) return [];
         var failures = [];
@@ -1717,5 +1780,8 @@
         collectAllFiles: collectAllFiles,
         copyStorageFiles: copyStorageFiles,
         removeStorageFiles: removeStorageFiles,
+        mirrorTemplate: mirrorTemplate,
+        getTemplateFileList: getTemplateFileList,
+        verifyTemplateIntegrity: verifyTemplateIntegrity,
     };
 })();
