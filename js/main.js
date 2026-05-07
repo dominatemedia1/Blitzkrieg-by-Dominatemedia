@@ -2163,10 +2163,12 @@
 
     function buildSearchText(comp) {
         if (comp._searchText) return comp._searchText;
+        // Strip timestamps from folderName so raw digits don't pollute search
+        var cleanFolder = (comp.folderName || '').replace(/[_-]\d{10,}/g, '').replace(/[_-]+/g, ' ').replace(/_\d{1,3}$/, '');
         var parts = [
             comp.name || '',
             comp.category || '',
-            comp.folderName || '',
+            cleanFolder,
             comp.uniqueId || ''
         ];
         if (comp.duration) parts.push(Math.round(comp.duration) + 's');

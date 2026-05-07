@@ -56,6 +56,9 @@
 
     // localStorage cache for template metadata (persists across restarts)
     var META_CACHE_KEY = 'blitzkrieg_meta_cache';
+    // Bump when cache schema changes or naming fixes require fresh data.
+    // Stale cache with lower version is rejected — forces slow-path reload.
+    var CACHE_VERSION = 2;
 
     // Cloud-side manifest file — a single JSON at bucket root containing the
     // metadata for every template. One download instead of 248+. Rebuilt on any
@@ -258,7 +261,15 @@
         try {
             var raw = localStorage.getItem(META_CACHE_KEY);
             if (!raw) return null;
-            return JSON.parse(raw);
+            var parsed = JSON.parse(raw);
+            // Reject cache from older code versions — forces fresh manifest load
+            // after naming fixes that would leave stale garbage in the cache.
+            if (parsed._v !== CACHE_VERSION) {
+                _log('getCachedMetadata: rejecting v' + (parsed._v || 0) + ' cache (current v' + CACHE_VERSION + ') — forcing fresh load', 'info');
+                try { localStorage.removeItem(META_CACHE_KEY); } catch (e) {}
+                return null;
+            }
+            return parsed;
         } catch (e) {
             return null;
         }
@@ -280,7 +291,7 @@
         opts = opts || {};
         var payload;
         try {
-            var obj = { ts: Date.now(), folders: metadataResults };
+            var obj = { _v: CACHE_VERSION, ts: Date.now(), folders: metadataResults };
             if (opts.partialUntilTs) obj.partialUntilTs = opts.partialUntilTs;
             if (opts.failedCategories) obj.failedCategories = opts.failedCategories;
             payload = JSON.stringify(obj);
