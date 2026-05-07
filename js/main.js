@@ -2832,6 +2832,14 @@
     /* --------- add/rename/delete/import flows --------- */
     function addSelectedComp() {
         if (!ensureCepBridgeForAction('Adding comps')) return;
+
+        // Require authentication — uploads and DB inserts need a valid user session
+        var user = window.blitzkriegAuth && window.blitzkriegAuth.getUser && window.blitzkriegAuth.getUser();
+        if (!user) {
+            showToast('Please log in before submitting. Your session may have expired.', true);
+            return;
+        }
+
         var categories = getUniqueCategories();
         existingCategorySelect.innerHTML = categories.map(function (cat) { return '<option value="' + escapeHTML(cat) + '">' + escapeHTML(categoryDisplayName(cat)) + '</option>'; }).join('');
         existingCategorySelect.disabled = categories.length === 0;
@@ -2843,6 +2851,11 @@
             var addSignedIn = window.blitzkriegAuth && window.blitzkriegAuth.getUser && !!window.blitzkriegAuth.getUser();
             newCatGroup.style.display = addSignedIn ? '' : 'none';
         }
+
+        // Update confirm button to match role: admin = "Add Comp", everyone else = "Submit for Review"
+        var isAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
+        confirmAddBtn.textContent = isAdmin ? 'Add Comp' : 'Submit for Review';
+
         addCompModal.style.display = 'flex';
     }
 
@@ -2893,6 +2906,7 @@
                     }
 
                     var tempPath = parsed.tempPath;
+                    showToast('Exporting composition...');
                     var files = await readTempFiles(tempPath, categoryName);
 
                     {
@@ -2913,6 +2927,7 @@
                         var sb = window.blitzkriegSupabase;
 
                         // Upload AEP to pending path
+                        showToast('Uploading composition file...');
                         var aepUpload = await sb.storage.from('blitzkrieg')
                             .upload(pendingBasePath + '/' + files.folderName + '.aep', files.aepBlob, {
                                 contentType: 'application/octet-stream',
@@ -2956,6 +2971,7 @@
 
                         // Upload metadata
                         if (files.metadata) {
+                            showToast('Uploading metadata...');
                             files.metadata.bundleAssetCount = files.bundleFiles ? files.bundleFiles.length : 0;
                             var metaBlob = new Blob([JSON.stringify(files.metadata)], { type: 'application/json' });
                             await sb.storage.from('blitzkrieg')
@@ -2984,7 +3000,14 @@
                         userId = liveUser.id;
 
                         // Create submission record
+                        showToast('Saving submission...');
                         var submissionName = (files.metadata && (files.metadata.displayName || files.metadata.name)) || files.folderName;
+                        // Sanitize: strip #/@ prefix, trim bare numbers
+                        if (submissionName && /^[#@]/.test(submissionName)) submissionName = submissionName.replace(/^[#@]+/, '').trim();
+                        if (submissionName && /^\d+$/.test(submissionName.trim()) && files.metadata && files.metadata.displayName) {
+                            // If the metadata displayName is just a number, derive from folder name instead
+                            submissionName = files.folderName.replace(/[_-]\d{10,}/g, '').replace(/[_-]+$/, '').replace(/_\d{1,3}$/, '').replace(/[_-]/g, ' ').trim() || submissionName;
+                        }
                         if (submissionName && submissionName.length > 255) submissionName = submissionName.substring(0, 255);
                         var insertResult = await sb.from('blitzkrieg_template_submissions').insert({
                             user_id: userId,
@@ -4452,6 +4475,67 @@
     };
 
     /**
+     * Full submission health check — verifies auth, RLS, storage, and DB state.
+     * Call from console: window.__blitzDiagnoseSubmissions()
+     */
+    window.__blitzDiagnoseSubmissions = function() {
+        var sb = window.blitzkriegSupabase;
+        var report = {};
+        console.log('%c=== Submission Health Check ===', 'font-weight:bold;color:#4ADE80');
+
+        // 1. Auth check
+        var user = window.blitzkriegAuth && window.blitzkriegAuth.getUser && window.blitzkriegAuth.getUser();
+        var teamMember = window.blitzkriegAuth && window.blitzkriegAuth.getTeamMember && window.blitzkriegAuth.getTeamMember();
+        console.log('Auth user:', user ? user.id + ' (' + user.email + ')' : 'MISSING');
+        console.log('Team member:', teamMember ? (teamMember.full_name || teamMember.slack_email) + ' (access=' + teamMember.blitzkrieg_access + ', admin=' + teamMember.blitzkrieg_admin + ')' : 'MISSING');
+        report.auth = { userId: user && user.id, email: user && user.email, teamMemberId: teamMember && teamMember.id, hasAccess: !!(teamMember && teamMember.blitzkrieg_access), isAdmin: !!(teamMember && teamMember.blitzkrieg_admin) };
+
+        // 2. RPC check
+        return sb.rpc('debug_blitzkrieg_admin_status').then(function(rpcRes) {
+            console.log('RPC result:', rpcRes.data || rpcRes.error);
+            report.rpc = rpcRes.data || rpcRes.error;
+
+            // 3. Direct DB query (what the review grid actually queries)
+            return sb.from('blitzkrieg_template_submissions').select('*', { count: 'exact' }).order('created_at', { ascending: false }).limit(5);
+        }).then(function(dbRes) {
+            console.log('DB query:', dbRes.data ? dbRes.count + ' total, ' + dbRes.data.length + ' returned' : 'ERROR: ' + (dbRes.error && dbRes.error.message));
+            if (dbRes.data && dbRes.data.length > 0) {
+                console.table(dbRes.data.map(function(s) { return { id: s.id, template_name: s.template_name, status: s.status, user_id: s.user_id, created_at: s.created_at }; }));
+            }
+            report.dbCount = dbRes.count || 0;
+            report.dbError = dbRes.error ? dbRes.error.message : null;
+            report.dbSample = (dbRes.data || []).slice(0, 5);
+
+            // 4. Check pending/ storage (if any submissions exist)
+            if (dbRes.data && dbRes.data.length > 0) {
+                console.log('%cStorage check:', 'font-weight:bold');
+                dbRes.data.forEach(function(sub) {
+                    sb.storage.from('blitzkrieg').list(sub.storage_path || '').then(function(listRes) {
+                        console.log('  ' + sub.storage_path + ':', listRes.data ? listRes.data.length + ' files' : 'ERROR: ' + (listRes.error && listRes.error.message));
+                    }).catch(function(e) {
+                        console.warn('  ' + sub.storage_path + ': list failed — ' + e.message);
+                    });
+                });
+            }
+
+            // 5. Summary
+            console.log('%cSummary:', 'font-weight:bold');
+            console.log('  Auth: ' + (report.auth.userId ? 'OK' : 'MISSING'));
+            console.log('  Access: ' + (report.auth.hasAccess ? 'OK' : 'NO'));
+            console.log('  Admin: ' + (report.auth.isAdmin ? 'OK' : 'NO'));
+            console.log('  Submissions in DB: ' + report.dbCount);
+            console.log('  DB error: ' + (report.dbError || 'none'));
+            if (report.dbCount === 0) {
+                console.warn('⚠ ZERO submissions exist. Team members may be hitting errors during submit — check AE console logs.');
+            }
+
+            return report;
+        }).catch(function(err) {
+            console.error('Diagnose failed:', err.message);
+        });
+    };
+
+    /**
      * Load and render submissions grid with visual thumbnails + preview frames
      * @param {string} statusFilter - 'pending', 'approved', 'rejected', or 'pending_review' (admin view)
      */
@@ -4482,6 +4566,26 @@
             }
 
             var submissions = res.data || [];
+            // Sanitize template_name — old submissions can have raw AE comp names (#12, bare numbers)
+            submissions.forEach(function(sub) {
+                var originalName = sub.template_name || '';
+                var name = originalName;
+                if (/^[#@]/.test(name)) name = name.replace(/^[#@]+/, '').trim();
+                if (/^\d+$/.test(name.trim()) || name.trim().length < 2) {
+                    // Derive a fallback from storage_path folder name
+                    var parts = (sub.storage_path || '').split('/');
+                    var folderName = parts[parts.length - 1];
+                    if (folderName) {
+                        name = folderName.replace(/[_-]\d{10,}/g, '').replace(/[_-]+$/, '').replace(/_\d{1,3}$/, '').replace(/[_-]/g, ' ').trim();
+                    }
+                }
+                if (!name) name = 'Untitled';
+                if (name !== originalName) {
+                    debugLog('Sanitized submission name: "' + originalName + '" -> "' + name + '"');
+                }
+                sub.template_name = name;
+            });
+
             if (submissions.length === 0) {
                 hideSpinner();
                 var msg = isReviewMode ? 'No submissions pending review.' : 'No ' + statusFilter + ' submissions.';

@@ -406,13 +406,25 @@
             var meta = mr.metadata;
 
             // Derive a clean display name from the folder name first.
-            // Only use it if it passes quality checks (no timestamps, not a bare number).
-            // Falls through to metadata.name / metadata.displayName / folderName / 'Untitled'.
+            // Only use it if it passes quality checks (no timestamps, not a bare
+            // number, no #/@ prefix, at least 3 chars). Falls through to
+            // metadata.displayName (also quality-checked) then 'Untitled'.
             var derived = deriveDisplayName(mr.folderName);
             var hasTimestamp = /\d{10,}/.test(derived);
             var isJustNumber = /^\d+$/.test(derived);
-            var displayName = (derived && !hasTimestamp && !isJustNumber ? derived : '')
-                || meta.displayName || meta.name || 'Untitled';
+            var isHashPrefixed = /^[#@]/.test(derived);
+            var isTooShort = derived.length < 3;
+            var cleanDerived = (derived && !hasTimestamp && !isJustNumber && !isHashPrefixed && !isTooShort);
+            // Sanitize the metadata fallback too — stale cache can have raw numbers
+            var metaName = meta.displayName || meta.name || '';
+            var metaHasTimestamp = /\d{10,}/.test(metaName);
+            var metaIsJustNumber = /^\d+$/.test(metaName.trim());
+            var metaIsHashPrefixed = /^[#@]/.test(metaName);
+            var metaIsTooShort = metaName.trim().length < 3;
+            var cleanMeta = (metaName && !metaHasTimestamp && !metaIsJustNumber && !metaIsHashPrefixed && !metaIsTooShort);
+            var displayName = (cleanDerived ? derived : '')
+                || (cleanMeta ? metaName : '')
+                || deriveDisplayName(mr.folderName) || mr.folderName.replace(/-/g, ' ').trim() || 'Untitled';
             if (typeof displayName !== 'string') displayName = String(displayName);
 
             var parts = mr.folderName.split('_');
