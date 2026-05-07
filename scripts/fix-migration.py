@@ -15,11 +15,13 @@ from collections import defaultdict
 
 # ── Config ──────────────────────────────────────────────────────────────
 
-SUPABASE_URL = "https://kwrmdxptrrvlqxdcasho.supabase.co"
-JWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt3cm1keHB0cnJ2bHF4ZGNhc2hvIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2ODQ3MTc1NywiZXhwIjoyMDg0MDQ3NzU3fQ.jmtp1DtctT11eJf9wwDeHiRAG_pwW7dU9qZHzVcheyA"
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://kwrmdxptrrvlqxdcasho.supabase.co")
+JWT = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+if not JWT:
+    sys.exit("SUPABASE_SERVICE_ROLE_KEY env var required (sb_secret_* or legacy JWT)")
 BUCKET = "blitzkrieg"
 PLAN_PATH = os.path.join(os.path.dirname(__file__), "..", "classification-plan.json")
-HEADERS = {"Authorization": f"Bearer {JWT}"}
+HEADERS = {"Authorization": f"Bearer {JWT}", "apikey": JWT}
 API = f"{SUPABASE_URL}/storage/v1"
 
 # URL-safe category name
