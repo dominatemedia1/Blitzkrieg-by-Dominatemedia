@@ -4152,7 +4152,7 @@ body.debug-panel-open #app {
     border-radius: var(--radius-sm);
     padding: var(--sp-2) var(--sp-3);
     font-size: 11px;
-    font-family: var(--font-family, 'Inter', sans-serif);
+    font-family: inherit;
     color: var(--text-primary);
     outline: none;
     transition: border-color var(--transition-fast);
@@ -4171,6 +4171,9 @@ body.debug-panel-open #app {
     font-size: 11px;
     padding: var(--sp-2) var(--sp-3);
     white-space: nowrap;
+    height: auto;
+    width: auto;
+    min-height: unset;
 }
 
 .sync-actions {
@@ -4184,6 +4187,9 @@ body.debug-panel-open #app {
     font-size: 11px;
     padding: var(--sp-2) var(--sp-3);
     white-space: nowrap;
+    height: auto;
+    width: auto;
+    min-height: unset;
 }
 
 .sync-force-btn:disabled {

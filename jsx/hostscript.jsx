@@ -3476,3 +3476,16 @@ function blitzPickFolder() {
         return '';
     } catch (_) { return 'Error: ' + _.message; }
 }
+
+function blitzLocalListAep(rawPath) {
+    try {
+        var f = new Folder(rawPath);
+        if (!f.exists) return JSON.stringify({ files: [] });
+        var aepFiles = [];
+        var all = f.getFiles('*.aep');
+        for (var i = 0; i < all.length; i++) {
+            if (all[i] instanceof File) aepFiles.push(all[i].name);
+        }
+        return JSON.stringify({ files: aepFiles });
+    } catch (_) { return JSON.stringify({ error: _.message }); }
+}

@@ -11,7 +11,6 @@
     'use strict';
 
     var STATE_KEY = 'blitzkrieg_local_sync';
-    var MAX_CONCURRENT_DOWNLOADS = 6;
 
     // ── internal helpers ──────────────────────────────────────────
 
@@ -97,22 +96,54 @@
         });
     }
 
-    /** Write a blob to a local file path (base64 encoded). */
+    /** Write a blob to a local file path. Uses chunked base64 append for
+     *  large files (same pattern as writeBlobToFile in main.js) to avoid
+     *  hitting evalScript argument size limits. */
     function _writeBlob(filePath, blob) {
         return new Promise(function (resolve, reject) {
             var reader = new FileReader();
+            reader.onerror = function () { reject(new Error('FileReader failed')); };
             reader.onload = function () {
-                // reader.result is a data: URL — strip the prefix
                 var b64 = reader.result;
                 var comma = b64.indexOf(',');
                 if (comma >= 0) b64 = b64.substring(comma + 1);
+                if (!b64 || b64.length === 0) { reject(new Error('Empty base64 from blob')); return; }
+
                 var safe = filePath.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-                _callExtendScript('blitzLocalWriteBinary("' + safe + '","' + b64 + '")').then(function (r) {
-                    if (r && r.error) reject(new Error(r.error));
-                    else resolve();
-                }).catch(reject);
+                var safeTmpB64 = safe + '.b64';
+                var sizeMB = (blob.size / 1024 / 1024).toFixed(1);
+                var CHUNK = 500000; // 500KB per evalScript call — well under limits
+
+                if (b64.length <= CHUNK) {
+                    // Small file — single call, no temp file needed
+                    _callExtendScript('blitzLocalWriteBinary("' + safe + '","' + b64 + '")').then(function (r) {
+                        if (r && r.error) reject(new Error(r.error));
+                        else resolve();
+                    }).catch(reject);
+                    return;
+                }
+
+                // Large file — chunked append to .b64 temp, then decode to binary
+                var idx = 0;
+                var totalChunks = Math.ceil(b64.length / CHUNK);
+                function writeChunk() {
+                    if (idx >= b64.length) {
+                        _callExtendScript('decodeBase64FileToBinary("' + safeTmpB64 + '","' + safe + '")').then(function (r) {
+                            if (typeof r === 'string' && r.indexOf('ERROR') === 0) reject(new Error(r));
+                            else resolve();
+                        }).catch(reject);
+                        return;
+                    }
+                    var chunk = b64.substring(idx, idx + CHUNK);
+                    var isFirst = idx === 0 ? 'true' : 'false';
+                    _callExtendScript('appendToTextFile("' + safeTmpB64 + '","' + chunk + '",' + isFirst + ')').then(function (r) {
+                        if (r !== 'ok') { reject(new Error('Chunk write failed: ' + r)); return; }
+                        idx += CHUNK;
+                        writeChunk();
+                    }).catch(reject);
+                }
+                writeChunk();
             };
-            reader.onerror = function () { reject(new Error('FileReader failed')); };
             reader.readAsDataURL(blob);
         });
     }
@@ -189,6 +220,48 @@
         },
 
         /**
+         * Verify a local mirror folder has the essential files for import.
+         * Checks: at least one .aep exists, metadata.json exists.
+         * @param {string} storagePath — "Category/FolderName"
+         * @returns {Promise<{complete:boolean, missing:string[], found:string[]}>}
+         */
+        verifyTemplateIntegrity: function (storagePath) {
+            var local = _localPath(storagePath);
+            if (!local) return Promise.resolve({ complete: false, missing: ['path not configured'], found: [] });
+
+            var safe = local.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+            return _callExtendScript('blitzLocalExists("' + safe + '")').then(function (r) {
+                if (!r || !r.exists) return { complete: false, missing: ['folder missing'], found: [] };
+
+                // Check for metadata.json + scan for .aep files
+                var checks = [
+                    _callExtendScript('blitzLocalExists("' + (safe + '/metadata.json').replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '")'),
+                    _callExtendScript('blitzLocalListAep("' + safe.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '")')
+                ];
+                return Promise.all(checks).then(function (results) {
+                    var missing = [];
+                    var found = [];
+                    var metaExists = results[0] && results[0].exists;
+                    var aepFiles = (results[1] && results[1].files) || [];
+
+                    if (!metaExists) missing.push('metadata.json');
+                    else found.push('metadata.json');
+
+                    if (aepFiles.length === 0) missing.push('no .aep file');
+                    else found.push(aepFiles[0]);
+
+                    return {
+                        complete: missing.length === 0,
+                        missing: missing,
+                        found: found
+                    };
+                });
+            }).catch(function () {
+                return { complete: false, missing: ['check failed'], found: [] };
+            });
+        },
+
+        /**
          * Get the local AEP path for fast import. Scans for any .aep file
          * if template.aep doesn't exist.
          * @param {string} storagePath
@@ -202,7 +275,7 @@
 
         /**
          * Download a single template to the local mirror.
-         * Uses cloudLibrary.downloadTemplate() for the AEP + footage,
+         * Uses cloudLibrary.mirrorTemplate() to download all files,
          * then writes everything to the local mirror folder.
          * @param {string} storagePath
          * @returns {Promise<{localAepPath:string, fileCount:number}>}
@@ -222,46 +295,56 @@
                 return window.cloudLibrary.mirrorTemplate(storagePath);
             }).then(function (mirrored) {
                 var files = mirrored.files || [];
-                var writes = [];
                 var localAepPath = '';
+                var dirsNeeded = {};
 
+                // First pass: collect all unique parent directories needed
                 for (var i = 0; i < files.length; i++) {
-                    var f = files[i];
-                    var rel = f.relativePath;
+                    var rel = files[i].relativePath;
                     if (!rel) continue;
-                    var localFilePath = libPath + '/' + storagePath + '/' + rel;
-
-                    // Ensure parent dirs exist for nested files
                     var relParts = rel.split('/');
                     if (relParts.length > 1) {
-                        var parentRel = relParts.slice(0, -1).join('/');
-                        writes.push(_ensureDirs(libPath, storagePath + '/' + parentRel));
+                        dirsNeeded[relParts.slice(0, -1).join('/')] = 1;
                     }
-
-                    writes.push(_writeBlob(localFilePath, f.blob));
-
-                    // Track the AEP path for the return value
                     if (!localAepPath) {
                         var lower = rel.toLowerCase();
                         if (lower.length >= 4 && lower.indexOf('.aep', lower.length - 4) !== -1) {
-                            localAepPath = localFilePath;
+                            localAepPath = libPath + '/' + storagePath + '/' + rel;
                         }
                     }
                 }
 
-                return Promise.all(writes).then(function () {
-                    var state = _loadState();
-                    if (!state.templates) state.templates = {};
-                    state.templates[storagePath] = {
-                        ts: Date.now(),
-                        files: files.length,
-                        complete: true
-                    };
-                    _saveState(state);
-                    return {
-                        localAepPath: localAepPath,
-                        fileCount: files.length
-                    };
+                // Ensure all needed directories exist BEFORE writing files
+                var dirKeys = Object.keys(dirsNeeded);
+                var dirPromises = [];
+                for (var d = 0; d < dirKeys.length; d++) {
+                    dirPromises.push(_ensureDirs(libPath, storagePath + '/' + dirKeys[d]));
+                }
+
+                return Promise.all(dirPromises).then(function () {
+                    // Now write all files — parent dirs are guaranteed to exist
+                    var writes = [];
+                    for (var i = 0; i < files.length; i++) {
+                        var rel2 = files[i].relativePath;
+                        if (!rel2) continue;
+                        var localFilePath = libPath + '/' + storagePath + '/' + rel2;
+                        writes.push(_writeBlob(localFilePath, files[i].blob));
+                    }
+
+                    return Promise.all(writes).then(function () {
+                        var state = _loadState();
+                        if (!state.templates) state.templates = {};
+                        state.templates[storagePath] = {
+                            ts: Date.now(),
+                            files: files.length,
+                            complete: !!localAepPath
+                        };
+                        _saveState(state);
+                        return {
+                            localAepPath: localAepPath,
+                            fileCount: files.length
+                        };
+                    });
                 });
             });
         },
@@ -360,7 +443,8 @@
                     if (!tpl || !tpl.complete) missing.push(sp);
                 }
 
-                var synced = 0;
+                var processed = 0;
+                var failed = 0;
                 var CONCURRENCY = 3;
                 var idx = 0;
 
@@ -369,13 +453,14 @@
                         if (idx >= missing.length) return Promise.resolve();
                         var myIdx = idx++;
                         var sp = missing[myIdx];
-                        if (onProgress) onProgress({ done: synced, total: missing.length, current: sp });
+                        if (onProgress) onProgress({ done: processed, total: missing.length, current: sp });
                         return api.syncTemplate(sp).then(function () {
-                            synced++;
+                            processed++;
                             return next();
                         }).catch(function (err) {
                             console.warn('[local-sync] syncAll failed for ' + sp + ': ' + (err && err.message || err));
-                            synced++;
+                            processed++;
+                            failed++;
                             return next();
                         });
                     }
@@ -385,11 +470,11 @@
                 var workers = [];
                 for (var w = 0; w < Math.min(CONCURRENCY, missing.length); w++) workers.push(worker());
                 return Promise.all(workers).then(function () {
-                    if (onProgress) onProgress({ done: synced, total: missing.length, current: '' });
+                    if (onProgress) onProgress({ done: processed, total: missing.length, current: '' });
                     var st = _loadState();
                     st.lastFullSync = Date.now();
                     _saveState(st);
-                    return { synced: synced, skipped: storagePaths.length - missing.length, total: storagePaths.length };
+                    return { synced: processed - failed, failed: failed, skipped: storagePaths.length - missing.length, total: storagePaths.length };
                 });
             });
         },

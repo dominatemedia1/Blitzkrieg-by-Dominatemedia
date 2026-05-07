@@ -618,6 +618,7 @@
                 badge.style.display = 'flex';
                 settings.style.display = 'block';
                 if (pathInput) pathInput.value = currentPath;
+                _updateSyncBadge();
                 // Show default path suggestion if not set
                 window.localSync.getDefaultPath().then(function(defPath) {
                     if (!pathInput.value && defPath) {
@@ -1491,11 +1492,12 @@
                     if (paths.length > 0) {
                         window.localSync.syncAll(paths).then(function (result) {
                             if (result && result.synced > 0) {
-                                debugLog('Background sync: ' + result.synced + ' templates synced');
-                                // Update the sync badge if visible
+                                debugLog('Background sync: ' + result.synced + ' synced' + (result.failed ? ', ' + result.failed + ' failed' : ''));
                                 _updateSyncBadge();
                             }
-                        }).catch(function () {});
+                        }).catch(function (err) {
+                            debugLog('Background sync error: ' + (err && err.message || err), 'warn');
+                        });
                     }
                 }, 3000);
             }
@@ -2027,18 +2029,24 @@
             return;
         }
         var state = window.localSync.getSyncState();
+        var synced = (state && typeof state.synced === 'number') ? state.synced : 0;
         var cloudComps = allComps.filter(function(c) { return !!c.storagePath; });
         var total = cloudComps.length;
-        var synced = state.synced;
+        var displaySynced = Math.min(synced, total); // clamp — cloud deletions can make synced > total
+
         badge.style.display = 'flex';
-        if (synced >= total && total > 0) {
+        if (total === 0) {
+            badge.className = 'sync-badge sync-badge-none';
+            badge.title = 'No templates to sync';
+            badge.innerHTML = '<svg class="sync-badge-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><span>No templates</span>';
+        } else if (displaySynced >= total) {
             badge.className = 'sync-badge sync-badge-complete';
-            badge.title = 'Library fully synced — ' + synced + '/' + total;
-            badge.innerHTML = '<svg class="sync-badge-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg><span>' + synced + '/' + total + ' synced</span>';
-        } else if (synced > 0) {
+            badge.title = 'Library fully synced — ' + displaySynced + '/' + total;
+            badge.innerHTML = '<svg class="sync-badge-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg><span>' + displaySynced + '/' + total + ' synced</span>';
+        } else if (displaySynced > 0) {
             badge.className = 'sync-badge sync-badge-partial';
-            badge.title = 'Syncing — ' + synced + '/' + total + ' cached locally. Click to sync all.';
-            badge.innerHTML = '<svg class="sync-badge-icon sync-spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg><span>' + synced + '/' + total + ' synced</span>';
+            badge.title = 'Syncing — ' + displaySynced + '/' + total + ' cached locally. Click to sync all.';
+            badge.innerHTML = '<svg class="sync-badge-icon sync-spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg><span>' + displaySynced + '/' + total + ' synced</span>';
         } else {
             badge.className = 'sync-badge sync-badge-none';
             badge.title = 'Nothing synced yet. Click to start.';
@@ -3572,7 +3580,11 @@
                     var safeDisplayName = _trackComp ? escapeForExtendScript(_trackComp.name) : '';
                     safeEvalScript('importComp("' + safePath + '","' + safeDisplayName + '")', function(result) {
                         setTimeout(function() {
-                            try { safeEvalScript('cleanupTempStash("' + escapeForExtendScript(importTempDir) + '")'); } catch(e) {}
+                            safeEvalScript('cleanupTempStash("' + escapeForExtendScript(importTempDir) + '")', function(cleanResult) {
+                                if (cleanResult && cleanResult.indexOf('Error') === 0) {
+                                    debugLog('IMPORT: temp cleanup failed: ' + cleanResult, 'warn');
+                                }
+                            });
                         }, 5000);
 
                         if (result && result.indexOf('Success') === 0) {
@@ -3600,7 +3612,11 @@
             debugLog('IMPORT FAIL: ' + err.message, 'error');
             showToast('Import failed: ' + err.message, true);
             if (importTempDir) {
-                try { safeEvalScript('cleanupTempStash("' + escapeForExtendScript(importTempDir) + '")'); } catch(cleanErr) {}
+                safeEvalScript('cleanupTempStash("' + escapeForExtendScript(importTempDir) + '")', function(cleanResult) {
+                    if (cleanResult && cleanResult.indexOf('Error') === 0) {
+                        debugLog('IMPORT: temp cleanup on error failed: ' + cleanResult, 'warn');
+                    }
+                });
             }
         });
     }
@@ -3642,13 +3658,14 @@
                     showToast('Syncing to library...');
                     window.localSync.syncTemplate(storagePath).then(function(result) {
                         if (result && result.localAepPath) {
+                            // _doImportLocalAep manages its own spinner + stashInProgress lifecycle
                             _doImportLocalAep(result.localAepPath, uniqueId, _trackComp, storagePath);
                         } else {
                             throw new Error('AEP not found after sync');
                         }
-                    }).then(function() {
-                        setStashInProgress(false);
-                    }, function(err) {
+                    }).then(null, function(err) {
+                        // Only reach here if syncTemplate failed or AEP not found.
+                        // _doImportLocalAep success path is handled by its internal callback.
                         setStashInProgress(false);
                         hideSpinner();
                         debugLog('IMPORT FAIL (sync): ' + err.message, 'error');
