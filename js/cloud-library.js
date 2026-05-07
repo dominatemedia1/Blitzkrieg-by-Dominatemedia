@@ -406,7 +406,7 @@
             var meta = mr.metadata;
 
             // Guard against missing required fields — metadata.json could be corrupt/partial
-            var displayName = meta.displayName || meta.name || mr.folderName || 'Untitled';
+            var displayName = deriveDisplayName(mr.folderName) || meta.displayName || meta.name || 'Untitled';
             if (typeof displayName !== 'string') displayName = String(displayName);
 
             var parts = mr.folderName.split('_');
@@ -452,6 +452,20 @@
         });
 
         return allComps;
+    }
+
+    /**
+     * Derive a human-readable display name from a template folder name.
+     * Folder names follow the pattern "Descriptive-Name_<uniqueId>" where
+     * uniqueId is a 10+ digit timestamp. Strips the suffix and converts
+     * dashes to spaces.
+     * @param {string} folderName
+     * @returns {string}
+     */
+    function deriveDisplayName(folderName) {
+        if (!folderName) return '';
+        var cleaned = folderName.replace(/_\d{10,}$/, '').replace(/[_-]+$/, '');
+        return cleaned.replace(/-/g, ' ');
     }
 
     function sortPreviewPaths(paths) {
