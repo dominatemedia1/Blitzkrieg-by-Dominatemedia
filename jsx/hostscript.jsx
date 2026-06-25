@@ -1095,6 +1095,11 @@ function stashSelectedComp(libraryPath, categoryName) {
             width: compToSave.width,
             height: compToSave.height,
             previewFrames: previewFrameCount,
+            // Linked sub-comp / pre-comp dependencies stored in sibling folders.
+            // reduceProject() collapses normal dependencies into this single .aep,
+            // so a fresh stash is self-contained → []. The storage-remediation pass
+            // populates this for legacy split templates; downloadTemplate() reads it.
+            dependencies: [],
             aeVersion: AE_VERSION_INFO.versionString
         }));
         metadataFile.close();
@@ -1704,6 +1709,121 @@ function importComp(aepPath, displayName) {
             if (!mainComp) mainComp = _allImportedComps[0];
         }
 
+        // --- Relink missing footage to the downloaded (Footage)/ bundle ---
+        // Stashed AEPs embed absolute footage paths from the uploader's machine.
+        // After download into a fresh temp dir those absolute paths are dead, and
+        // AE's relative-path fallback does not always re-resolve them (renamed AEP,
+        // moved dir). Before the cleanup pass below deletes anything, build a
+        // basename index of the sibling (Footage)/ folder and re-point every missing
+        // FootageItem at its collected copy. This is the canonical relink the
+        // importer previously lacked — without it, missing footage was simply
+        // deleted, producing the "missing element/source files" symptom.
+        var _relinkStats = { relinked: 0, missing: 0, missingNames: [], survivingMissing: 0, survivingNames: [] };
+        if (importedItem instanceof FolderItem) {
+            var _footageIndex = {};   // lowercased basename -> File
+            var _indexBuilt = false;
+            // Filenames that live inside a template/(Footage) tree but are never
+            // footage. They must not become relink candidates, or a footage item
+            // literally named comp.png could bind to the thumbnail, and a linked
+            // dependency's own .aep could shadow a real source.
+            var _isFootageName = function (bn) {
+                var l = String(bn).toLowerCase();
+                if (l === 'metadata.json' || l === 'comp.png' || l === 'thumbnail.png' || l === 'thumbnail.jpg') return false;
+                if (l.length >= 4 && l.indexOf('.aep', l.length - 4) !== -1) return false;
+                return true;
+            };
+            var _buildFootageIndex = function () {
+                if (_indexBuilt) return;
+                _indexBuilt = true;
+                try {
+                    var aepDir = fileToImport.parent;
+                    var fRoot = new Folder(buildPath(aepDir, "(Footage)"));
+                    // Walk in PRIORITY order so the index is deterministic: the
+                    // template's OWN footage must always win over a same-named copy
+                    // inside a dependency bundle or sitting flat beside the AEP.
+                    // getFiles() entry order is not guaranteed by AE, so ties must
+                    // be resolved by walk order, never by filesystem ordering.
+                    var _walk = function (folder, depth, skip) {
+                        if (depth > 6) return;                 // bound recursion
+                        var entries;
+                        try { entries = folder.getFiles(); } catch (gfErr) { return; }
+                        if (!entries) return;
+                        for (var wi = 0; wi < entries.length; wi++) {
+                            var ent = entries[wi];
+                            if (ent instanceof Folder) {
+                                var fn = '';
+                                try { fn = String(ent.name || '').toLowerCase(); } catch (e) {}
+                                if (skip && skip[fn]) continue;
+                                _walk(ent, depth + 1, skip);
+                            } else if (ent instanceof File) {
+                                var bn = '';
+                                try { bn = safeDecodeURI(String(ent.name)); } catch (dnErr) { bn = String(ent.name); }
+                                if (!bn || bn.indexOf('._') === 0) continue;  // skip mac resource forks
+                                if (!_isFootageName(bn)) continue;
+                                var key = bn.toLowerCase();
+                                if (!_footageIndex[key]) _footageIndex[key] = ent;  // first match wins
+                            }
+                        }
+                    };
+                    // Pass 1: the template's own footage (authoritative). Skip the
+                    // dependency bundle and preview-frame noise.
+                    if (fRoot.exists) _walk(fRoot, 0, { 'preview': 1, '_deps': 1 });
+                    // Pass 2: dependency footage — fills only the gaps Pass 1 left.
+                    var depsRoot = new Folder(buildPath(fRoot, "_deps"));
+                    if (depsRoot.exists) _walk(depsRoot, 0, { 'preview': 1 });
+                    // Pass 3: flat footage written beside the AEP (templates stored
+                    // without a (Footage)/ subfolder). Skip the (Footage) tree we
+                    // already indexed above to avoid a redundant full re-walk.
+                    if (aepDir && aepDir.exists) _walk(aepDir, 0, { 'preview': 1, '_deps': 1, '(footage)': 1 });
+                } catch (biErr) {}
+            };
+            var _basenameOf = function (item) {
+                // Prefer the File object's name (survives even when the file is
+                // missing on disk); fall back to the FootageItem's own name.
+                try {
+                    if (item.mainSource && item.mainSource.file) {
+                        var n = String(item.mainSource.file.name || '');
+                        if (n) { try { return safeDecodeURI(n); } catch (e) { return n; } }
+                    }
+                } catch (e1) {}
+                try { return String(item.name || ''); } catch (e2) { return ''; }
+            };
+            var _relinkMissing = function (folder) {
+                for (var ri = 1; ri <= folder.numItems; ri++) {
+                    var rItem;
+                    try { rItem = folder.item(ri); } catch (e) { continue; }
+                    if (rItem instanceof FolderItem) { _relinkMissing(rItem); continue; }
+                    if (!(rItem instanceof FootageItem)) continue;
+                    var isMissing = false;
+                    try { isMissing = !!rItem.footageMissing; } catch (e) {}
+                    if (!isMissing) {
+                        try {
+                            if (rItem.mainSource && rItem.mainSource.file && !rItem.mainSource.file.exists) isMissing = true;
+                        } catch (e) {}
+                    }
+                    if (!isMissing) continue;
+                    _buildFootageIndex();
+                    var base = _basenameOf(rItem);
+                    var match = base ? _footageIndex[base.toLowerCase()] : null;
+                    if (match && match.exists) {
+                        try {
+                            rItem.replace(match);
+                            _relinkStats.relinked++;
+                            continue;
+                        } catch (rpErr) {
+                            $.writeln("Blitzkrieg: relink replace() failed for " + base + " — " + rpErr.toString());
+                        }
+                    }
+                    _relinkStats.missing++;
+                    if (_relinkStats.missingNames.length < 30 && base) _relinkStats.missingNames.push(base);
+                }
+            };
+            try { _relinkMissing(importedItem); } catch (rmErr) {}
+            if (_relinkStats.relinked > 0 || _relinkStats.missing > 0) {
+                $.writeln("Blitzkrieg: relink — " + _relinkStats.relinked + " relinked, " + _relinkStats.missing + " still missing.");
+            }
+        }
+
         // --- Clean up missing footage from imported project ---
         // Templates with broken file references leave broken items in the
         // project panel. Remove unused missing footage to keep things clean.
@@ -1746,7 +1866,17 @@ function importComp(aepPath, displayName) {
                                     }
                                     return false;
                                 };
-                                if (mainComp) {
+                                // Check usage across EVERY imported comp, not just
+                                // mainComp, so footage referenced by a sibling/nested
+                                // comp is preserved as a visible, relinkable missing
+                                // placeholder rather than silently deleted (which
+                                // produced the "comp won't load into the timeline" bug).
+                                for (var _uci = 0; _uci < _allImportedComps.length; _uci++) {
+                                    _seenComps = {};
+                                    if (_checkUsage(_allImportedComps[_uci], cItem)) { isUsed = true; break; }
+                                }
+                                if (!isUsed && mainComp) {
+                                    _seenComps = {};
                                     isUsed = _checkUsage(mainComp, cItem);
                                 }
                                 if (!isUsed) {
@@ -1758,6 +1888,36 @@ function importComp(aepPath, displayName) {
                 }
             };
             _cleanupMissing(importedItem);
+
+            // Re-tally AFTER cleanup so the warning reflects reality. The relink
+            // pass counts every un-relinkable source, but the cleanup pass above
+            // just DELETED the ones no comp uses. Only footage that survived
+            // (because a comp references it) AND is still missing on disk is a
+            // genuine problem worth warning the user about. Counting pre-cleanup
+            // would fire a scary "could not relink" alert on a perfectly intact
+            // import that merely carried unused-missing leftovers.
+            var _scanSurviving = function (folder) {
+                for (var si = 1; si <= folder.numItems; si++) {
+                    var sItem;
+                    try { sItem = folder.item(si); } catch (e) { continue; }
+                    if (sItem instanceof FolderItem) { _scanSurviving(sItem); continue; }
+                    if (!(sItem instanceof FootageItem)) continue;
+                    var sMiss = false;
+                    try { sMiss = !!sItem.footageMissing; } catch (e) {}
+                    if (!sMiss) {
+                        try {
+                            if (sItem.mainSource && sItem.mainSource.file && !sItem.mainSource.file.exists) sMiss = true;
+                        } catch (e) {}
+                    }
+                    if (sMiss) {
+                        _relinkStats.survivingMissing++;
+                        if (_relinkStats.survivingNames.length < 30) {
+                            try { _relinkStats.survivingNames.push(String(sItem.name || '')); } catch (e) {}
+                        }
+                    }
+                }
+            };
+            try { _scanSurviving(importedItem); } catch (e) {}
         }
 
         if (mainComp && mainComp.name !== compName) {
@@ -1817,7 +1977,20 @@ function importComp(aepPath, displayName) {
         }
 
         app.endUndoGroup();
-        return mainComp ? "Success: '" + compName + "' imported." : "Success: Project imported.";
+        var _resultMsg = mainComp ? "Success: '" + compName + "' imported." : "Success: Project imported.";
+        // Append a clear, parseable warning ONLY for footage that survived cleanup
+        // (a comp actually uses it) yet is still missing on disk, so the panel can
+        // tell the user instead of presenting a silently-broken comp. Unused-missing
+        // leftovers were deleted above and must not raise a false alarm.
+        if (_relinkStats.survivingMissing > 0) {
+            var _shown = _relinkStats.survivingNames.slice(0, 5).join(", ");
+            if (_relinkStats.survivingMissing > 5) _shown += ", ...";
+            _resultMsg += " [BLITZ_MISSING:" + _relinkStats.survivingMissing + "] Warning: " +
+                _relinkStats.survivingMissing + " source file" + (_relinkStats.survivingMissing === 1 ? "" : "s") +
+                " could not be relinked" + (_shown ? " (" + _shown + ")" : "") +
+                ". Open the comp and relink, or re-stash the template.";
+        }
+        return _resultMsg;
 
     } catch (e) {
         if (_importDialogsSuppressed) {

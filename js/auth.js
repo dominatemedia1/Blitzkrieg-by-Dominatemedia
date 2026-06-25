@@ -274,6 +274,13 @@
         } catch (err) {
             // Ignore sign-out errors
         }
+        // Wipe local caches on logout so a different user on this machine cannot
+        // reuse the prior user's persisted signed-URL read tokens or cached metadata.
+        try {
+            if (window.cloudLibrary && typeof window.cloudLibrary.clearLocalCache === 'function') {
+                window.cloudLibrary.clearLocalCache();
+            }
+        } catch (e) { /* non-fatal */ }
         currentUser = null;
         currentTeamMember = null;
         isBlitzkriegAdmin = false;

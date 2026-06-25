@@ -261,13 +261,17 @@
     // Per-op timeouts: imports of multi-GB AEPs with hundreds of nested
     // precomps routinely take 2-5 minutes — a 90s clear would let
     // focus-triggered loadLibrary fire mid-import and trigger the exact
-    // race the flag was designed to prevent. Stash/preview-gen finish in
-    // <30s in practice; imports get a 10-minute budget.
+    // race the flag was designed to prevent. Imports get a 10-minute budget.
+    // Stash is NOT <30s for large bundles: it renders previews + reduces +
+    // collects footage on the host thread, then reads the whole .aep + every
+    // collected asset back as base64 and uploads each — easily minutes on a
+    // heavy template. A 90s clear used to fire mid-upload and let a focus
+    // reload race the in-flight upload, so stash now gets a 5-minute budget.
     var _stashWatchdogTimer = null;
     var _STASH_WATCHDOG_BY_OP = {
         'import': 600000,                // 10 min — large AEP imports
         'generatePreviewFrames': 120000, // 2 min — frame render
-        'stash': 90000,                  // 90s default
+        'stash': 300000,                 // 5 min — stash + read-back + upload
         'unknown': 90000
     };
     function setStashInProgress(val, label) {
@@ -288,6 +292,13 @@
             }, timeoutMs);
         }
     }
+    // Hard ceiling for a single file read back over the CEP bridge during upload.
+    // A file is read as ONE base64 string, which materializes ~4-5 full copies of
+    // its bytes across the ExtendScript engine and the JS heap at once; past ~1GB
+    // this reliably OOMs the CEP renderer and takes AE down with it. We convert
+    // that crash into a clear, actionable error instead. Tune if needed.
+    var MAX_UPLOAD_FILE_BYTES = 1024 * 1024 * 1024; // 1 GB
+
     var bulkSelectedIds = new Set(); // Track selected items for bulk operations
     var bulkMode = false; // Whether bulk selection mode is active
 
@@ -685,21 +696,48 @@
                         return;
                     }
                     var paths = [];
+                    var versionMap = {};
                     for (var fsi = 0; fsi < allComps.length; fsi++) {
-                        if (allComps[fsi].storagePath) paths.push(allComps[fsi].storagePath);
+                        var _sp = allComps[fsi].storagePath;
+                        if (_sp) {
+                            paths.push(_sp);
+                            // Pass the current content version so Sync All also re-pulls
+                            // templates whose cloud content changed since they were synced,
+                            // not just ones that were never downloaded.
+                            versionMap[_sp] = allComps[fsi].contentVersion || '';
+                        }
                     }
                     if (paths.length === 0) { showToast('No templates to sync', true); return; }
                     showToast('Starting full library sync...');
                     forceBtn.disabled = true;
                     forceBtn.textContent = 'Syncing...';
                     window.localSync.syncAll(paths, function(progress) {
-                        if (progress.done >= progress.total) {
-                            forceBtn.disabled = false;
-                            forceBtn.textContent = 'Sync All';
-                            showToast('Library sync complete: ' + progress.done + ' templates');
-                            _updateSyncBadge();
+                        // Intermediate progress only — completion is handled on resolve
+                        // (the progress count includes failures and would mislead).
+                        if (progress && progress.total > 0 && progress.current) {
+                            forceBtn.textContent = 'Syncing ' + progress.done + '/' + progress.total;
                         }
-                    }).catch(function(err) {
+                    }, versionMap).then(function(result) {
+                        forceBtn.disabled = false;
+                        forceBtn.textContent = 'Sync All';
+                        var did = result ? (result.synced || 0) : 0;
+                        var failed = result ? (result.failed || 0) : 0;
+                        if (did === 0 && failed === 0) {
+                            showToast('Library already up to date');
+                        } else {
+                            showToast('Library sync complete: ' + did + ' synced' + (failed ? ', ' + failed + ' failed' : ''), failed > 0);
+                        }
+                        // Re-point freshly-synced templates at their disk mirror, then
+                        // refresh ONLY when a template view is active (renderCompsGrid
+                        // would otherwise rebuild analytics/submissions/review).
+                        _applyLocalAssetCache(allComps);
+                        if (activeCategory !== '__analytics'
+                            && String(activeCategory).indexOf('__submissions_') !== 0
+                            && activeCategory !== '__review_pending') {
+                            renderCompsGrid();
+                        }
+                        _updateSyncBadge();
+                    }, function(err) {
                         forceBtn.disabled = false;
                         forceBtn.textContent = 'Sync All';
                         showToast('Sync failed: ' + (err && err.message || err), true);
@@ -1460,6 +1498,11 @@
             var elapsed = Date.now() - loadStart;
             debugLog('loadLibrary: Loaded ' + comps.length + ' templates from cloud in ' + elapsed + 'ms', comps.length > 0 ? 'success' : 'warn');
             allComps = comps;
+            // Serve thumbnails/previews from the local disk mirror where a template
+            // is fully synced and content-current, so the grid does not re-sign
+            // dozens of Supabase URLs on every launch (the "thumbnails reload every
+            // launch" complaint). Stale/unsynced templates fall through to signing.
+            _applyLocalAssetCache(allComps);
             _invalidateCategoryCache();
             // Only render template grid if we're on a template view.
             // Do NOT overwrite analytics, submissions, or review views.
@@ -1481,26 +1524,11 @@
             // Update admin bar with missing thumbnail count
             updateAdminBarLabel();
 
-            // Background sync: queue local mirror downloads for any templates
-            // not yet cached locally. Runs after grid render so UI stays responsive.
-            if (window.localSync && window.localSync.getLibraryPath() && allComps.length > 0) {
-                setTimeout(function () {
-                    var paths = [];
-                    for (var bsi = 0; bsi < allComps.length; bsi++) {
-                        if (allComps[bsi].storagePath) paths.push(allComps[bsi].storagePath);
-                    }
-                    if (paths.length > 0) {
-                        window.localSync.syncAll(paths).then(function (result) {
-                            if (result && result.synced > 0) {
-                                debugLog('Background sync: ' + result.synced + ' synced' + (result.failed ? ', ' + result.failed + ' failed' : ''));
-                                _updateSyncBadge();
-                            }
-                        }).catch(function (err) {
-                            debugLog('Background sync error: ' + (err && err.message || err), 'warn');
-                        });
-                    }
-                }, 3000);
-            }
+            // NO background auto-sync. Local mirroring is MANUAL only — the user
+            // triggers it with the "Sync All" button (#sync-force-all). This stops
+            // the panel from silently downloading the entire library on every
+            // launch. The badge still reflects current local-mirror coverage.
+            _updateSyncBadge();
 
             if (pendingLibraryReload) {
                 pendingLibraryReload = false;
@@ -2012,8 +2040,8 @@
             if (missing > 0) parts.push(missing + ' missing thumbnails');
             if (noPreview > 0) parts.push(noPreview + ' missing previews');
             label.textContent = parts.join(', ') + (refreshCepBridgeState()
-                ? ' — click Generate to fix'
-                : ' — open in After Effects to generate');
+                ? '. Click Generate to fix'
+                : '. Open in After Effects to generate');
         }
     }
 
@@ -2041,11 +2069,11 @@
             badge.innerHTML = '<svg class="sync-badge-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><span>No templates</span>';
         } else if (displaySynced >= total) {
             badge.className = 'sync-badge sync-badge-complete';
-            badge.title = 'Library fully synced — ' + displaySynced + '/' + total;
+            badge.title = 'Library fully synced: ' + displaySynced + '/' + total;
             badge.innerHTML = '<svg class="sync-badge-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg><span>' + displaySynced + '/' + total + ' synced</span>';
         } else if (displaySynced > 0) {
             badge.className = 'sync-badge sync-badge-partial';
-            badge.title = 'Syncing — ' + displaySynced + '/' + total + ' cached locally. Click to sync all.';
+            badge.title = 'Syncing: ' + displaySynced + '/' + total + ' cached locally. Click to sync all.';
             badge.innerHTML = '<svg class="sync-badge-icon sync-spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg><span>' + displaySynced + '/' + total + ' synced</span>';
         } else {
             badge.className = 'sync-badge sync-badge-none';
@@ -2057,6 +2085,60 @@
     /**
      * Build HTML string for a single comp card (extracted for reuse in pagination)
      */
+    // Wave 2B caching: rewrite a template's thumbnail + preview-frame URLs to
+    // local-mirror file:// paths when it is fully synced AND content-current.
+    // No host round-trip — getLocalDirIfComplete reads the sync state synchronously
+    // and returns '' for unsynced or stale templates, which then fall through to
+    // the normal cloud-signing path. Mutates the comp objects in place.
+    function _applyLocalAssetCache(comps) {
+        if (!comps || !comps.length) return;
+        if (!window.localSync || typeof window.localSync.getLibraryPath !== 'function' || !window.localSync.getLibraryPath()) return;
+        var hasBatch = typeof window.localSync.getLocalDirsIfComplete === 'function';
+        if (!hasBatch && typeof window.localSync.getLocalDirIfComplete !== 'function') return;
+        // Resolve every template's current local dir in ONE state parse. The per-comp
+        // getLocalDirIfComplete re-parsed the whole sync-state blob ~2x per comp, so a
+        // 112-card library did ~225 synchronous JSON.parses on every load; batch it.
+        var dirMap = null;
+        if (hasBatch) {
+            var items = [];
+            for (var j = 0; j < comps.length; j++) {
+                if (comps[j] && comps[j].storagePath) {
+                    items.push({ storagePath: comps[j].storagePath, contentVersion: comps[j].contentVersion });
+                }
+            }
+            try { dirMap = window.localSync.getLocalDirsIfComplete(items); } catch (e) { dirMap = null; }
+        }
+        var served = 0;
+        for (var i = 0; i < comps.length; i++) {
+            var comp = comps[i];
+            if (!comp || !comp.storagePath) continue;
+            var dir = '';
+            if (dirMap) {
+                dir = dirMap[comp.storagePath] || '';
+            } else {
+                try { dir = window.localSync.getLocalDirIfComplete(comp.storagePath, comp.contentVersion); } catch (e) { dir = ''; }
+            }
+            if (!dir) { comp._localCached = false; continue; }
+            // Skip templates with no generated thumbnail (the owner-deferred backlog):
+            // their disk comp.png does not exist either, so pointing at it would only cost
+            // a doomed file:// load + cloud re-sign before falling to the letter placeholder.
+            // Leave those on the normal cloud/placeholder path.
+            if (!comp.thumbnailVerified) { comp._localCached = false; continue; }
+            // Serve only the primary thumbnail (comp.png) from disk — it is always
+            // mirrored and always visible, so it is the real per-launch re-sign cost.
+            // We deliberately do NOT point thumbnailAlt or preview frames at disk: the
+            // local "complete" flag only guarantees the .aep, so those files can be
+            // absent/short in the mirror and have no per-frame fallback. Preview frames
+            // stay cloud-lazy-signed (now backed by the persisted signed-URL cache, so
+            // not re-signed every launch). If disk comp.png is missing, handleThumbError
+            // re-signs the cloud copy.
+            comp.thumbUrl = pathToFileUrl(dir + '/comp.png');
+            comp._localCached = true;
+            served++;
+        }
+        if (served > 0) debugLog('Cache: serving ' + served + ' thumbnail(s) from local disk mirror', 'info');
+    }
+
     function buildCompCardHtml(comp) {
         var safeUniqueId = escapeHTML(comp.uniqueId);
         var safeCategory = escapeHTML(comp.category);
@@ -2109,13 +2191,16 @@
         var placeholderHtml = '<div class="thumb-placeholder" style="background-color:' + placeholderColor + '"><span class="thumb-placeholder-initial">' + escapeHTML(nameInitial) + '</span></div>';
 
         var altAttr = safeThumbSrcAlt ? ' data-src-alt="' + safeThumbSrcAlt + '"' : '';
+        // Mark disk-served thumbnails so handleThumbError can recover via cloud
+        // signing (instead of blacklisting) if the local mirror file is missing.
+        var localThumbAttr = comp._localCached ? ' data-local-thumb="1"' : '';
         var cloudThumbAttrs = '';
         if (!thumbSrc && isCloudThumb && !isBlacklisted) {
             cloudThumbAttrs = ' data-thumb-path="' + escapeHTML(comp.thumbPath) + '"';
             if (comp.thumbPathAlt) cloudThumbAttrs += ' data-thumb-alt-path="' + escapeHTML(comp.thumbPathAlt) + '"';
         }
         var thumbHtml = thumbSrc || cloudThumbAttrs
-            ? '<img' + (thumbSrc ? ' data-src="' + safeThumbSrc + '"' : '') + altAttr + cloudThumbAttrs + ' alt="Thumbnail" class="comp-thumbnail lazy-thumb" loading="lazy">' + placeholderHtml
+            ? '<img' + (thumbSrc ? ' data-src="' + safeThumbSrc + '"' : '') + altAttr + localThumbAttr + cloudThumbAttrs + ' alt="Thumbnail" class="comp-thumbnail lazy-thumb" loading="lazy">' + placeholderHtml
             : placeholderHtml;
 
         var isFav = isFavorite(comp.uniqueId);
@@ -2318,6 +2403,22 @@
             img.dataset.altTried = '1';
             img.src = img.dataset.srcAlt;
             return; // Give the alt URL a chance to load
+        }
+        // A local-mirror (file://) thumbnail failed — the disk file is missing or
+        // stale even though the sync state claims complete. Recover by signing the
+        // CLOUD copy rather than blacklisting a template whose cloud thumbnail is
+        // perfectly fine. queueThumbnailSigning re-sets img.src from data-thumb-path.
+        var cardLocal = img.closest('.stash-item');
+        if (!img.dataset.cloudFallbackTried && img.dataset.localThumb === '1'
+            && cardLocal && cardLocal.dataset.storagePath
+            && window.cloudLibrary && typeof window.cloudLibrary.signPaths === 'function') {
+            img.dataset.cloudFallbackTried = '1';
+            img.dataset.localThumb = '0';
+            img.dataset.altTried = '';                 // allow the cloud alt a fresh attempt
+            img.dataset.thumbPath = cardLocal.dataset.storagePath + '/comp.png';
+            img.dataset.thumbAltPath = cardLocal.dataset.storagePath + '/thumbnail.png';
+            queueThumbnailSigning(img);
+            return;
         }
         img.style.display = 'none';
         var placeholder = img.parentElement.querySelector('.thumb-placeholder');
@@ -2881,9 +2982,12 @@
         var categoryName = sanitizeCategoryName(rawCategory);
 
         addCompModal.style.display = 'none';
-        setStashInProgress(true);
+        setStashInProgress(true, 'stash');
         showSpinner();
-        showToast('Submitting composition for review...');
+        // Honest expectation: the export runs synchronously inside AE's host
+        // thread, so AE itself (not this panel) may be unresponsive for a moment
+        // on heavier comps. Tell the user so a brief freeze doesn't read as a crash.
+        showToast('Exporting from After Effects. AE may pause briefly...');
 
         var safeCategory = escapeForExtendScript(categoryName);
 
@@ -2996,7 +3100,7 @@
                         var liveUserResult = await sb.auth.getUser();
                         var liveUser = liveUserResult && liveUserResult.data && liveUserResult.data.user;
                         if (!liveUser || liveUser.id !== userId) {
-                            throw new Error('Auth session changed during upload — please log in again and resubmit.');
+                            throw new Error('Auth session changed during upload. Please log in again and resubmit.');
                         }
                         // Pin to the live JWT id so insert() carries it.
                         userId = liveUser.id;
@@ -3223,6 +3327,16 @@
         }
         if (!aepName) throw new Error('No .aep file found');
 
+        // Guard against CEP renderer OOM: a multi-hundred-MB file read back as a
+        // single base64 string materializes several full copies in memory and can
+        // crash AE. Reject oversized files with a clear, actionable error instead.
+        var aepSize = await fileSizeAsync(compDir + '/' + aepName);
+        if (aepSize > MAX_UPLOAD_FILE_BYTES) {
+            throw new Error('This composition\'s .aep is ' + formatBytesShort(aepSize) +
+                ', over the ' + formatBytesShort(MAX_UPLOAD_FILE_BYTES) +
+                ' panel-upload limit. Reduce the project (proxies/transcode footage) or upload it manually.');
+        }
+
         // Read AEP file
         var aepBlob = await readFileAsBlobAsync(compDir + '/' + aepName, 'application/octet-stream');
 
@@ -3261,6 +3375,15 @@
         for (var bf = 0; bf < allRelFiles.length; bf++) {
             var relPath = normalizeBundleRelativePath(allRelFiles[bf]);
             if (isSupportFile(relPath, aepName)) continue;
+            // Same OOM guard for collected footage. A single oversized source can
+            // never round-trip through base64, so fail the whole upload with a
+            // clear message rather than shipping a broken bundle or crashing.
+            var assetSize = await fileSizeAsync(compDir + '/' + relPath);
+            if (assetSize > MAX_UPLOAD_FILE_BYTES) {
+                throw new Error('Footage file "' + relPath + '" is ' + formatBytesShort(assetSize) +
+                    ', over the ' + formatBytesShort(MAX_UPLOAD_FILE_BYTES) +
+                    ' panel-upload limit. Use lighter footage (proxy/transcode) or upload this template manually.');
+            }
             try {
                 bundleFiles.push({
                     relativePath: relPath,
@@ -3555,6 +3678,24 @@
     }
 
     /**
+     * Show the right toast for an importComp result. The host appends a
+     * [BLITZ_MISSING:N] marker plus a human-readable warning when N source files
+     * could not be relinked from the (Footage)/ bundle — surface that to the user
+     * (alert styling) instead of a plain success, so a partially-broken import is
+     * never presented as fully clean.
+     */
+    function _showImportResultToast(result, successMsg) {
+        var res = result || '';
+        var m = /\[BLITZ_MISSING:(\d+)\]\s*/.exec(res);
+        if (m && parseInt(m[1], 10) > 0) {
+            var warn = res.substring(m.index + m[0].length).replace(/^Warning:\s*/i, '').trim();
+            showToast(successMsg + (warn ? '  ' + warn : ''), true);
+        } else {
+            showToast(successMsg);
+        }
+    }
+
+    /**
      * Import from a local AEP file — no download needed.
      * Shared by local-mirror fast path and sync-then-import flows.
      */
@@ -3567,7 +3708,7 @@
             setStashInProgress(false);
             hideSpinner();
             if (result && result.indexOf('Success') === 0) {
-                showToast('Imported from local library!');
+                _showImportResultToast(result, 'Imported from local library!');
                 if (uniqueId) addToRecent(uniqueId);
                 if (window.blitzkriegAnalytics && _trackComp) {
                     window.blitzkriegAnalytics.trackImport(_trackComp.name, _trackComp.category, storagePath);
@@ -3614,7 +3755,7 @@
 
                         if (result && result.indexOf('Success') === 0) {
                             hideSpinner();
-                            showToast('Imported full bundle and opened in timeline!');
+                            _showImportResultToast(result, 'Imported full bundle and opened in timeline!');
                             if (uniqueId) addToRecent(uniqueId);
                             if (window.blitzkriegAnalytics && _trackComp) {
                                 window.blitzkriegAnalytics.trackImport(_trackComp.name, _trackComp.category, storagePath);
@@ -3670,18 +3811,27 @@
             // the original cloud-download path if localSync is unavailable.
             if (window.localSync && window.localSync.getLibraryPath()) {
                 window.localSync.checkLocal(storagePath).then(function(info) {
-                    if (info.exists && info.complete && info.aepPath) {
-                        // Fast path: template already in local mirror
-                        debugLog('IMPORT: local fast path — ' + info.aepPath);
+                    var _impVer = (_trackComp && _trackComp.contentVersion) || '';
+                    // Only take the fast path if the mirror is complete AND content-current.
+                    // getLocalDirIfComplete returns '' on a KNOWN version mismatch, so a stale
+                    // mirror (cloud content changed, no Sync All yet) falls through to
+                    // sync-then-import and re-pulls the fresh .aep. Without this, the grid would
+                    // show the fresh cloud thumbnail while import served the out-of-date comp.
+                    var _mirrorCurrent = !_impVer || (typeof window.localSync.getLocalDirIfComplete === 'function'
+                        && !!window.localSync.getLocalDirIfComplete(storagePath, _impVer));
+                    if (info.exists && info.complete && info.aepPath && _mirrorCurrent) {
+                        // Fast path: template already in local mirror and content-current
+                        debugLog('IMPORT: local fast path - ' + info.aepPath);
                         _doImportLocalAep(info.aepPath, uniqueId, _trackComp, storagePath);
                         return;
                     }
-                    // Template not synced — sync to local mirror first, then import
+                    // Template not synced or stale — sync to local mirror first, then import.
+                    // syncTemplate re-pulls unconditionally, so a stale mirror is refreshed.
                     debugLog('IMPORT: syncing ' + storagePath + ' to local mirror');
                     showSpinner();
                     setStashInProgress(true, 'import');
                     showToast('Syncing to library...');
-                    window.localSync.syncTemplate(storagePath).then(function(result) {
+                    window.localSync.syncTemplate(storagePath, _impVer).then(function(result) {
                         if (result && result.localAepPath) {
                             // _doImportLocalAep manages its own spinner + stashInProgress lifecycle
                             _doImportLocalAep(result.localAepPath, uniqueId, _trackComp, storagePath);
@@ -3727,7 +3877,7 @@
                 return;
             }
             if (result.indexOf('Success') === 0) {
-                showToast('Imported and opened in timeline!');
+                _showImportResultToast(result, 'Imported and opened in timeline!');
                 if (uniqueId) {
                     addToRecent(uniqueId);
                 }
@@ -4949,7 +5099,7 @@
                 } else if (code === 'not-admin') {
                     showToast('Admin role required (server-side check).', true);
                 } else if (code === 'partial-move') {
-                    showToast('Approve failed mid-batch — DB unchanged. Click Approve to retry.', true);
+                    showToast('Approve failed mid-batch. DB unchanged. Click Approve to retry.', true);
                 } else {
                     showToast('Approve failed: ' + detail, true);
                 }
@@ -5057,7 +5207,7 @@
             .single()
             .then(async function(res) {
                 if (res.error || !res.data) {
-                    showToast('Cannot withdraw — submission not found or not yours.', true);
+                    showToast('Cannot withdraw: submission not found or not yours.', true);
                     return;
                 }
 
@@ -6620,6 +6770,32 @@
             + '?_=' + Date.now();
     }
 
+    // True when the CEP bridge is usable: __adobe_cep__ present and getSystemPath
+    // callable. The OTA install needs the bridge to resolve the extension root and
+    // write files, so a check that runs before this is ready will spuriously fail.
+    function _isCepBridgeReady() {
+        try {
+            return !!(window.__adobe_cep__ && refreshCepBridgeState()
+                && csInterface && typeof csInterface.getSystemPath === 'function'
+                && typeof SystemPath !== 'undefined');
+        } catch (e) {
+            return false;
+        }
+    }
+
+    // Resolve true once the bridge is ready, or false after timeoutMs. Polled so
+    // the first update check waits for AE instead of racing it at startup.
+    function _waitForCepBridge(timeoutMs) {
+        return new Promise(function(resolve) {
+            var deadline = Date.now() + (timeoutMs || 20000);
+            (function poll() {
+                if (_isCepBridgeReady()) { resolve(true); return; }
+                if (Date.now() >= deadline) { resolve(false); return; }
+                setTimeout(poll, 500);
+            })();
+        });
+    }
+
     function getExtensionRootHintForUpdate() {
         try {
             if (!refreshCepBridgeState() || !csInterface || typeof csInterface.getSystemPath !== 'function' ||
@@ -6633,14 +6809,37 @@
         }
     }
 
+    // Parse a version string into [major, minor, patch], tolerating a leading
+    // 'v' and surrounding whitespace. Returns null if it is not a valid numeric
+    // version, so callers never offer an update for a malformed/garbage remote.
+    function _parseVersion(v) {
+        var s = String(v == null ? '' : v).trim().replace(/^v/i, '');
+        if (!s) return null;
+        var parts = s.split('.');
+        var out = [];
+        for (var i = 0; i < parts.length; i++) {
+            var seg = parts[i].replace(/\s+/g, '');
+            if (!/^\d+$/.test(seg)) return null;   // non-numeric segment => invalid
+            out.push(parseInt(seg, 10));
+        }
+        if (out.length === 0) return null;
+        while (out.length < 3) out.push(0);
+        return out;
+    }
+
     function isNewerVersion(remote, local) {
-        var rParts = String(remote).split('.').map(Number);
-        var lParts = String(local).split('.').map(Number);
+        var r = _parseVersion(remote);
+        var l = _parseVersion(local);
+        // Never offer an update for an unparseable/garbage remote version, and
+        // never compare against an unknown local version. This is the guard that
+        // stops a malformed version.json from showing a false "update available"
+        // banner while already on the latest build.
+        if (!r || !l) return false;
         for (var i = 0; i < 3; i++) {
-            var r = rParts[i] || 0;
-            var l = lParts[i] || 0;
-            if (r > l) return true;
-            if (r < l) return false;
+            var rv = r[i] || 0;
+            var lv = l[i] || 0;
+            if (rv > lv) return true;
+            if (rv < lv) return false;
         }
         return false;
     }
@@ -6649,6 +6848,9 @@
     var _updateWatchdog = null; // setTimeout handle — fires _failUpdate if the install hangs silently
     var _consecutiveCheckFailures = 0; // track repeated version-check failures across 30-min intervals
     var _pendingUpdateIntegrity = null; // SHA-256 integrity map for the update being installed
+    var _consecutiveBridgeDefers = 0; // back-to-back installs deferred because the AE bridge was not ready
+    var _bridgeDeferReported = false; // one-shot: raise a single server-visible signal for a sustained defer, not every cycle
+    var BRIDGE_DEFER_REPORT_THRESHOLD = 3; // ~1h of back-to-back defers before the soft signal (host likely stuck / outside AE)
 
     // Persistent failed-version record. Survives panel reload so a release that
     // fails to install (e.g. UTF-8 mangle, network blocked, ZXP host bug) does
@@ -6848,7 +7050,7 @@
                 if (!settingsBtn) return;
                 dot = document.createElement('span');
                 dot.id = 'blitz-check-fail-dot';
-                dot.title = 'Version check failing — click to retry';
+                dot.title = 'Version check failing. Click to retry';
                 dot.style.cssText = 'position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:#F87171;cursor:pointer;z-index:10';
                 dot.onclick = function(e) {
                     e.stopPropagation();
@@ -6965,9 +7167,12 @@
     }
 
     // Recheck for updates every 30 minutes — covers long-running sessions where
-    // the editor leaves AE open all day. First check still fires on auth-ready.
+    // the editor leaves AE open all day. The FIRST check waits (up to 20s) for the
+    // AE bridge so a pending update does not try to resolve the extension root
+    // before AE is ready and spuriously fail. The interval check then retries
+    // regardless (by then the bridge is effectively always up).
     function startUpdateChecker() {
-        checkForUpdates(false);
+        _waitForCepBridge(20000).then(function() { checkForUpdates(false); });
         setInterval(function() { checkForUpdates(false); }, 30 * 60 * 1000);
     }
 
@@ -7183,9 +7388,36 @@
         safeEvalScript('getExtensionRootPath("' + escapeForExtendScript(rootHint) + '")', function(rootPath) {
             if (!rootPath || rootPath === 'EvalScript error.' || rootPath === 'undefined' ||
                 rootPath.indexOf('ERROR:') === 0) {
+                // If the AE bridge is not ready yet, this is a transient startup
+                // race, NOT a real install failure. Abort quietly and let the next
+                // scheduled check retry; counting it as a failure would burn toward
+                // the 3-strike "reinstall manually" banner for nothing.
+                if (!_isCepBridgeReady()) {
+                    _clearWatchdog();
+                    _pendingUpdateIntegrity = null;
+                    _updateInProgress = false;
+                    _removeUpdateBanner();
+                    // Transient at startup; do NOT record a failed attempt (that would
+                    // burn toward the 3-strike banner). Log locally every cycle at info
+                    // (no server spam), but raise ONE server-visible signal if the
+                    // bridge stays absent across many cycles (a host stuck outside AE),
+                    // so a permanently-blocked updater is observable instead of silent.
+                    _consecutiveBridgeDefers++;
+                    debugLog('Update deferred (' + _consecutiveBridgeDefers + 'x): AE bridge not ready to resolve extension root; will retry on next check', 'info');
+                    if (_consecutiveBridgeDefers >= BRIDGE_DEFER_REPORT_THRESHOLD && !_bridgeDeferReported) {
+                        _bridgeDeferReported = true;
+                        debugLog('Update to v' + version + ' repeatedly deferred: After Effects bridge unavailable. If this panel is inside AE, restart AE; otherwise updates are paused until AE is detected.', 'warn');
+                    }
+                    return;
+                }
                 _failUpdate(version, 'cannot resolve extension root' + (rootHint ? ' from CEP hint' : ''));
                 return;
             }
+
+            // Bridge resolved the root successfully — clear any deferral tracking so
+            // the soft signal can re-arm if a future session is stuck again.
+            _consecutiveBridgeDefers = 0;
+            _bridgeDeferReported = false;
 
             var separator = rootPath.indexOf('\\') >= 0 ? '\\' : '/';
             var stagingDirName = '.update-staging-' + version + '-' + Date.now();
@@ -7550,6 +7782,28 @@
         });
     }
 
+    /** Get a file's size in bytes via ExtendScript; resolves -1 if unknown. */
+    function fileSizeAsync(filePath) {
+        return new Promise(function(resolve) {
+            safeEvalScript(
+                '(function(){try{var f=new File("' + escapeForExtendScript(filePath) + '");return f.exists?String(f.length):"-1";}catch(e){return "-1";}})()',
+                function(r) {
+                    var n = parseInt(r, 10);
+                    resolve(isNaN(n) ? -1 : n);
+                }
+            );
+        });
+    }
+
+    /** Compact human byte size, e.g. "742 MB" / "1.4 GB". */
+    function formatBytesShort(bytes) {
+        if (!bytes || bytes < 0) return '0 B';
+        if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(1) + ' GB';
+        if (bytes >= 1048576) return (bytes / 1048576).toFixed(0) + ' MB';
+        if (bytes >= 1024) return (bytes / 1024).toFixed(0) + ' KB';
+        return bytes + ' B';
+    }
+
     /** Check file existence via evalScript (always works). */
     function fileExistsAsync(filePath) {
         return new Promise(function(resolve) {
@@ -7696,7 +7950,7 @@
                                     if (parsed.skipReason === 'memory_limit') {
                                         // Friendly toast for editors — surfaces Muhammad's
                                         // fix so they don't spend time debugging.
-                                        showToast('Memory limit hit on "' + comp.name + '" — lower Motion Tile output values and re-stash.', true);
+                                        showToast('Memory limit hit on "' + comp.name + '". Lower Motion Tile output values and re-stash.', true);
                                         debugLog('GEN: skipped (memory_limit) — ' + (parsed.hint || parsed.memoryError || 'AE memory cap exceeded'), 'error');
                                     } else {
                                         if (parsed.missingFootage && parsed.missingFootage.length) {
@@ -7714,7 +7968,7 @@
                                 } else if (parsed.memoryError) {
                                     // Frame-loop bailed mid-way because AE ran out of memory.
                                     // The thumbnail already rendered so we keep the partial result.
-                                    showToast('Memory limit hit on "' + comp.name + '" — thumbnail saved but preview frames incomplete. Lower Motion Tile output values.', true);
+                                    showToast('Memory limit hit on "' + comp.name + '". Thumbnail saved but preview frames incomplete. Lower Motion Tile output values.', true);
                                     debugLog('GEN: memory limit reached after ' + parsed.frameCount + '/' + parsed.plannedFrameCount + ' frames — ' + (parsed.hint || parsed.memoryError), 'error');
                                 } else if (parsed.incompleteFrames) {
                                     debugLog('GEN: ' + parsed.frameCount + '/' + parsed.plannedFrameCount + ' frames (rendering bailed early after consecutive failures)', 'warn');
@@ -7879,6 +8133,10 @@
                     metadata.previewFrames = frameCount || 0;
                     metadata.cloudPreviewFrameCount = frameCount || 0;
                     metadata.cloudPreviewGenerated = frameCount > 0;
+                    // Bump the stash timestamp so the content fingerprint changes; a synced
+                    // local mirror then detects this regenerated thumbnail as stale and
+                    // re-pulls it on the next Sync All (otherwise the disk copy stays old).
+                    metadata.updatedAt = Date.now();
                     var metaBlob = new Blob([JSON.stringify(metadata)], { type: 'application/json' });
                     return sb.storage.from('blitzkrieg').upload(metaPath, metaBlob, {
                         contentType: 'application/json',
@@ -7975,7 +8233,7 @@
             var bar = document.getElementById('generate-progress-bar');
             var text = document.getElementById('generate-progress-text');
             if (bar) bar.style.width = pct + '%';
-            if (text) text.textContent = processed + '/' + total + ' — ' + succeeded + ' done, ' + failed + ' failed';
+            if (text) text.textContent = processed + '/' + total + ' (' + succeeded + ' done, ' + failed + ' failed)';
             showToast('Generating ' + currentItem + '/' + total + ': ' + (compsToProcess[processed] ? compsToProcess[processed].name : ''));
         }
 
