@@ -6796,17 +6796,41 @@
         });
     }
 
-    function getExtensionRootHintForUpdate() {
+    // Derive the extension's install directory from the panel's OWN location.
+    // index.html always lives at <extensionRoot>/index.html, so window.location
+    // is a reliable fallback when csInterface.getSystemPath(EXTENSION) returns ''
+    // (observed on some AE/CEP builds even with a ready bridge - the cause of the
+    // "cannot resolve extension root" update failures).
+    function _extensionRootFromLocation() {
         try {
-            if (!refreshCepBridgeState() || !csInterface || typeof csInterface.getSystemPath !== 'function' ||
-                typeof SystemPath === 'undefined') {
-                return '';
-            }
-            return csInterface.getSystemPath(SystemPath.EXTENSION) || '';
-        } catch (e) {
-            debugLog('Could not read CEP extension root hint: ' + (e && e.message || e), 'warn');
+            var href = (window.location && window.location.href) || '';
+            if (href.indexOf('file://') !== 0) return '';
+            var path = href.replace(/^file:\/\//, '').replace(/[?#].*$/, '');
+            try { path = decodeURI(path); } catch (e) { /* leave encoded */ }
+            // file:///C:/... -> strip the leading slash before a Windows drive
+            if (/^\/[A-Za-z]:\//.test(path)) path = path.slice(1);
+            // drop the trailing /index.html (or whatever file) to get the root dir
+            var lastSlash = path.lastIndexOf('/');
+            if (lastSlash > 0) path = path.slice(0, lastSlash);
+            return path;
+        } catch (e2) {
+            debugLog('Could not derive extension root from location: ' + (e2 && e2.message || e2), 'warn');
             return '';
         }
+    }
+
+    function getExtensionRootHintForUpdate() {
+        var hint = '';
+        try {
+            if (refreshCepBridgeState() && csInterface && typeof csInterface.getSystemPath === 'function' &&
+                typeof SystemPath !== 'undefined') {
+                hint = csInterface.getSystemPath(SystemPath.EXTENSION) || '';
+            }
+        } catch (e) {
+            debugLog('Could not read CEP extension root hint: ' + (e && e.message || e), 'warn');
+        }
+        // Fallback to the panel's own file:// location when CEP gives us nothing.
+        return hint || _extensionRootFromLocation();
     }
 
     // Parse a version string into [major, minor, patch], tolerating a leading
@@ -7410,7 +7434,7 @@
                     }
                     return;
                 }
-                _failUpdate(version, 'cannot resolve extension root' + (rootHint ? ' from CEP hint' : ''));
+                _failUpdate(version, 'cannot resolve extension root' + (rootHint ? ' (hint=' + rootHint + ')' : ' (no hint: CEP path empty and no file:// location)'));
                 return;
             }
 

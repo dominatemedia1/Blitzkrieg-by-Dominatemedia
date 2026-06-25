@@ -463,6 +463,13 @@
         return cached.url || '';
     }
 
+    // Guard so a permanently garbage-named template (bad data in storage, not a
+    // stale-cache artifact) can clear the cache AT MOST ONCE per session instead
+    // of on every single load. Without this, 4 visible templates whose folder
+    // names are pure timestamps wiped the metadata cache on every load (633 wipes
+    // in 21 days), forcing a full 378-file rescan each time = a major slowdown.
+    var _garbageCacheClearedThisSession = false;
+
     /**
      * Build comp objects from metadata results.
      * Thumbnail and preview URLs are signed lazily by the UI.
@@ -576,11 +583,18 @@
             });
         });
 
-        // If stale cache produced garbage names, clear it so next load
-        // pulls fresh manifest data from Supabase with correct display names.
-        if (staleCacheCount > 0) {
-            _log('buildCompsFromMetadata: ' + staleCacheCount + ' entries had garbage names — clearing stale cache', 'warn');
+        // If stale cache produced garbage names, clear it ONCE so the next load
+        // pulls fresh manifest data. Capped per session: if the garbage is
+        // permanent (genuinely bad folder names in storage, not a stale-cache
+        // artifact), a fresh pull produces the same garbage, so clearing every
+        // load just loops a full rescan forever. One clear recovers a real stale
+        // cache; the per-session guard prevents the rescan loop.
+        if (staleCacheCount > 0 && !_garbageCacheClearedThisSession) {
+            _garbageCacheClearedThisSession = true;
+            _log('buildCompsFromMetadata: ' + staleCacheCount + ' entries had garbage names - clearing stale cache once this session', 'warn');
             clearLocalCache();
+        } else if (staleCacheCount > 0) {
+            _log('buildCompsFromMetadata: ' + staleCacheCount + ' entries still have garbage names (permanent bad data); cache NOT re-cleared - fix the source names', 'warn');
         }
 
         return allComps;
