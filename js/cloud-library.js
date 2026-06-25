@@ -54,6 +54,64 @@
     var _previewUrlCache = {};
     var _previewPathCache = {};
 
+    // ── Wave 2B: persist the signed-URL cache across panel reloads ──────────
+    // Signed URLs stay valid for hours; without persistence every reload re-signs
+    // every thumbnail (the "thumbnails reload every launch" complaint). We mirror
+    // the in-memory cache to localStorage (capped + expiry-pruned) and rehydrate
+    // on load so a reload within TTL reuses the still-valid URLs.
+    var SIGNED_URL_PERSIST_KEY = 'blitzkrieg_signed_urls';
+    var SIGNED_URL_PERSIST_MAX = 1500; // cap entries to stay well under quota
+    var _persistSignedTimer = null;
+
+    function _rehydrateSignedUrlCache() {
+        try {
+            var raw = localStorage.getItem(SIGNED_URL_PERSIST_KEY);
+            if (!raw) return;
+            var obj = JSON.parse(raw);
+            if (!obj || typeof obj !== 'object') return;
+            var now = Date.now();
+            var keys = Object.keys(obj);
+            for (var i = 0; i < keys.length; i++) {
+                var e = obj[keys[i]];
+                if (e && e.url && e.ts && (now - e.ts < SIGNED_URL_CACHE_TTL)) {
+                    _signedPathUrlCache[keys[i]] = { ts: e.ts, url: e.url };
+                }
+            }
+        } catch (e) { /* corrupt — ignore */ }
+    }
+
+    function _persistSignedUrlCache() {
+        // Debounced: coalesces a burst of signing into one localStorage write.
+        if (_persistSignedTimer) return;
+        _persistSignedTimer = setTimeout(function () {
+            _persistSignedTimer = null;
+            try {
+                var now = Date.now();
+                var keys = Object.keys(_signedPathUrlCache);
+                keys.sort(function (a, b) {
+                    return (_signedPathUrlCache[b].ts || 0) - (_signedPathUrlCache[a].ts || 0);
+                });
+                var out = {};
+                var kept = 0;
+                for (var i = 0; i < keys.length && kept < SIGNED_URL_PERSIST_MAX; i++) {
+                    var e = _signedPathUrlCache[keys[i]];
+                    if (e && e.url && e.ts && (now - e.ts < SIGNED_URL_CACHE_TTL)) {
+                        out[keys[i]] = { ts: e.ts, url: e.url };
+                        kept++;
+                    }
+                }
+                localStorage.setItem(SIGNED_URL_PERSIST_KEY, JSON.stringify(out));
+            } catch (e) { /* quota / serialize — non-fatal */ }
+        }, 500);
+    }
+
+    function _clearPersistedSignedUrls() {
+        if (_persistSignedTimer) { clearTimeout(_persistSignedTimer); _persistSignedTimer = null; }
+        try { localStorage.removeItem(SIGNED_URL_PERSIST_KEY); } catch (e) {}
+    }
+
+    _rehydrateSignedUrlCache();
+
     // localStorage cache for template metadata (persists across restarts)
     var META_CACHE_KEY = 'blitzkrieg_meta_cache';
     // Bump when cache schema changes or naming fixes require fresh data.
@@ -358,6 +416,7 @@
         _signedPathUrlCache = {};
         _previewUrlCache = {};
         _previewPathCache = {};
+        _clearPersistedSignedUrls();
         invalidateManifest();
     }
 
@@ -371,6 +430,7 @@
         _signedPathUrlCache = {};
         _previewUrlCache = {};
         _previewPathCache = {};
+        _clearPersistedSignedUrls();
     }
 
     /**
@@ -388,6 +448,7 @@
             Object.keys(_previewPathCache).forEach(function(key) {
                 if (key.indexOf(storagePath + '|') === 0) delete _previewPathCache[key];
             });
+            _persistSignedUrlCache();   // re-write the persisted copy without the dropped keys
         }
         invalidateManifest();
     }
@@ -474,6 +535,25 @@
 
             var categories = (mr.metadata && mr.metadata.categories) || [mr.categoryName];
 
+            // Content fingerprint for local-cache staleness (Wave 2B). Folds in the
+            // metadata stash/regen timestamp plus the comp's shape (frame count /
+            // thumbnail flag / duration / dimensions / frame rate). Sync All compares
+            // this against the version stored at sync time to decide whether to re-pull.
+            // LIMITATION (data-layer, deferred): an OUT-OF-BAND .aep/footage swap that
+            // rewrites the stored files WITHOUT changing metadata.json (e.g. a raw
+            // re-upload via the Supabase dashboard that keeps identical duration /
+            // dimensions / frame rate / preview count) is NOT detected and needs a
+            // manual Refresh. Folding a server etag/size into metadata at stash time
+            // would close this; tracked with the storage remediation pass.
+            var contentVersion = [
+                (meta.updatedAt || meta.created || 0),
+                previewFrameCount,
+                (meta.cloudThumbnailGenerated ? 1 : 0),
+                (meta.duration || 0),
+                (meta.width || 0) + 'x' + (meta.height || 0),
+                (meta.frameRate || 0)
+            ].join('.');
+
             allComps.push({
                 name: displayName,
                 category: mr.categoryName,
@@ -492,6 +572,7 @@
                 previewFrameCount: previewFrameCount,
                 thumbnailVerified: thumbnailVerified,
                 storagePath: storagePath,
+                contentVersion: contentVersion,
             });
         });
 
@@ -1236,6 +1317,75 @@
         return results;
     }
 
+    // Read a template's declared linked-comp/pre-comp dependencies from its
+    // metadata.json. Returns an array of sibling storagePaths (possibly empty).
+    // Forward-compatible: legacy templates have no `dependencies` key → []. The
+    // storage-remediation pass populates this for split Linked_Comp/Pre-comp
+    // templates so downloadTemplate can pull their files into the bundle.
+    async function getTemplateDependencies(storagePath) {
+        try {
+            var res = await sb.storage.from(BUCKET).download(storagePath + '/metadata.json');
+            if (res.error || !res.data) return [];
+            var text = await res.data.text();
+            if (!text) return [];
+            var meta = JSON.parse(text);
+            var deps = meta && meta.dependencies;
+            if (!deps || !deps.length) return [];
+            var out = [];
+            for (var i = 0; i < deps.length; i++) {
+                var d = deps[i];
+                if (typeof d === 'string' && d) out.push(d);
+                else if (d && typeof d.storagePath === 'string' && d.storagePath) out.push(d.storagePath);
+            }
+            return out;
+        } catch (e) {
+            return [];
+        }
+    }
+
+    // Fetch importable files from a template's declared dependencies (linked
+    // sub-comps / pre-comps that live in SEPARATE sibling folders the folder-local
+    // collection misses). Each fetched file is tagged with a relativePath under
+    // (Footage)/_deps/<i>_<folder>/ so the host-side relink pass (which walks
+    // (Footage)/ recursively and matches by basename) can re-point references.
+    // The leading "<i>_" disambiguates two dependencies that share a trailing
+    // folder name (e.g. CatA/Logo + CatB/Logo) so they cannot overwrite each
+    // other on disk. Returns [] for legacy templates (no manifest) or on error.
+    // Shared by both the cloud-download path (downloadTemplate) and the local
+    // mirror path (mirrorTemplate) so dependency relink is durable on both.
+    async function fetchDependencyExtras(storagePath) {
+        var depExtras = [];
+        try {
+            var deps = await getTemplateDependencies(storagePath);
+            for (var di = 0; di < deps.length; di++) {
+                var depPath = deps[di];
+                if (!depPath || depPath === storagePath) continue;
+                var depFiles = await collectAllFiles(depPath);
+                var depWanted = [];
+                for (var dfi = 0; dfi < depFiles.length; dfi++) {
+                    var drel = depFiles[dfi].substring(depPath.length + 1).toLowerCase();
+                    if (drel === 'metadata.json' || drel === 'comp.png' || drel === 'thumbnail.png' || drel === 'thumbnail.jpg') continue;
+                    if (drel.indexOf('preview/') === 0) continue;
+                    if (drel === '.emptyfolderplaceholder' || drel.indexOf('.ds_store') !== -1) continue;
+                    depWanted.push(depFiles[dfi]);
+                }
+                if (depWanted.length === 0) continue;
+                var depFolderName = di + '_' + ((depPath.split('/').pop()) || 'dep');
+                var fetched = await downloadStorageFiles(depWanted, depPath, 6);
+                for (var fdi = 0; fdi < fetched.length; fdi++) {
+                    fetched[fdi].relativePath = '(Footage)/_deps/' + depFolderName + '/' + fetched[fdi].relativePath;
+                    depExtras.push(fetched[fdi]);
+                }
+            }
+            if (depExtras.length > 0) {
+                _log('fetchDependencyExtras: fetched ' + depExtras.length + ' dependency file(s) from ' + deps.length + ' linked folder(s) for ' + storagePath, 'info');
+            }
+        } catch (depErr) {
+            _log('fetchDependencyExtras: skipped: ' + (depErr && depErr.message || depErr), 'warn');
+        }
+        return depExtras;
+    }
+
     // Download a template bundle for import/generation. The returned extraFiles
     // preserve collected footage/assets next to the AEP so AE can relink them.
     async function downloadTemplate(storagePath) {
@@ -1297,11 +1447,19 @@
             _log('downloadTemplate: downloaded AEP + ' + extras.length + ' bundle asset(s) for ' + storagePath, 'info');
         }
 
+        // --- Dependency-aware fetch (linked sub-comps / pre-comps) ---
+        // Some templates reference linked comps / pre-comps stored in SEPARATE
+        // sibling folders; the folder-local collection above misses them, so import
+        // lands with missing sources. Pull each declared dependency's importable
+        // files into the bundle under (Footage)/_deps/ so the host relink pass can
+        // re-point references. Legacy templates without the manifest get [].
+        var depExtras = await fetchDependencyExtras(storagePath);
+
         return {
             blob: downloadResult.data,
             fileName: chosenAepPath.split('/').pop(),
             storagePath: chosenAepPath,
-            extraFiles: extras
+            extraFiles: depExtras.length > 0 ? extras.concat(depExtras) : extras
         };
     }
 
@@ -1323,6 +1481,19 @@
                 aepPath = downloaded[i].path;
             }
         }
+        // Mirror declared dependencies too (split linked-comp / pre-comp folders)
+        // so a synced template relinks them durably from the persistent local
+        // library, matching the cloud-download path. Appended AFTER the template's
+        // own files so the template's own .aep keeps priority when the caller picks
+        // the import target. Dep files carry a (Footage)/_deps/<i>_<folder>/ relPath
+        // that lands them where the host relink walk indexes by basename.
+        var depExtras = await fetchDependencyExtras(storagePath);
+        for (var de = 0; de < depExtras.length; de++) {
+            if (depExtras[de] && depExtras[de].blob) {
+                totalSize += depExtras[de].blob.size;
+                downloaded.push(depExtras[de]);
+            }
+        }
         _log('mirrorTemplate: downloaded ' + downloaded.length + ' files (' + (totalSize / 1024 / 1024).toFixed(1) + 'MB) for ' + storagePath, 'info');
         return {
             files: downloaded,
@@ -1338,12 +1509,17 @@
     // storagePath is "Category/FolderName", checks are done via localSync.
     function verifyTemplateIntegrity(localBasePath, storagePath) {
         var fullPath = localBasePath + '/' + storagePath;
+        // Templates are NOT named template.aep — the .aep is named after the comp,
+        // so a fixed-name check fails for every real template. metadata.json is the
+        // only fixed-name requirement; .aep presence must be verified by scanning
+        // the folder for ANY .aep (see local-sync.js verifyTemplateIntegrity, the
+        // live path). anyAepRequired signals that contract to callers.
         var checks = [
-            { name: 'metadata.json', path: fullPath + '/metadata.json', required: true },
-            { name: 'template.aep', path: fullPath + '/template.aep', required: true }
+            { name: 'metadata.json', path: fullPath + '/metadata.json', required: true }
         ];
         return {
             checks: checks,
+            anyAepRequired: true,
             fullPath: fullPath
         };
     }
@@ -1784,6 +1960,7 @@
                 });
             }
         }
+        _persistSignedUrlCache();   // Wave 2B: mirror freshly-signed URLs to disk
         return result;
     }
 
@@ -1798,6 +1975,7 @@
         _signedPathUrlCache = {};
         _previewUrlCache = {};
         _previewPathCache = {};
+        _clearPersistedSignedUrls();
 
         var fresh = await fetchAllMetadata();
         if (!listTemplates._archives) listTemplates._archives = [];

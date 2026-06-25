@@ -4,3 +4,8 @@ dist/
 *.zxp
 *.p12
 node_modules/
+
+# Local env + worktree scaffolding (never commit)
+.env
+.env.*
+.wt-meta.json

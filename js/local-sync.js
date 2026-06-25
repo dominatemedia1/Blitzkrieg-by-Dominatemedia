@@ -203,16 +203,27 @@
             return _callExtendScript('blitzLocalExists("' + safe + '")').then(function (r) {
                 if (!r || !r.exists) return { exists: false, complete: false, aepPath: '' };
 
-                // Find the local .aep file — try template.aep first
-                var aepPath = local + '/template.aep';
-                return _callExtendScript('blitzLocalExists("' + aepPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '")').then(function (aepR) {
-                    if (!aepR || !aepR.exists) aepPath = ''; // will scan later
+                function _mk(aepPath) {
                     return {
                         exists: true,
                         complete: !!(tpl && tpl.complete),
-                        aepPath: aepPath,
+                        aepPath: aepPath || '',
                         fileCount: (tpl && tpl.files) || 0
                     };
+                }
+
+                // Find the local .aep. Real templates are NOT named template.aep
+                // (the .aep is named after the comp), so when template.aep is absent
+                // fall back to scanning the folder for any .aep. Without this scan the
+                // import fast path never resolves an aepPath and a fully-synced
+                // template is needlessly re-downloaded on every import.
+                var templateAep = local + '/template.aep';
+                return _callExtendScript('blitzLocalExists("' + templateAep.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '")').then(function (aepR) {
+                    if (aepR && aepR.exists) return _mk(templateAep);
+                    return _callExtendScript('blitzLocalListAep("' + safe + '")').then(function (listR) {
+                        var found = (listR && listR.files && listR.files.length) ? (local + '/' + listR.files[0]) : '';
+                        return _mk(found);
+                    }, function () { return _mk(''); });
                 });
             }).catch(function () {
                 return { exists: false, complete: false, aepPath: '' };
@@ -274,13 +285,69 @@
         },
 
         /**
+         * SYNCHRONOUSLY return the local mirror directory for a template IF it is
+         * fully synced (complete) and content-current, else ''. Reads only the
+         * cached sync state — NO host round-trip — so the render path can decide
+         * to serve thumbnails/previews from local disk (file://) without blocking.
+         * @param {string} storagePath — "Category/FolderName"
+         * @param {string} [contentVersion] — when provided, the stored version
+         *        must match (a known mismatch means the disk copy is stale).
+         * @returns {string} — absolute local dir, or '' if unsynced/stale
+         */
+        getLocalDirIfComplete: function (storagePath, contentVersion) {
+            var lib = _getLibraryPath();
+            if (!lib || !storagePath) return '';
+            var state = _loadState();
+            var tpl = state.templates && state.templates[storagePath];
+            if (!tpl || !tpl.complete) return '';
+            // Only reject on a KNOWN mismatch. If either side lacks a version
+            // (legacy mirror synced before versioning), serve it — the next
+            // Sync All will stamp the version.
+            if (contentVersion && tpl.contentVersion && tpl.contentVersion !== contentVersion) return '';
+            return lib + '/' + storagePath;
+        },
+
+        /**
+         * Batch variant of getLocalDirIfComplete: resolve the current local dir for
+         * MANY templates in a SINGLE state parse. The per-comp variant parses the whole
+         * sync-state blob twice each (getLibraryPath + loadState), so rendering a 112-card
+         * grid did ~225 synchronous JSON.parses; this does ONE for the whole batch. The
+         * dir-resolution and staleness rules are identical to getLocalDirIfComplete.
+         * @param {Array<{storagePath:string, contentVersion?:string}>} items
+         * @returns {Object} map of storagePath -> absolute local dir ('' if unsynced/stale)
+         */
+        getLocalDirsIfComplete: function (items) {
+            var out = {};
+            if (!items || !items.length) return out;
+            var state = _loadState();
+            var lib = state && state.libraryPath;
+            if (!lib) return out;
+            var templates = (state && state.templates) || {};
+            for (var i = 0; i < items.length; i++) {
+                var it = items[i];
+                if (!it || !it.storagePath) continue;
+                var tpl = templates[it.storagePath];
+                if (!tpl || !tpl.complete) { out[it.storagePath] = ''; continue; }
+                // Match getLocalDirIfComplete: reject only on a KNOWN version mismatch.
+                if (it.contentVersion && tpl.contentVersion && tpl.contentVersion !== it.contentVersion) {
+                    out[it.storagePath] = '';
+                    continue;
+                }
+                out[it.storagePath] = lib + '/' + it.storagePath;
+            }
+            return out;
+        },
+
+        /**
          * Download a single template to the local mirror.
          * Uses cloudLibrary.mirrorTemplate() to download all files,
          * then writes everything to the local mirror folder.
          * @param {string} storagePath
+         * @param {string} [contentVersion] — opaque content fingerprint stored
+         *        alongside the mirror so a later sync can detect cloud changes.
          * @returns {Promise<{localAepPath:string, fileCount:number}>}
          */
-        syncTemplate: function (storagePath) {
+        syncTemplate: function (storagePath, contentVersion) {
             if (!storagePath) return Promise.reject(new Error('storagePath required'));
             if (!window.cloudLibrary || !window.cloudLibrary.mirrorTemplate) {
                 return Promise.reject(new Error('cloudLibrary unavailable'));
@@ -337,7 +404,8 @@
                         state.templates[storagePath] = {
                             ts: Date.now(),
                             files: files.length,
-                            complete: !!localAepPath
+                            complete: !!localAepPath,
+                            contentVersion: contentVersion || ''
                         };
                         _saveState(state);
                         return {
@@ -364,9 +432,11 @@
             return window.cloudLibrary.listCompsInCategory(categoryName).then(function (comps) {
                 var state = _loadState();
                 var missing = [];
+                var verMap = {};
                 for (var i = 0; i < comps.length; i++) {
                     var sp = comps[i].storagePath;
                     if (!sp) continue;
+                    verMap[sp] = comps[i].contentVersion || '';
                     var tpl = state.templates && state.templates[sp];
                     if (!tpl || !tpl.complete) missing.push(sp);
                 }
@@ -381,7 +451,7 @@
                     }
                     var sp = missing[synced];
                     if (onProgress) onProgress({ done: synced, total: total, current: sp });
-                    return api.syncTemplate(sp).then(function () {
+                    return api.syncTemplate(sp, verMap[sp]).then(function () {
                         synced++;
                         return _next();
                     }).catch(function (err) {
@@ -418,12 +488,16 @@
 
         /**
          * Sync all templates in a list of storage paths to the local mirror.
-         * Only downloads templates not already cached locally.
+         * Downloads templates not already cached locally, AND re-pulls templates
+         * whose stored content version differs from the version in versionMap
+         * (cloud content changed since the last sync).
          * @param {string[]} storagePaths — "Category/FolderName" entries
          * @param {function} onProgress — called with {done, total, current}
-         * @returns {Promise<{synced:number, skipped:number, total:number}>}
+         * @param {Object} [versionMap] — storagePath -> current content version;
+         *        a mismatch vs the stored version marks the template for re-sync.
+         * @returns {Promise<{synced:number, failed:number, skipped:number, total:number}>}
          */
-        syncAll: function (storagePaths, onProgress) {
+        syncAll: function (storagePaths, onProgress, versionMap) {
             if (!storagePaths || storagePaths.length === 0) {
                 return Promise.resolve({ synced: 0, skipped: 0, total: 0 });
             }
@@ -440,7 +514,14 @@
                     var sp = storagePaths[i];
                     if (!sp) continue;
                     var tpl = state.templates && state.templates[sp];
-                    if (!tpl || !tpl.complete) missing.push(sp);
+                    var wantV = versionMap && versionMap[sp];
+                    // Needs sync if never completed, OR a current version is known and
+                    // the stored version differs. An EMPTY stored version (template
+                    // mirrored via import/syncCategory before versioning, or a legacy
+                    // mirror) counts as a mismatch here, so the first Sync All re-pulls
+                    // and stamps it — otherwise it would escape staleness forever.
+                    var stale = wantV && tpl && tpl.complete && tpl.contentVersion !== wantV;
+                    if (!tpl || !tpl.complete || stale) missing.push(sp);
                 }
 
                 var processed = 0;
@@ -454,7 +535,7 @@
                         var myIdx = idx++;
                         var sp = missing[myIdx];
                         if (onProgress) onProgress({ done: processed, total: missing.length, current: sp });
-                        return api.syncTemplate(sp).then(function () {
+                        return api.syncTemplate(sp, versionMap ? versionMap[sp] : '').then(function () {
                             processed++;
                             return next();
                         }).catch(function (err) {
