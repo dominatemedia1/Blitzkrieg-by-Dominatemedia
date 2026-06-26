@@ -123,6 +123,10 @@
     // mutation (debounced). Subsequent cold loads (new users, cache-cleared
     // users) go from ~5s → <500ms.
     var MANIFEST_KEY = '_blitzkrieg_manifest_v2.json';
+    // CACHE-3: manifest schema version this client understands. A manifest with a
+    // HIGHER version was written by a newer panel build and may have a shape this
+    // build cannot read correctly, so we ignore it and rebuild via the slow path.
+    var MANIFEST_VERSION = 1;
     // 5 min TTL — was 30 min, but submissions approved by admins or templates
     // added outside the panel (Supabase dashboard, scripts) don't always trigger
     // invalidateManifest(), so users could see a stale list for up to 30 min.
@@ -202,6 +206,13 @@
             var text = await res.data.text();
             var manifest = JSON.parse(text);
             if (!manifest || !Array.isArray(manifest.folders)) return null;
+            // CACHE-3: a manifest from a newer schema than this client supports is
+            // ignored (forward-compat) so we never mis-render an unknown shape; the
+            // slow path rebuilds from storage instead.
+            if (manifest.version && manifest.version > MANIFEST_VERSION) {
+                _log('fetchManifest: manifest version ' + manifest.version + ' > supported ' + MANIFEST_VERSION + '; ignoring, slow path will rebuild', 'warn');
+                return null;
+            }
             var age = Date.now() - (manifest.ts || 0);
             manifest._age = age;
             manifest._stale = age > MANIFEST_TTL_MS;
@@ -237,7 +248,7 @@
                 return;
             }
             var manifest = {
-                version: 1,
+                version: MANIFEST_VERSION,
                 ts: Date.now(),
                 folders: cleanResults,
                 archives: archives || []
@@ -664,6 +675,12 @@
         _dispatchCustom('blitzkrieg-library-partial', detail);
     }
 
+    // RENDER-1: cap how many preview frames a single hover loads. Signing +
+    // downloading + decoding all ~72 full-res frames pulled 100MB+ into the CEP
+    // renderer per hover and tripped the memory limit. 12 evenly-spaced frames
+    // keep the motion readable while cutting hover cost ~5-6x.
+    var MAX_HOVER_PREVIEW_FRAMES = 12;
+
     /**
      * Sign preview frame URLs on demand (called on hover).
      * Returns signed URLs for preview frames that actually exist in storage.
@@ -678,6 +695,17 @@
 
         var paths = await getExistingPreviewFramePaths(storagePath, frameCount);
         if (!paths || paths.length === 0) return [];
+
+        // Sample down to MAX_HOVER_PREVIEW_FRAMES evenly across the sequence so a
+        // hover never floods memory with the full frame set.
+        if (paths.length > MAX_HOVER_PREVIEW_FRAMES) {
+            var sampled = [];
+            var step = paths.length / MAX_HOVER_PREVIEW_FRAMES;
+            for (var s = 0; s < MAX_HOVER_PREVIEW_FRAMES; s++) {
+                sampled.push(paths[Math.floor(s * step)]);
+            }
+            paths = sampled;
+        }
 
         // Batch sign in chunks of 100
         var signed = [];

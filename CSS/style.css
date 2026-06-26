@@ -985,6 +985,43 @@ body {
     z-index: 0;
 }
 
+/* RENDER-3: CSS aspect-ratio is Chrome 88+. On older After Effects Chromium
+   builds (CEP 8/9, Chromium 57/61) it is a no-op and the 0-height box collapses
+   into an invisible sliver. This block is applied ONLY where aspect-ratio is
+   unsupported (completely inert on modern AE) and restores the box via the
+   padding-bottom technique with absolutely-positioned fill children.
+   Covers every selector that uses aspect-ratio as its SOLE height mechanism:
+   the main grid thumbnail, the submissions-grid card, the submission detail
+   preview, and the admin analytics heatmap cell. */
+@supports not (aspect-ratio: 16 / 9) {
+    .thumbnail,
+    .submission-thumbnail,
+    .submission-detail-preview {
+        position: relative;
+        height: 0;
+        padding-bottom: 56.25%; /* 9 / 16 */
+    }
+    .thumbnail img,
+    .thumbnail .no-preview,
+    .thumbnail .thumb-placeholder,
+    .submission-thumbnail img,
+    .submission-thumbnail .submission-thumb-placeholder,
+    .submission-detail-preview img,
+    .submission-detail-preview .detail-thumb-placeholder {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+    }
+    /* .heatmap-cell is a flex:1 (width-driven) item, so the padding-bottom box
+       technique is unreliable here; a min-height keeps the admin heatmap visible
+       (gracefully non-square) instead of collapsing to 0 on old Chromium. */
+    .heatmap-cell {
+        min-height: 14px;
+    }
+}
+
 /* Hide lazy-loaded images until src is set to prevent broken-image flash */
 .lazy-thumb {
     opacity: 0;
