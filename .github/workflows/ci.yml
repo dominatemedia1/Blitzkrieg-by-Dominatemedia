@@ -1,0 +1,23 @@
+name: CI Gate
+
+# Blocks merges/releases on syntax errors, ExtendScript ES3 violations (the
+# atob-class silent bug), CEP-8/9-incompatible APIs, or em-dash/curly quotes in
+# user-facing strings. This is a BLOCKING gate (per the project rule: gates block,
+# they do not warn) and it runs without After Effects.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  ci-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Run Blitzkrieg CI gate
+        run: bash scripts/ci-check.sh

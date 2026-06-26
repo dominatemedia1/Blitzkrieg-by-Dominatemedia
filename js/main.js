@@ -2200,7 +2200,7 @@
             if (comp.thumbPathAlt) cloudThumbAttrs += ' data-thumb-alt-path="' + escapeHTML(comp.thumbPathAlt) + '"';
         }
         var thumbHtml = thumbSrc || cloudThumbAttrs
-            ? '<img' + (thumbSrc ? ' data-src="' + safeThumbSrc + '"' : '') + altAttr + localThumbAttr + cloudThumbAttrs + ' alt="Thumbnail" class="comp-thumbnail lazy-thumb" loading="lazy">' + placeholderHtml
+            ? '<img' + (thumbSrc ? ' data-src="' + safeThumbSrc + '"' : '') + altAttr + localThumbAttr + cloudThumbAttrs + ' alt="Thumbnail" class="comp-thumbnail lazy-thumb">' + placeholderHtml
             : placeholderHtml;
 
         var isFav = isFavorite(comp.uniqueId);
@@ -3717,7 +3717,17 @@
                     window.blitzkriegTelemetry.trackTemplateImport(_trackComp.name, _trackComp.category, storagePath, _trackComp);
                 }
             } else {
-                showToast('Import failed: ' + (result || 'Unknown error'), true);
+                // LOCAL-3: the local mirror copy failed to import (e.g. a corrupt
+                // or 0-byte mirrored .aep). Fall back to a fresh cloud download +
+                // import instead of dead-ending on a toast, so the user still gets
+                // the template. _doCloudImport manages its own spinner lifecycle.
+                debugLog('IMPORT: local import failed (' + (result || 'unknown') + ') - falling back to cloud', 'warn');
+                if (storagePath && window.cloudLibrary) {
+                    showToast('Local copy unavailable, downloading...');
+                    _doCloudImport(storagePath, uniqueId, _trackComp);
+                } else {
+                    showToast('Import failed: ' + (result || 'Unknown error'), true);
+                }
             }
         });
     }
@@ -6796,17 +6806,41 @@
         });
     }
 
-    function getExtensionRootHintForUpdate() {
+    // Derive the extension's install directory from the panel's OWN location.
+    // index.html always lives at <extensionRoot>/index.html, so window.location
+    // is a reliable fallback when csInterface.getSystemPath(EXTENSION) returns ''
+    // (observed on some AE/CEP builds even with a ready bridge - the cause of the
+    // "cannot resolve extension root" update failures).
+    function _extensionRootFromLocation() {
         try {
-            if (!refreshCepBridgeState() || !csInterface || typeof csInterface.getSystemPath !== 'function' ||
-                typeof SystemPath === 'undefined') {
-                return '';
-            }
-            return csInterface.getSystemPath(SystemPath.EXTENSION) || '';
-        } catch (e) {
-            debugLog('Could not read CEP extension root hint: ' + (e && e.message || e), 'warn');
+            var href = (window.location && window.location.href) || '';
+            if (href.indexOf('file://') !== 0) return '';
+            var path = href.replace(/^file:\/\//, '').replace(/[?#].*$/, '');
+            try { path = decodeURI(path); } catch (e) { /* leave encoded */ }
+            // file:///C:/... -> strip the leading slash before a Windows drive
+            if (/^\/[A-Za-z]:\//.test(path)) path = path.slice(1);
+            // drop the trailing /index.html (or whatever file) to get the root dir
+            var lastSlash = path.lastIndexOf('/');
+            if (lastSlash > 0) path = path.slice(0, lastSlash);
+            return path;
+        } catch (e2) {
+            debugLog('Could not derive extension root from location: ' + (e2 && e2.message || e2), 'warn');
             return '';
         }
+    }
+
+    function getExtensionRootHintForUpdate() {
+        var hint = '';
+        try {
+            if (refreshCepBridgeState() && csInterface && typeof csInterface.getSystemPath === 'function' &&
+                typeof SystemPath !== 'undefined') {
+                hint = csInterface.getSystemPath(SystemPath.EXTENSION) || '';
+            }
+        } catch (e) {
+            debugLog('Could not read CEP extension root hint: ' + (e && e.message || e), 'warn');
+        }
+        // Fallback to the panel's own file:// location when CEP gives us nothing.
+        return hint || _extensionRootFromLocation();
     }
 
     // Parse a version string into [major, minor, patch], tolerating a leading
@@ -7407,10 +7441,16 @@
                     if (_consecutiveBridgeDefers >= BRIDGE_DEFER_REPORT_THRESHOLD && !_bridgeDeferReported) {
                         _bridgeDeferReported = true;
                         debugLog('Update to v' + version + ' repeatedly deferred: After Effects bridge unavailable. If this panel is inside AE, restart AE; otherwise updates are paused until AE is detected.', 'warn');
+                        // WC-1: this is the failure mode that dominates production
+                        // "cannot resolve extension root" reports - the panel has no
+                        // live AE host bridge, so an in-place self-update is impossible.
+                        // Surface it ONCE so the user can act instead of silently never
+                        // updating.
+                        try { showToast('Update paused. Reopen the panel inside After Effects to finish updating.', true); } catch (e) {}
                     }
                     return;
                 }
-                _failUpdate(version, 'cannot resolve extension root' + (rootHint ? ' from CEP hint' : ''));
+                _failUpdate(version, 'cannot resolve extension root' + (rootHint ? ' (hint=' + rootHint + ')' : ' (no hint: CEP path empty and no file:// location)'));
                 return;
             }
 
@@ -7709,6 +7749,57 @@
         });
     }
 
+    // EFF-1: largest thumbnail/frame dimension to store. The grid renders at
+    // ~250px; 600px keeps it crisp on retina at a fraction of full-res bytes.
+    // Mirrors the backfill tool's --max-width so born-small assets match.
+    var GEN_IMAGE_MAX_WIDTH = 600;
+
+    /**
+     * Downscale a rendered PNG blob to at most maxWidth px (preserving aspect)
+     * before upload, so newly generated thumbnails/frames are born small and the
+     * storage backfill never decays back to full-res. Re-encodes as PNG to avoid
+     * any cross-platform format surprise. Falls back to the ORIGINAL blob on any
+     * failure or if the image is already within bounds — generation must never
+     * break because a resize failed.
+     */
+    function downscaleImageBlob(blob, maxWidth) {
+        return new Promise(function(resolve) {
+            try {
+                if (!blob || typeof window.URL === 'undefined' || !window.URL.createObjectURL ||
+                    typeof document === 'undefined' || !document.createElement) {
+                    resolve(blob); return;
+                }
+                var url = window.URL.createObjectURL(blob);
+                var img = new Image();
+                img.onload = function() {
+                    try {
+                        var w = img.naturalWidth || img.width;
+                        var h = img.naturalHeight || img.height;
+                        if (!w || !h || w <= maxWidth) { window.URL.revokeObjectURL(url); resolve(blob); return; }
+                        var scale = maxWidth / w;
+                        var canvas = document.createElement('canvas');
+                        canvas.width = Math.max(1, Math.round(w * scale));
+                        canvas.height = Math.max(1, Math.round(h * scale));
+                        var ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                        window.URL.revokeObjectURL(url);
+                        if (!canvas.toBlob) { resolve(blob); return; }
+                        canvas.toBlob(function(out) {
+                            // Only use the downscaled blob if it actually came out
+                            // smaller; otherwise keep the original.
+                            resolve(out && out.size > 0 && out.size < blob.size ? out : blob);
+                        }, 'image/png');
+                    } catch (e) {
+                        try { window.URL.revokeObjectURL(url); } catch (e2) {}
+                        resolve(blob);
+                    }
+                };
+                img.onerror = function() { try { window.URL.revokeObjectURL(url); } catch (e) {} resolve(blob); };
+                img.src = url;
+            } catch (e) { resolve(blob); }
+        });
+    }
+
     function ensureFolderAsync(dirPath) {
         return new Promise(function(resolve, reject) {
             if (!dirPath) { resolve(); return; }
@@ -7994,7 +8085,11 @@
             }
             debugLog('GEN: reading rendered files and uploading...');
             var thumbPath = outputDir + '/comp.png';
-            return readFileAsBlobAsync(thumbPath, 'image/png').then(function(thumbBlob) {
+            return readFileAsBlobAsync(thumbPath, 'image/png').then(function(thumbBlobRaw) {
+                // EFF-1: store a downscaled thumbnail so the grid is fast by default
+                // and the backfill never has to re-shrink this comp.
+                return downscaleImageBlob(thumbBlobRaw, GEN_IMAGE_MAX_WIDTH);
+            }).then(function(thumbBlob) {
                 var uploads = [
                     sb.storage.from('blitzkrieg').upload(
                         comp.storagePath + '/comp.png', thumbBlob,
@@ -8015,7 +8110,11 @@
                     (function(srcIdx) {
                         frameChain = frameChain.then(function() {
                             var framePath = outputDir + '/preview/frame_' + srcIdx + '.png';
-                            return readFileAsBlobAsync(framePath, 'image/png').then(function(frameBlob) {
+                            return readFileAsBlobAsync(framePath, 'image/png').then(function(frameBlobRaw) {
+                                // EFF-1: born-small preview frames (parity with the
+                                // thumbnail + the backfill tool's --previews pass).
+                                return downscaleImageBlob(frameBlobRaw, GEN_IMAGE_MAX_WIDTH);
+                            }).then(function(frameBlob) {
                                 var destIdx = uploadFrameIdx++;
                                 frameUploads.push({ destIdx: destIdx, blob: frameBlob });
                             }).catch(function(readErr) {

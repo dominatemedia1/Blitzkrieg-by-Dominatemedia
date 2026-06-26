@@ -96,9 +96,14 @@
         });
     }
 
-    /** Write a blob to a local file path. Uses chunked base64 append for
-     *  large files (same pattern as writeBlobToFile in main.js) to avoid
-     *  hitting evalScript argument size limits. */
+    /** Write a blob to a local file path.
+     *  PRIMARY: CEP's native filesystem (cep.fs.writeFile in Base64 mode) —
+     *  decodes in native code, no host-thread round-trip, the exact mechanism
+     *  main.js's writeBlobToFile verified works.
+     *  FALLBACK: chunked base64 append to a .b64 temp, then a pure-ES3 decode
+     *  via decodeBase64FileToBinary (proven, used for all sizes here).
+     *  We NEVER decode base64 inside ExtendScript via atob — atob does not
+     *  exist in ES3 and silently produced 0-byte files for 71% of assets. */
     function _writeBlob(filePath, blob) {
         return new Promise(function (resolve, reject) {
             var reader = new FileReader();
@@ -109,23 +114,21 @@
                 if (comma >= 0) b64 = b64.substring(comma + 1);
                 if (!b64 || b64.length === 0) { reject(new Error('Empty base64 from blob')); return; }
 
+                // PRIMARY: CEP native filesystem (fast, correct on Win + Mac).
+                try {
+                    if (typeof cep !== 'undefined' && cep.fs && typeof cep.fs.writeFile === 'function' &&
+                        cep.encoding && typeof cep.encoding.Base64 !== 'undefined') {
+                        var res = cep.fs.writeFile(filePath, b64, cep.encoding.Base64);
+                        if (res && res.err === 0) { resolve(); return; }
+                        // else fall through to the ExtendScript decoder
+                    }
+                } catch (e) { /* fall through to fallback */ }
+
+                // FALLBACK: chunked .b64 append + ES3 binary decode (all sizes).
                 var safe = filePath.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
                 var safeTmpB64 = safe + '.b64';
-                var sizeMB = (blob.size / 1024 / 1024).toFixed(1);
                 var CHUNK = 500000; // 500KB per evalScript call — well under limits
-
-                if (b64.length <= CHUNK) {
-                    // Small file — single call, no temp file needed
-                    _callExtendScript('blitzLocalWriteBinary("' + safe + '","' + b64 + '")').then(function (r) {
-                        if (r && r.error) reject(new Error(r.error));
-                        else resolve();
-                    }).catch(reject);
-                    return;
-                }
-
-                // Large file — chunked append to .b64 temp, then decode to binary
                 var idx = 0;
-                var totalChunks = Math.ceil(b64.length / CHUNK);
                 function writeChunk() {
                     if (idx >= b64.length) {
                         _callExtendScript('decodeBase64FileToBinary("' + safeTmpB64 + '","' + safe + '")').then(function (r) {
@@ -135,6 +138,7 @@
                         return;
                     }
                     var chunk = b64.substring(idx, idx + CHUNK);
+                    if (!/^[A-Za-z0-9+/=]*$/.test(chunk)) { reject(new Error('Invalid base64 data detected')); return; }
                     var isFirst = idx === 0 ? 'true' : 'false';
                     _callExtendScript('appendToTextFile("' + safeTmpB64 + '","' + chunk + '",' + isFirst + ')').then(function (r) {
                         if (r !== 'ok') { reject(new Error('Chunk write failed: ' + r)); return; }
@@ -399,19 +403,36 @@
                     }
 
                     return Promise.all(writes).then(function () {
-                        var state = _loadState();
-                        if (!state.templates) state.templates = {};
-                        state.templates[storagePath] = {
-                            ts: Date.now(),
-                            files: files.length,
-                            complete: !!localAepPath,
-                            contentVersion: contentVersion || ''
-                        };
-                        _saveState(state);
-                        return {
-                            localAepPath: localAepPath,
-                            fileCount: files.length
-                        };
+                        // LOCAL-2: verify the .aep actually landed on disk and is
+                        // non-empty before marking the template complete. A missing
+                        // or 0-byte .aep must never be served as a local fast-path
+                        // import (which would hard-fail in AE with no cloud retry).
+                        var verify = localAepPath
+                            ? _callExtendScript('blitzLocalExists("' + localAepPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '")').then(
+                                function (st) { return !!(st && st.exists && st.size > 0); },
+                                function () {
+                                    // The verify CALL errored transiently (CEP/EvalScript).
+                                    // The writes already succeeded, so do NOT discard the
+                                    // sync; fall back to trusting the .aep presence (the
+                                    // pre-gate behavior). The size gate is best-effort.
+                                    return !!localAepPath;
+                                })
+                            : Promise.resolve(false);
+                        return verify.then(function (aepOk) {
+                            var state = _loadState();
+                            if (!state.templates) state.templates = {};
+                            state.templates[storagePath] = {
+                                ts: Date.now(),
+                                files: files.length,
+                                complete: aepOk,
+                                contentVersion: contentVersion || ''
+                            };
+                            _saveState(state);
+                            return {
+                                localAepPath: aepOk ? localAepPath : '',
+                                fileCount: files.length
+                            };
+                        });
                     });
                 });
             });

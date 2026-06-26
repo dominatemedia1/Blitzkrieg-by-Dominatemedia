@@ -2737,7 +2737,10 @@ function readFileAsBase64(file) {
  */
 function appendToTextFile(filePath, chunk, isFirst) {
     try {
-        var f = new File(filePath);
+        // Normalize so the macOS URI-style path (space in default library root)
+        // resolves; decodeBase64FileToBinary normalizes the same raw path, so the
+        // chunk file written here is found there. Windows paths pass through.
+        var f = new File(normalizeFsPath(filePath));
         f.encoding = 'UTF-8';
         f.open(isFirst ? 'w' : 'a');
         f.write(chunk);
@@ -2757,7 +2760,9 @@ function appendToTextFile(filePath, chunk, isFirst) {
  */
 function decodeBase64FileToBinary(base64FilePath, outputPath) {
     try {
-        var b64File = new File(base64FilePath);
+        // fileFromPath normalizes (matching appendToTextFile's write path) so the
+        // macOS space-in-path chunk file is found; falls back to raw if needed.
+        var b64File = fileFromPath(base64FilePath);
         if (!b64File.exists) return 'ERROR: Base64 file not found';
 
         b64File.encoding = 'UTF-8';
@@ -2800,13 +2805,18 @@ function decodeBase64FileToBinary(base64FilePath, outputPath) {
         }
         var binary = parts.join('');
 
-        var outFile = new File(outputPath);
+        var outFile = new File(normalizeFsPath(outputPath));
         outFile.encoding = 'BINARY';
         outFile.open('w');
         outFile.write(binary);
         outFile.close();
 
-        return outFile.exists ? outFile.fsName : 'ERROR: Write failed';
+        if (!outFile.exists) return 'ERROR: Write failed';
+        // 0-byte guard (parity with blitzLocalWriteBinary): a non-empty input that
+        // produced an empty file is a silent write failure, not a success. This is
+        // the live fallback writer for the local mirror when cep.fs is absent.
+        if (cleanBase64.length > 0 && outFile.length === 0) return 'ERROR: decode produced 0 bytes: ' + outputPath;
+        return outFile.fsName;
     } catch (e) {
         return 'ERROR: ' + e.toString();
     }
@@ -3575,7 +3585,11 @@ function getActiveCompInfo() {
 /** Create a directory and any missing parents. Returns JSON. */
 function blitzLocalMkdir(rawPath) {
     try {
-        var f = new Folder(rawPath);
+        // folderFromPath normalizes the path (encodes the space in the default
+        // "~/Blitzkrieg Library" so ExtendScript's URI-style Folder() resolves on
+        // macOS) and falls back to raw if an existing folder was created unencoded.
+        // normalizeFsPath no-ops on Windows drive-letter paths, so Windows is unchanged.
+        var f = folderFromPath(rawPath);
         if (!f.exists) {
             if (!f.create()) return JSON.stringify({ error: 'Cannot create: ' + rawPath });
         }
@@ -3586,7 +3600,7 @@ function blitzLocalMkdir(rawPath) {
 /** Write text content to a file with UTF-8 encoding. Returns JSON. */
 function blitzLocalWriteFile(rawPath, content) {
     try {
-        var f = new File(rawPath);
+        var f = fileFromPath(rawPath);
         f.encoding = 'UTF-8';
         f.open('w');
         if (!f.write(content)) {
@@ -3598,38 +3612,81 @@ function blitzLocalWriteFile(rawPath, content) {
     } catch (e) { return JSON.stringify({ error: e + '' }); }
 }
 
-/** Write binary content (base64 encoded) to a file. Returns JSON. */
+/** Write binary content (base64 encoded) to a file. Returns JSON.
+ *  ExtendScript (ES3) has NO atob, so we decode base64 with the same pure-JS
+ *  lookup decoder used by decodeBase64FileToBinary. The previous atob() call
+ *  threw silently and wrote 0-byte files for every small asset. */
 function blitzLocalWriteBinary(rawPath, base64Content) {
     try {
-        var f = new File(rawPath);
+        var base64chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+        var lookup = {};
+        for (var li = 0; li < base64chars.length; li++) {
+            lookup[base64chars.charAt(li)] = li;
+        }
+        var cleanBase64 = String(base64Content).replace(/[^A-Za-z0-9+\/]/g, '');
+        var DECODE_CHUNK = 32768;
+        var parts = [];
+        var i = 0;
+        while (i < cleanBase64.length) {
+            var chunk = '';
+            var end = Math.min(i + DECODE_CHUNK, cleanBase64.length);
+            end = end - (end % 4);
+            if (end <= i) end = Math.min(i + 4, cleanBase64.length);
+            while (i < end) {
+                var b1 = lookup[cleanBase64.charAt(i++)] || 0;
+                var b2 = lookup[cleanBase64.charAt(i++)] || 0;
+                var b3c = cleanBase64.charAt(i++);
+                var b4c = cleanBase64.charAt(i++);
+                var b3 = b3c ? (lookup[b3c] !== undefined ? lookup[b3c] : -1) : -1;
+                var b4 = b4c ? (lookup[b4c] !== undefined ? lookup[b4c] : -1) : -1;
+                chunk += String.fromCharCode((b1 << 2) | (b2 >> 4));
+                if (b3 !== -1) chunk += String.fromCharCode(((b2 & 15) << 4) | (b3 >> 2));
+                if (b4 !== -1) chunk += String.fromCharCode(((b3 & 3) << 6) | b4);
+            }
+            parts.push(chunk);
+        }
+        var raw = parts.join('');
+
+        // fileFromPath normalizes the macOS URI-style path (the default library
+        // root contains a space); Windows drive-letter paths pass through unchanged.
+        var f = fileFromPath(rawPath);
         f.encoding = 'BINARY';
         f.open('w');
-        // Decode base64 to raw bytes, write each char code
-        var raw = '';
-        try { raw = atob(base64Content); } catch (_) {}
         if (!f.write(raw)) {
             f.close();
             return JSON.stringify({ error: 'Binary write failed: ' + rawPath });
         }
         f.close();
-        return JSON.stringify({ ok: true });
+
+        // Re-stat the EXACT file we wrote (f.fsName) so the 0-byte guard checks the
+        // same normalized path, not a re-resolution that could diverge on macOS.
+        var check = new File(f.fsName);
+        if (cleanBase64.length > 0 && (!check.exists || check.length === 0)) {
+            return JSON.stringify({ error: 'Binary write produced 0 bytes: ' + rawPath });
+        }
+        return JSON.stringify({ ok: true, size: (check.exists ? check.length : 0) });
     } catch (e) { return JSON.stringify({ error: e + '' }); }
 }
 
-/** Check if a file or folder exists at rawPath. Returns JSON {exists:bool}. */
+/** Check if a file or folder exists at rawPath. Returns JSON {exists, size}.
+ *  Normalizes the path (fileFromPath/folderFromPath try encoded then raw) so the
+ *  macOS space-in-path default library root resolves; this gate drives the sync
+ *  "complete" flag, so an un-normalized miss here made every import re-download. */
 function blitzLocalExists(rawPath) {
     try {
-        var f = new File(rawPath);
-        if (f.exists) return JSON.stringify({ exists: true });
-        var d = new Folder(rawPath);
-        return JSON.stringify({ exists: d.exists });
-    } catch (e) { return JSON.stringify({ exists: false }); }
+        var f = fileFromPath(rawPath);
+        if (f.exists) return JSON.stringify({ exists: true, size: f.length });
+        var d = folderFromPath(rawPath);
+        return JSON.stringify({ exists: d.exists, size: 0 });
+    } catch (e) { return JSON.stringify({ exists: false, size: 0 }); }
 }
 
-/** Delete a folder and its contents recursively. Returns JSON. */
+/** Delete a folder and its contents recursively. Returns JSON.
+ *  Caller (local-sync.js) MUST validate that rawPath stays inside the library
+ *  root before calling - this is a recursive delete primitive. */
 function blitzLocalRemoveDir(rawPath) {
     try {
-        var f = new Folder(rawPath);
+        var f = folderFromPath(rawPath);
         if (f.exists) {
             if (!f.remove()) return JSON.stringify({ error: 'Cannot delete: ' + rawPath });
         }
@@ -3652,12 +3709,16 @@ function blitzPickFolder() {
 
 function blitzLocalListAep(rawPath) {
     try {
-        var f = new Folder(rawPath);
+        var f = folderFromPath(rawPath);
         if (!f.exists) return JSON.stringify({ files: [] });
         var aepFiles = [];
         var all = f.getFiles('*.aep');
         for (var i = 0; i < all.length; i++) {
-            if (all[i] instanceof File) aepFiles.push(all[i].name);
+            // Skip macOS ._ AppleDouble resource forks and 0-byte files —
+            // neither is an importable project.
+            if (all[i] instanceof File && all[i].name.indexOf('._') !== 0 && all[i].length > 0) {
+                aepFiles.push(all[i].name);
+            }
         }
         return JSON.stringify({ files: aepFiles });
     } catch (_) { return JSON.stringify({ error: _.message }); }
