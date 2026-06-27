@@ -298,6 +298,11 @@
     // this reliably OOMs the CEP renderer and takes AE down with it. We convert
     // that crash into a clear, actionable error instead. Tune if needed.
     var MAX_UPLOAD_FILE_BYTES = 1024 * 1024 * 1024; // 1 GB
+    // Aggregate guard: even when every single file is under the per-file limit,
+    // the upload holds the WHOLE bundle (aep + footage) in renderer memory at
+    // once, so a multi-file bundle can still OOM-crash AE. Cap the running total
+    // and fail-fast with an actionable message before that happens.
+    var MAX_UPLOAD_TOTAL_BYTES = 3 * 1024 * 1024 * 1024; // 3 GB
 
     var bulkSelectedIds = new Set(); // Track selected items for bulk operations
     var bulkMode = false; // Whether bulk selection mode is active
@@ -3336,6 +3341,8 @@
                 ', over the ' + formatBytesShort(MAX_UPLOAD_FILE_BYTES) +
                 ' panel-upload limit. Reduce the project (proxies/transcode footage) or upload it manually.');
         }
+        // Running total across the whole bundle (aep + every collected asset).
+        var totalBytes = aepSize;
 
         // Read AEP file
         var aepBlob = await readFileAsBlobAsync(compDir + '/' + aepName, 'application/octet-stream');
@@ -3383,6 +3390,12 @@
                 throw new Error('Footage file "' + relPath + '" is ' + formatBytesShort(assetSize) +
                     ', over the ' + formatBytesShort(MAX_UPLOAD_FILE_BYTES) +
                     ' panel-upload limit. Use lighter footage (proxy/transcode) or upload this template manually.');
+            }
+            totalBytes += assetSize;
+            if (totalBytes > MAX_UPLOAD_TOTAL_BYTES) {
+                throw new Error('This template totals ' + formatBytesShort(totalBytes) +
+                    ', over the ' + formatBytesShort(MAX_UPLOAD_TOTAL_BYTES) +
+                    ' panel-upload limit. The panel must hold the whole bundle in memory to upload it, which would crash AE. Reduce the footage (proxy/transcode) or upload this template manually.');
             }
             try {
                 bundleFiles.push({
@@ -3743,7 +3756,7 @@
         debugLog('IMPORT: starting cloud import for ' + storagePath);
 
         var importTempDir = null;
-        getTempDir().then(function(sysTempDir) {
+        return getTempDir().then(function(sysTempDir) {
             debugLog('IMPORT: temp dir = ' + sysTempDir);
             importTempDir = sysTempDir + '/blitzkrieg_import_' + Date.now() + '_' + Math.floor(Math.random() * 0x7fffffff).toString(36);
             return window.cloudLibrary.downloadTemplate(storagePath);
@@ -3782,6 +3795,7 @@
             });
         }).then(function() {
             setStashInProgress(false);
+            return true; // import succeeded (lets the caller background-populate the mirror)
         }, function (err) {
             setStashInProgress(false);
             hideSpinner();
@@ -3794,7 +3808,27 @@
                     }
                 });
             }
+            return false; // import failed
         });
+    }
+
+    /**
+     * Cache ONE just-imported template to the local mirror in the background so
+     * the NEXT import of it is the instant local fast path. Non-blocking and
+     * non-fatal: if it fails, the template simply stays unmirrored and the next
+     * import re-downloads (same as today). This is NOT an idle whole-library
+     * prefetch (the deliberate manual-only guard forbids that) - it only caches
+     * the single template the user just chose to import.
+     */
+    function _backgroundPopulateMirror(storagePath, impVer) {
+        if (!window.localSync || !window.localSync.getLibraryPath()) return;
+        try {
+            window.localSync.syncTemplate(storagePath, impVer).then(function() {
+                _updateSyncBadge();
+            }, function(err) {
+                debugLog('IMPORT: background mirror populate skipped: ' + (err && err.message || err), 'warn');
+            });
+        } catch (e) { /* never let caching break import */ }
     }
 
     /**
@@ -3835,26 +3869,18 @@
                         _doImportLocalAep(info.aepPath, uniqueId, _trackComp, storagePath);
                         return;
                     }
-                    // Template not synced or stale — sync to local mirror first, then import.
-                    // syncTemplate re-pulls unconditionally, so a stale mirror is refreshed.
-                    debugLog('IMPORT: syncing ' + storagePath + ' to local mirror');
-                    showSpinner();
-                    setStashInProgress(true, 'import');
-                    showToast('Syncing to library...');
-                    window.localSync.syncTemplate(storagePath, _impVer).then(function(result) {
-                        if (result && result.localAepPath) {
-                            // _doImportLocalAep manages its own spinner + stashInProgress lifecycle
-                            _doImportLocalAep(result.localAepPath, uniqueId, _trackComp, storagePath);
-                        } else {
-                            throw new Error('AEP not found after sync');
-                        }
-                    }).then(null, function(err) {
-                        // Only reach here if syncTemplate failed or AEP not found.
-                        // _doImportLocalAep success path is handled by its internal callback.
-                        setStashInProgress(false);
-                        hideSpinner();
-                        debugLog('IMPORT FAIL (sync): ' + err.message, 'error');
-                        showToast('Import failed: ' + err.message, true);
+                    // Template not synced or stale. Import via the LIGHT cloud path:
+                    // downloadTemplate (inside _doCloudImport) excludes the preview
+                    // frames + thumbnails that the full mirror pulls, so a heavy
+                    // multi-precomp template imports fast instead of waiting on the
+                    // entire-folder mirror download (the "sometimes very slow import"
+                    // cause). _doCloudImport always fetches FRESH from cloud, so the
+                    // stale-mirror case is handled correctly too. Then, in the
+                    // background, populate the mirror so the NEXT import of this same
+                    // template is the instant local path (preserves manual caching).
+                    debugLog('IMPORT: light cloud import (mirror miss/stale) - ' + storagePath);
+                    _doCloudImport(storagePath, uniqueId, _trackComp).then(function(ok) {
+                        if (ok) _backgroundPopulateMirror(storagePath, _impVer);
                     });
                 }).catch(function() {
                     // localSync failed — fall back to cloud download path
