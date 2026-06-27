@@ -457,7 +457,13 @@ function getSafeTempFolder() {
  */
 var PREVIEW_TARGET_FPS = 6;
 var PREVIEW_MIN_FRAMES = 12;
-var PREVIEW_MAX_FRAMES = 72;
+// Each preview frame is a full synchronous saveFrameToPng render on AE's UI
+// thread, so a deeply-nested comp at the old ceiling of 72 frames could freeze
+// AE for tens of seconds ("Not Responding") during stash/generate. The hover
+// preview samples at most 12 frames (MAX_HOVER_PREVIEW_FRAMES in cloud-library.js),
+// so rendering more than ~24 buys no visible smoothness. 24 keeps a smooth
+// sampled loop at a third of the render cost.
+var PREVIEW_MAX_FRAMES = 24;
 
 /**
  * Compute the number of preview frames to render for a given comp duration.
@@ -1515,14 +1521,44 @@ function stashSelectedComp(libraryPath, categoryName) {
 
         app.endUndoGroup();
 
-        // --- Restore original project ---
+        // --- Restore original project (NON-FATAL) ---
+        // The stash is already complete and verified (savedAEP above), so a
+        // failure to reopen the user's project must NOT discard the upload.
+        // app.open() of a project with offline/unreadable footage can THROW
+        // "After Effects error: Could not read from source" on AE 2024/2025
+        // *while dialogs are suppressed* (the same hazard importComp handles at
+        // its retry-without-suppression path). This bare app.open was the only
+        // unguarded native op on the stash happy path: its throw escaped to the
+        // outer catch, which returned "Error: ..." and made the panel discard a
+        // fully-saved comp. So: try suppressed; if it throws, end suppression
+        // and retry (a normal missing-files dialog is acceptable); only a
+        // double-failure is surfaced, and even then as a Warning that still lets
+        // the comp upload. generatePreviewsToDisk already guards this same open.
+        var restoreFailed = false;
         if (originalProjectFile && originalProjectFile.exists) {
-            app.open(originalProjectFile);
+            try {
+                app.open(originalProjectFile);
+            } catch (restoreErr1) {
+                $.writeln("Blitzkrieg: restore app.open threw under suppression, retrying unsuppressed: " + restoreErr1.toString());
+                if (_stashDialogsSuppressed) { try { app.endSuppressDialogs(false); } catch(esd1) {} _stashDialogsSuppressed = false; }
+                try {
+                    app.open(originalProjectFile);
+                } catch (restoreErr2) {
+                    restoreFailed = true;
+                    $.writeln("Blitzkrieg: restore app.open failed after unsuppressed retry: " + restoreErr2.toString());
+                }
+            }
         }
 
-        // End dialog suppression immediately after the last save/open call.
-        // Don't leave it active during cleanup or return logic.
+        // End dialog suppression if still active (the retry path may have already).
         if (_stashDialogsSuppressed) { try { app.endSuppressDialogs(false); } catch(e) {} _stashDialogsSuppressed = false; }
+
+        // Soft note appended to every success/warning return when the project
+        // could not be auto-reopened, so the editor knows their file is safe and
+        // is not alarmed by seeing the reduced project AE is currently showing.
+        var restoreNote = restoreFailed
+            ? " (Note: After Effects could not reopen your project automatically. Your file on disk is safe - just reopen it from File > Open Recent.)"
+            : "";
 
         // Clean up the temp project file we created on behalf of an unsaved user
         // project. The user's work is still in-memory in the restored project, so
@@ -1542,7 +1578,7 @@ function stashSelectedComp(libraryPath, categoryName) {
                 : (missingTotalCount + ' footage file(s)');
             return "Warning: '" + compToSaveName + "' was added but " + countSuffix +
                    " were not fully collected: " + missingList +
-                   ". Open the bundle in AE, relink the missing files, and re-stash to fix.";
+                   ". Open the bundle in AE, relink the missing files, and re-stash to fix." + restoreNote;
         }
 
         // Memory-limit warning for stash: thumbnail/preview rendering hit AE's
@@ -1550,9 +1586,15 @@ function stashSelectedComp(libraryPath, categoryName) {
         // uploaded but the previews are incomplete. Muhammad's tip surfaced as
         // actionable guidance for the editor.
         if (stashMemoryErrorHit) {
-            return "Warning: '" + compToSaveName + "' was added but AE hit its memory limit while rendering previews. This usually means Motion Tile (or a similar effect) has very large Output Width/Height values. Lower those values and re-stash to get full preview frames.";
+            return "Warning: '" + compToSaveName + "' was added but AE hit its memory limit while rendering previews. This usually means Motion Tile (or a similar effect) has very large Output Width/Height values. Lower those values and re-stash to get full preview frames." + restoreNote;
         }
 
+        // If the restore failed, return a non-fatal Warning (executeAddComp
+        // strips the "Warning:" prefix, shows it, and still uploads) rather than
+        // a clean "Success!" that would hide the reduced project from the editor.
+        if (restoreFailed) {
+            return "Warning: '" + compToSaveName + "' was added to your library." + restoreNote;
+        }
         return "Success! '" + compToSaveName + "' was added to your library.";
 
     } catch (e) {
