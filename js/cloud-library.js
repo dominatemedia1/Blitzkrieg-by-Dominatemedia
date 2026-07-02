@@ -80,34 +80,107 @@
         } catch (e) { /* corrupt — ignore */ }
     }
 
+    // Build the pruned + capped persist payload (most-recent first, expired dropped).
+    // Shared by the debounced localStorage/file write and the synchronous quit-flush.
+    function _buildSignedUrlPersistPayload() {
+        var now = Date.now();
+        var keys = Object.keys(_signedPathUrlCache);
+        keys.sort(function (a, b) {
+            return (_signedPathUrlCache[b].ts || 0) - (_signedPathUrlCache[a].ts || 0);
+        });
+        var out = {};
+        var kept = 0;
+        for (var i = 0; i < keys.length && kept < SIGNED_URL_PERSIST_MAX; i++) {
+            var e = _signedPathUrlCache[keys[i]];
+            if (e && e.url && e.ts && (now - e.ts < SIGNED_URL_CACHE_TTL)) {
+                out[keys[i]] = { ts: e.ts, url: e.url };
+                kept++;
+            }
+        }
+        return out;
+    }
+
     function _persistSignedUrlCache() {
-        // Debounced: coalesces a burst of signing into one localStorage write.
+        // Debounced: coalesces a burst of signing into one write.
         if (_persistSignedTimer) return;
         _persistSignedTimer = setTimeout(function () {
             _persistSignedTimer = null;
             try {
-                var now = Date.now();
-                var keys = Object.keys(_signedPathUrlCache);
-                keys.sort(function (a, b) {
-                    return (_signedPathUrlCache[b].ts || 0) - (_signedPathUrlCache[a].ts || 0);
-                });
-                var out = {};
-                var kept = 0;
-                for (var i = 0; i < keys.length && kept < SIGNED_URL_PERSIST_MAX; i++) {
-                    var e = _signedPathUrlCache[keys[i]];
-                    if (e && e.url && e.ts && (now - e.ts < SIGNED_URL_CACHE_TTL)) {
-                        out[keys[i]] = { ts: e.ts, url: e.url };
-                        kept++;
-                    }
+                var json = JSON.stringify(_buildSignedUrlPersistPayload());
+                try { localStorage.setItem(SIGNED_URL_PERSIST_KEY, json); } catch (e) { /* quota */ }
+                // Durable file backstop. localStorage is wiped by the same AE quit that
+                // dropped the meta cache, so without this the thumbnail re-sign wave
+                // fires on every launch. Mirror to the jsx-file store (sibling of the
+                // meta cache); the beforeunload flush covers quit-inside-debounce.
+                if (window.blitzSignedUrlStore && window.blitzSignedUrlStore.save) {
+                    try { window.blitzSignedUrlStore.save(json); } catch (e) {}
                 }
-                localStorage.setItem(SIGNED_URL_PERSIST_KEY, JSON.stringify(out));
-            } catch (e) { /* quota / serialize — non-fatal */ }
+            } catch (e) { /* serialize, non-fatal */ }
         }, 500);
+    }
+
+    // Flush the signed-URL cache to its file SYNCHRONOUSLY on beforeunload (CEP kills
+    // async work on quit; the 500ms debounce above can otherwise drop the write).
+    // Mirrors flushMetaCacheSync. Rebuilds the payload fresh so it is always current.
+    function flushSignedUrlCacheSync() {
+        if (Object.keys(_signedPathUrlCache).length === 0) return;
+        if (_persistSignedTimer) { clearTimeout(_persistSignedTimer); _persistSignedTimer = null; }
+        try {
+            if (window.blitzSignedUrlStore && window.blitzSignedUrlStore.saveSync) {
+                window.blitzSignedUrlStore.saveSync(JSON.stringify(_buildSignedUrlPersistPayload()));
+            }
+        } catch (e) {}
     }
 
     function _clearPersistedSignedUrls() {
         if (_persistSignedTimer) { clearTimeout(_persistSignedTimer); _persistSignedTimer = null; }
         try { localStorage.removeItem(SIGNED_URL_PERSIST_KEY); } catch (e) {}
+        if (window.blitzSignedUrlStore && window.blitzSignedUrlStore.clear) {
+            try { window.blitzSignedUrlStore.clear(); } catch (e) {}
+        }
+    }
+
+    // Cold-launch backstop: if localStorage was wiped across the AE quit, pull the
+    // still-valid signed URLs back from the jsx file BEFORE the grid's first paint so
+    // buildCompsFromMetadata sets a real thumbUrl and the ~376-thumbnail re-sign wave
+    // never fires. Timeout-bounded (2.5s) like the meta rehydrate so a wedged host
+    // cannot stall launch; runs concurrently with it (see _ensureMetaRehydrated).
+    function _rehydrateSignedUrlCacheFromFile() {
+        // localStorage already rehydrated at module load? Then nothing was lost; skip
+        // the host round-trip entirely.
+        if (Object.keys(_signedPathUrlCache).length > 0) return Promise.resolve();
+        if (!window.blitzSignedUrlStore || !window.blitzSignedUrlStore.load) return Promise.resolve();
+        var _raceLoad = new Promise(function (resolve) {
+            var settled = false;
+            var timer = setTimeout(function () { if (!settled) { settled = true; resolve('{}'); } }, 2500);
+            window.blitzSignedUrlStore.load().then(function (r) {
+                if (!settled) { settled = true; clearTimeout(timer); resolve(r); }
+            }, function () {
+                if (!settled) { settled = true; clearTimeout(timer); resolve('{}'); }
+            });
+        });
+        return _raceLoad.then(function (raw) {
+            if (!raw || raw === '{}') return;
+            var obj;
+            try { obj = JSON.parse(raw); } catch (e) { return; }
+            if (!obj || typeof obj !== 'object') return;
+            var now = Date.now();
+            var keys = Object.keys(obj);
+            var filled = 0;
+            for (var i = 0; i < keys.length; i++) {
+                var e = obj[keys[i]];
+                // Drop expired URLs: a stale signed URL renders a broken image, worse
+                // than an empty cache (which just re-signs). Same window as localStorage.
+                if (e && e.url && e.ts && (now - e.ts < SIGNED_URL_CACHE_TTL) && !_signedPathUrlCache[keys[i]]) {
+                    _signedPathUrlCache[keys[i]] = { ts: e.ts, url: e.url };
+                    filled++;
+                }
+            }
+            if (filled > 0) {
+                _persistSignedUrlCache(); // promote back into localStorage for the session
+                _log('signed-url cache rehydrated from file (' + filled + ' urls), localStorage was empty on launch', 'info');
+            }
+        });
     }
 
     _rehydrateSignedUrlCache();
@@ -117,6 +190,121 @@
     // Bump when cache schema changes or naming fixes require fresh data.
     // Stale cache with lower version is rejected — forces slow-path reload.
     var CACHE_VERSION = 2;
+
+    // ── File-backed backstop for the meta cache ────────────────────────────
+    // getCachedMetadata has no TTL, so if localStorage survived an AE restart the
+    // grid would load instantly. The "all comps reload on every launch" complaint
+    // means localStorage is NOT surviving the quit (the auth session hit the same
+    // wall — see createPersistentAuthStorage). The signed-URL cache already has a
+    // localStorage persist layer, but that is wiped by the same event; the meta
+    // cache had no durable copy at all, so it is the load-bearing gap. We mirror
+    // the meta cache to a jsx-written file (via window.blitzMetaCacheStore, set up
+    // in main.js) and promote it back into localStorage on the next launch. The
+    // file is cleared everywhere the localStorage copy is, so an invalidated cache
+    // never resurrects from disk.
+    var _metaRehydratePromise = null;
+    var _persistMetaTimer = null;
+    var _pendingMetaPayload = null;  // last payload whose debounced write is still queued
+
+    function _persistMetaCacheToFile(payload) {
+        if (!window.blitzMetaCacheStore || !window.blitzMetaCacheStore.save) return;
+        // Debounced (250ms) so a burst of cache writes coalesces into one file
+        // write, but short enough that the quit-survival window is tiny.
+        // flushMetaCacheSync() below covers the remaining case (AE quit before the
+        // timer fires).
+        _pendingMetaPayload = payload;
+        if (_persistMetaTimer) clearTimeout(_persistMetaTimer);
+        _persistMetaTimer = setTimeout(function () {
+            _persistMetaTimer = null;
+            var p = _pendingMetaPayload;
+            _pendingMetaPayload = null;
+            try { window.blitzMetaCacheStore.save(p); } catch (e) {}
+        }, 250);
+    }
+
+    // Flush a still-queued debounced write SYNCHRONOUSLY. CEP kills async work on
+    // beforeunload (telemetry uses a sync XHR on close for the same reason), so the
+    // async jsx save can be dropped if the user quits AE inside the debounce window
+    // — exactly the reload-every-launch case this fix targets. saveSync uses cep.fs
+    // (synchronous) to guarantee the write lands. No pending payload => no-op.
+    function flushMetaCacheSync() {
+        if (!_pendingMetaPayload) return;
+        var p = _pendingMetaPayload;
+        _pendingMetaPayload = null;
+        if (_persistMetaTimer) { clearTimeout(_persistMetaTimer); _persistMetaTimer = null; }
+        try {
+            if (window.blitzMetaCacheStore && window.blitzMetaCacheStore.saveSync) {
+                window.blitzMetaCacheStore.saveSync(p);
+            }
+        } catch (e) {}
+    }
+
+    function _clearMetaCacheFile() {
+        _pendingMetaPayload = null;
+        if (_persistMetaTimer) { clearTimeout(_persistMetaTimer); _persistMetaTimer = null; }
+        try {
+            if (window.blitzMetaCacheStore && window.blitzMetaCacheStore.clear) {
+                window.blitzMetaCacheStore.clear();
+            }
+        } catch (e) {}
+    }
+
+    function _rehydrateMetaCacheFromFile() {
+        // If localStorage already holds a valid current-version cache, the file
+        // isn't needed — leave the fast path alone.
+        try {
+            var existing = localStorage.getItem(META_CACHE_KEY);
+            if (existing) {
+                var p = JSON.parse(existing);
+                if (p && p._v === CACHE_VERSION && p.folders && p.folders.length > 0) {
+                    return Promise.resolve();
+                }
+            }
+        } catch (e) { /* fall through to file */ }
+        if (!window.blitzMetaCacheStore || !window.blitzMetaCacheStore.load) return Promise.resolve();
+        // Bound the host round-trip. load() -> safeEvalScript('loadBlitzkriegMetaCache()')
+        // only calls back when AE's ExtendScript engine is free; at cold launch the host
+        // can be busy opening a heavy project (the exact case this cache targets), so an
+        // unbounded await here would stall the grid's first paint. Race a 2.5s timeout:
+        // if the file read is slow, fall through to the normal cloud load (pre-fix
+        // behavior) instead of blocking. The background refresh re-warms the cache next.
+        var _loadWithTimeout = new Promise(function (resolve) {
+            var settled = false;
+            var timer = setTimeout(function () { if (!settled) { settled = true; resolve('{}'); } }, 2500);
+            window.blitzMetaCacheStore.load().then(function (r) {
+                if (!settled) { settled = true; clearTimeout(timer); resolve(r); }
+            }, function () {
+                if (!settled) { settled = true; clearTimeout(timer); resolve('{}'); }
+            });
+        });
+        return _loadWithTimeout.then(function (raw) {
+            if (!raw || raw === '{}') return;
+            var parsed;
+            try { parsed = JSON.parse(raw); } catch (e) { return; }
+            if (!parsed || parsed._v !== CACHE_VERSION || !parsed.folders || !parsed.folders.length) return;
+            try {
+                localStorage.setItem(META_CACHE_KEY, raw);
+                _log('meta cache rehydrated from file (' + parsed.folders.length + ' entries), localStorage was empty on launch', 'info');
+            } catch (e) {}
+        });
+    }
+
+    // Run once, lazily, on the first listTemplates(). Lazy (not at module load)
+    // because cloud-library.js loads BEFORE main.js, so window.blitzMetaCacheStore
+    // isn't defined yet at module-eval time.
+    function _ensureMetaRehydrated() {
+        if (!_metaRehydratePromise) {
+            // Fire the meta-cache AND signed-URL file rehydrations CONCURRENTLY. Each is
+            // individually 2.5s-timeout-bounded, so firing them together keeps the
+            // worst-case cold-launch wait at ~2.5s instead of ~5s from chaining two
+            // sequential host round-trips (the exact busy-host launch this all targets).
+            _metaRehydratePromise = Promise.all([
+                _rehydrateMetaCacheFromFile(),
+                _rehydrateSignedUrlCacheFromFile()
+            ]);
+        }
+        return _metaRehydratePromise;
+    }
 
     // Cloud-side manifest file — a single JSON at bucket root containing the
     // metadata for every template. One download instead of 248+. Rebuilt on any
@@ -336,6 +524,7 @@
             if (parsed._v !== CACHE_VERSION) {
                 _log('getCachedMetadata: rejecting v' + (parsed._v || 0) + ' cache (current v' + CACHE_VERSION + ') — forcing fresh load', 'info');
                 try { localStorage.removeItem(META_CACHE_KEY); } catch (e) {}
+                _clearMetaCacheFile();
                 return null;
             }
             return parsed;
@@ -373,6 +562,8 @@
         } catch (e) {
             _log('setCachedMetadata: localStorage write failed: ' + (e && e.message || e), 'warn');
         }
+        // Mirror to the durable file so the next launch survives a localStorage wipe.
+        _persistMetaCacheToFile(payload);
     }
 
     /**
@@ -424,6 +615,7 @@
      */
     function invalidateCache() {
         try { localStorage.removeItem(META_CACHE_KEY); } catch (e) {}
+        _clearMetaCacheFile();
         _signedPathUrlCache = {};
         _previewUrlCache = {};
         _previewPathCache = {};
@@ -438,6 +630,7 @@
      */
     function clearLocalCache() {
         try { localStorage.removeItem(META_CACHE_KEY); } catch (e) {}
+        _clearMetaCacheFile();
         _signedPathUrlCache = {};
         _previewUrlCache = {};
         _previewPathCache = {};
@@ -450,6 +643,7 @@
      */
     function invalidateCacheForPath(storagePath) {
         try { localStorage.removeItem(META_CACHE_KEY); } catch (e) {}
+        _clearMetaCacheFile();
         if (storagePath) {
             delete _signedPathUrlCache[storagePath + '/comp.png'];
             delete _signedPathUrlCache[storagePath + '/thumbnail.png'];
@@ -546,10 +740,17 @@
             if (typeof meta.previewFrames === 'number') previewFrameCount = meta.previewFrames;
             if (meta.cloudPreviewFrameCount) previewFrameCount = Math.max(previewFrameCount, meta.cloudPreviewFrameCount);
 
-            // A template's thumbnail is "verified" if we have evidence it was generated:
-            // either via cloud generation (cloudThumbnailGenerated flag or cloudPreviewFrameCount)
-            // or via stash upload (previewFrameCount > 0 means thumbnail was included)
-            var thumbnailVerified = !!(meta.cloudThumbnailGenerated || previewFrameCount > 0);
+            // A template's thumbnail is "verified" if we have evidence it exists:
+            //  - hasCompPng: a comp.png was uploaded at stash time (written into
+            //    metadata.json by the upload path; backfilled for legacy folders)
+            //  - cloudThumbnailGenerated: produced via the in-panel generate flow
+            //  - previewFrameCount > 0: animated preview frames imply a thumbnail too
+            // Bulk-imported templates have a real comp.png but never went through
+            // generation, so WITHOUT hasCompPng they were mislabeled "missing
+            // thumbnail" — inflating the admin count, spawning phantom Generate
+            // buttons, and skipping the local disk cache. Never infer from thumbUrl
+            // (createSignedUrls signs even non-existent files).
+            var thumbnailVerified = !!(meta.hasCompPng || meta.cloudThumbnailGenerated || previewFrameCount > 0);
 
             var categories = (mr.metadata && mr.metadata.categories) || [mr.categoryName];
 
@@ -589,6 +790,12 @@
                 previewFrames: null,  // Signed lazily on hover
                 previewFrameCount: previewFrameCount,
                 thumbnailVerified: thumbnailVerified,
+                // hasAep defaults TRUE when the flag is absent: legacy tiles predate
+                // the flag and are overwhelmingly healthy, so a default-false would
+                // mislabel ~370 good templates "needs repair". Only an explicit
+                // hasAep:false (written by the backfill onto folders that truly have
+                // no .aep, or by a future upload path) gates the tile.
+                hasAep: (meta.hasAep !== false),
                 storagePath: storagePath,
                 contentVersion: contentVersion,
             });
@@ -1024,6 +1231,11 @@
      */
     async function listTemplates() {
         var t0 = Date.now();
+
+        // Promote the file-backed cache into localStorage if the OS/CEP wiped it
+        // across the AE restart. Awaited so Tier 1 sees the rehydrated cache
+        // instead of slow-pathing the whole grid on every launch.
+        await _ensureMetaRehydrated();
 
         // ----- Tier 1: localStorage cache -----
         var cache = getCachedMetadata();
@@ -1700,6 +1912,10 @@
         }
 
         if (files.metadata) {
+            // Record thumbnail + project truth at write time so the reader never has
+            // to infer comp.png/.aep existence (which would need a per-folder list).
+            files.metadata.hasCompPng = !!files.thumbnail;
+            files.metadata.hasAep = !!files.aep; // the .aep upload above is guarded by if (files.aep)
             var metaBlob = new Blob([JSON.stringify(files.metadata)], { type: 'application/json' });
             uploads.push(
                 sb.storage.from(BUCKET)
@@ -2002,7 +2218,7 @@
                 });
             }
         }
-        _persistSignedUrlCache();   // Wave 2B: mirror freshly-signed URLs to disk
+        _persistSignedUrlCache();   // Wave 2B: mirror freshly-signed URLs to localStorage + durable file
         return result;
     }
 
@@ -2063,6 +2279,8 @@
         invalidateCache: invalidateCache,
         clearLocalCache: clearLocalCache,
         invalidateCacheForPath: invalidateCacheForPath,
+        flushMetaCacheSync: flushMetaCacheSync,
+        flushSignedUrlCacheSync: flushSignedUrlCacheSync,
         forceReload: forceReload,
         signPreviewFrames: signPreviewFrames,
         removePreviewFrames: removePreviewFrames,

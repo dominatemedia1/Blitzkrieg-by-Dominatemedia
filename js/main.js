@@ -109,6 +109,142 @@
     // Expose safeEvalScript for other modules (telemetry.js)
     window.safeEvalScript = safeEvalScript;
 
+    // File-backed backstop for cloud-library's localStorage metadata cache.
+    // cloud-library.js has no CEP bridge of its own, so it reaches the jsx host
+    // through this narrow promise API (escaping stays here, where
+    // escapeForExtendScript lives). safeEvalScript always invokes its callback —
+    // even with no bridge (returns 'EvalScript error.') — so these never hang.
+    // See _rehydrateMetaCacheFromFile in cloud-library.js.
+    //
+    // Uses the jsx file helpers (same path as the auth-session mirror) rather than
+    // cep.fs: the payload is the metadata manifest (~62KB today), well within
+    // evalScript's string limit, and this keeps parity with the sibling auth
+    // storage. If the cache ever grows past a few hundred KB, switch save/load to
+    // cep.fs.writeFile/readFile (the way readFileAsBlobAsync already prefers).
+    // Resolved once, lazily, when the bridge is first used with a live CEP bridge,
+    // so the synchronous quit-flush (saveSync) has a path to write to.
+    var _metaCacheFilePath = null;
+    function _resolveMetaCachePath() {
+        if (_metaCacheFilePath) return;
+        try {
+            safeEvalScript('getMetaCacheFilePath()', function (r) {
+                if (r && r !== 'EvalScript error.' && r.indexOf('Error') !== 0) _metaCacheFilePath = r;
+            });
+        } catch (e) {}
+    }
+
+    window.blitzMetaCacheStore = {
+        load: function () {
+            _resolveMetaCachePath();
+            return new Promise(function (resolve) {
+                try {
+                    safeEvalScript('loadBlitzkriegMetaCache()', function (r) { resolve(r || '{}'); });
+                } catch (e) { resolve('{}'); }
+            });
+        },
+        save: function (json) {
+            _resolveMetaCachePath();
+            return new Promise(function (resolve) {
+                try {
+                    safeEvalScript('saveBlitzkriegMetaCache("' + escapeForExtendScript(json) + '")', function (r) { resolve(r); });
+                } catch (e) { resolve(null); }
+            });
+        },
+        // Synchronous write for beforeunload — CEP kills async work on quit, so the
+        // async save() above can be dropped if AE closes inside the debounce window.
+        // cep.fs.writeFile is synchronous; writes the same UTF-8 bytes the jsx save
+        // would (Base64 mode decodes to raw bytes). No-op if cep.fs / path missing.
+        saveSync: function (json) {
+            try {
+                if (_metaCacheFilePath && typeof cep !== 'undefined' && cep.fs && cep.fs.writeFile &&
+                    cep.encoding && typeof cep.encoding.Base64 !== 'undefined') {
+                    var b64 = utf8ToBase64(json);
+                    // getMetaCacheFilePath() returns a normalizeFsPath()-encoded path
+                    // (spaces as %20, etc.) which ExtendScript's File() decodes on its own
+                    // for the async save/load. cep.fs.writeFile does NOT decode, so on
+                    // macOS the userData path ("Application Support" has a space) must be
+                    // decoded back to the raw native path or this sync quit-flush writes to
+                    // a nonexistent "Application%20Support" dir and silently no-ops. Same
+                    // %20 class as the local-mirror decode bug. Async paths are unaffected.
+                    var syncPath = _metaCacheFilePath;
+                    try { syncPath = decodeURIComponent(_metaCacheFilePath); } catch (de) {}
+                    if (b64 !== null) cep.fs.writeFile(syncPath, b64, cep.encoding.Base64);
+                }
+            } catch (e) {}
+        },
+        clear: function () {
+            return new Promise(function (resolve) {
+                try {
+                    safeEvalScript('clearBlitzkriegMetaCache()', function (r) { resolve(r); });
+                } catch (e) { resolve(null); }
+            });
+        }
+    };
+
+    // Sibling of blitzMetaCacheStore for the signed-URL cache. localStorage loses the
+    // signed thumbnail URLs across an AE quit, so the grid re-signs all ~376 comp.png
+    // on every launch (the visible half of "everything loads again"). This file mirror
+    // lets the still-valid (under 4h) URLs survive the quit. Same jsx-file family, same
+    // decodeURIComponent-before-cep.fs rule as the meta store (macOS %20 space-path).
+    var _signedUrlCacheFilePath = null;
+    function _resolveSignedUrlCachePath() {
+        if (_signedUrlCacheFilePath) return;
+        try {
+            safeEvalScript('getSignedUrlCacheFilePath()', function (r) {
+                if (r && r !== 'EvalScript error.' && r.indexOf('Error') !== 0) _signedUrlCacheFilePath = r;
+            });
+        } catch (e) {}
+    }
+
+    // Shared cep.fs writer for the signed-URL cache file (used by both the debounced
+    // async save and the beforeunload sync flush). Decodes the jsx %20-encoded path
+    // for cep.fs (which does not decode) exactly like the meta store's saveSync. The
+    // file holds raw UTF-8 bytes (Base64 mode decodes them); the jsx UTF-8 read on
+    // load reads them back identically. Returns false when the bridge/path is missing.
+    function _writeSignedUrlCacheFile(json) {
+        if (!_signedUrlCacheFilePath || typeof cep === 'undefined' || !cep.fs || !cep.fs.writeFile ||
+            !cep.encoding || typeof cep.encoding.Base64 === 'undefined') return false;
+        var b64 = utf8ToBase64(json);
+        if (b64 === null) return false;
+        var p = _signedUrlCacheFilePath;
+        try { p = decodeURIComponent(_signedUrlCacheFilePath); } catch (de) {}
+        cep.fs.writeFile(p, b64, cep.encoding.Base64);
+        return true;
+    }
+
+    window.blitzSignedUrlStore = {
+        load: function () {
+            _resolveSignedUrlCachePath();
+            return new Promise(function (resolve) {
+                try {
+                    safeEvalScript('loadBlitzkriegSignedUrlCache()', function (r) { resolve(r || '{}'); });
+                } catch (e) { resolve('{}'); }
+            });
+        },
+        // Both save paths go through cep.fs (not the jsx evalScript save the meta store
+        // uses). The signed-URL payload has long URLs and can reach a few hundred KB,
+        // past what an evalScript string comfortably carries; cep.fs.writeFile has no
+        // such ceiling and is fast (this is debounced 500ms upstream). The file is
+        // written as raw UTF-8 bytes (Base64 mode decodes them), which the jsx UTF-8
+        // read on load reads back identically, same as the meta cache round-trip.
+        save: function (json) {
+            _resolveSignedUrlCachePath();
+            return new Promise(function (resolve) {
+                try { resolve(_writeSignedUrlCacheFile(json)); } catch (e) { resolve(false); }
+            });
+        },
+        saveSync: function (json) {
+            try { _writeSignedUrlCacheFile(json); } catch (e) {}
+        },
+        clear: function () {
+            return new Promise(function (resolve) {
+                try {
+                    safeEvalScript('clearBlitzkriegSignedUrlCache()', function (r) { resolve(r); });
+                } catch (e) { resolve(null); }
+            });
+        }
+    };
+
     // App / main elements
     var appContainer = document.getElementById('app');
     var pathDisplay = document.getElementById('library-path-display');
@@ -298,11 +434,13 @@
     // this reliably OOMs the CEP renderer and takes AE down with it. We convert
     // that crash into a clear, actionable error instead. Tune if needed.
     var MAX_UPLOAD_FILE_BYTES = 1024 * 1024 * 1024; // 1 GB
-    // Aggregate guard: even when every single file is under the per-file limit,
-    // the upload holds the WHOLE bundle (aep + footage) in renderer memory at
-    // once, so a multi-file bundle can still OOM-crash AE. Cap the running total
-    // and fail-fast with an actionable message before that happens.
-    var MAX_UPLOAD_TOTAL_BYTES = 3 * 1024 * 1024 * 1024; // 3 GB
+    // Aggregate guard. The uploader now STREAMS the bundle (reads+uploads one
+    // asset at a time, per-file cap above), so peak memory is bounded by the
+    // worker concurrency, not the total — this is no longer a memory limit. It is
+    // a coarse "upload it manually instead" policy ceiling so the panel isn't used
+    // to push absurdly large bundles. Raised from 3 GB to fit the library's real
+    // heaviest templates (~3.4 GB) with headroom now that residence is bounded.
+    var MAX_UPLOAD_TOTAL_BYTES = 6 * 1024 * 1024 * 1024; // 6 GB
 
     var bulkSelectedIds = new Set(); // Track selected items for bulk operations
     var bulkMode = false; // Whether bulk selection mode is active
@@ -2177,6 +2315,12 @@
         var cepActionTitle = hasCepBridge ? '' : CEP_ACTION_HINT;
 
         var isAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
+        // A "needs repair" tile has metadata but no .aep in storage: importing it
+        // always fails ("No .aep file found") and it is exactly the editor's
+        // "corrupted file". Gate it so it can never be imported and never offers
+        // Generate (which also needs the .aep). Only an explicit hasAep:false trips
+        // this (the reader defaults hasAep true for legacy tiles).
+        var needsRepair = (comp.hasAep === false);
         var generatePreviewBtn = '';
         if (comp.storagePath && isAdmin && (!comp.thumbnailVerified || isBlacklisted)) {
             // Cloud template: admin can generate thumbnail (show when not verified or blacklisted)
@@ -2186,6 +2330,13 @@
         } else if (!hasPreview && !comp.storagePath) {
             generatePreviewBtn = '<button class="generate-preview-btn' + cepDisabledClass + '" title="' + escapeHTML(hasCepBridge ? 'Generate Preview Animation' : cepActionTitle) + '"' + cepDisabledAttr + '><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> Preview</button>';
         }
+        // Suppress Generate on a needs-repair tile: generation imports the .aep to
+        // render a frame, so with no .aep it would fail exactly like Import.
+        if (needsRepair) generatePreviewBtn = '';
+
+        var importBtnHtml = needsRepair
+            ? '<button class="import-btn needs-repair-btn" disabled aria-disabled="true" title="This template is missing its project (.aep) file and cannot be imported. It needs to be re-uploaded from the original."><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg><span>Needs repair</span></button>'
+            : '<button class="import-btn' + cepDisabledClass + '" title="' + escapeHTML(hasCepBridge ? 'Import into After Effects' : cepActionTitle) + '"' + cepDisabledAttr + '><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg><span>Import</span></button>';
 
         var safeName_ = comp.name || '?';
         var nameInitial = safeName_.charAt(0).toUpperCase();
@@ -2232,7 +2383,7 @@
         }
         var metaHtml = metaParts.length ? '<div class="item-meta">' + metaParts.join('') + '</div>' : '';
 
-        return '<div class="stash-item' + previewClass + favClass + '" data-unique-id="' + safeUniqueId + '" data-category="' + safeCategory + '" data-folder-name="' + safeFolderName + '" data-aep-path="' + safeAepPath + '" data-storage-path="' + safeStoragePath + '" data-name="' + safeName + '"' + previewDataAttr + durationAttr + previewCountAttr + ' draggable="true">' +
+        return '<div class="stash-item' + previewClass + favClass + (needsRepair ? ' needs-repair' : '') + '" data-unique-id="' + safeUniqueId + '" data-category="' + safeCategory + '" data-folder-name="' + safeFolderName + '" data-aep-path="' + safeAepPath + '" data-storage-path="' + safeStoragePath + '" data-name="' + safeName + '"' + (needsRepair ? ' data-needs-repair="1"' : '') + previewDataAttr + durationAttr + previewCountAttr + ' draggable="true">' +
             bulkCheckbox +
             '<div class="item-actions">' +
                 '<button class="action-btn favorite-btn" title="' + favTitle + '"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="' + favFill + '" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg></button>' +
@@ -2246,7 +2397,7 @@
             '<div class="item-info">' +
                 '<p class="item-name" title="' + safeName + '">' + safeName + '</p>' +
                 metaHtml +
-                '<button class="import-btn' + cepDisabledClass + '" title="' + escapeHTML(hasCepBridge ? 'Import into After Effects' : cepActionTitle) + '"' + cepDisabledAttr + '><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg><span>Import</span></button>' +
+                importBtnHtml +
             '</div>' +
         '</div>';
     }
@@ -2845,6 +2996,12 @@
         if (!item) return;
         // Don't trigger on buttons
         if (e.target.closest('.action-btn') || e.target.closest('.import-btn') || e.target.closest('.generate-preview-btn')) return;
+        // A needs-repair tile has no .aep; double-click import would fail the same way
+        // the (disabled) Import button is gated against. Tell the user and stop.
+        if (item.dataset.needsRepair === '1') {
+            showToast('This template is missing its project file and needs to be re-uploaded.', true);
+            return;
+        }
         // Cooldown: ignore double-clicks within 2 seconds of the last import
         var now = Date.now();
         if (now - _lastDblClickImportTime < 2000) return;
@@ -2994,6 +3151,31 @@
         // on heavier comps. Tell the user so a brief freeze doesn't read as a crash.
         showToast('Exporting from After Effects. AE may pause briefly...');
 
+        // Read-only pre-flight: ask the host for the bundle footage size and refine the
+        // warning with the honest number BEFORE the synchronous export freeze. The host
+        // serializes this quick read ahead of the stash below, so the refined toast lands
+        // first. Non-blocking: the stash proceeds regardless, and the post-export size
+        // gates still enforce the real limits, so a wrong/absent estimate never blocks a
+        // valid upload (it just falls back to the generic message).
+        safeEvalScript('estimateStashFootprint()', function(estRaw) {
+            try {
+                var est = JSON.parse(estRaw);
+                if (est && typeof est.bytes === 'number') {
+                    var gb = est.bytes / (1024 * 1024 * 1024);
+                    var msg = '';
+                    if (est.bytes > MAX_UPLOAD_TOTAL_BYTES) {
+                        msg = 'Heads up: this bundles about ' + gb.toFixed(1) + ' GB, over the ' + formatBytesShort(MAX_UPLOAD_TOTAL_BYTES) + ' limit. After Effects will pause while it collects files; if the upload is rejected, upload it manually via the offline library.';
+                    } else if (gb >= 1.5) {
+                        msg = 'Heads up: this bundles about ' + gb.toFixed(1) + ' GB of footage. After Effects will pause for up to a minute while it copies. Do not force-quit.';
+                    }
+                    if (est.footageMissing && est.footageMissing > 0) {
+                        msg = (msg ? msg + ' ' : '') + est.footageMissing + ' source file(s) are offline, so the bundle may be incomplete.';
+                    }
+                    if (msg) showToast(msg);
+                }
+            } catch (e) { /* no estimate: keep the generic message */ }
+        });
+
         var safeCategory = escapeForExtendScript(categoryName);
 
         safeEvalScript('stashSelectedCompToTemp("' + safeCategory + '")', function(result) {
@@ -3046,7 +3228,13 @@
                             });
                         if (aepUpload.error) throw new Error('AEP upload failed: ' + aepUpload.error.message);
 
-                        // Upload thumbnail if present (use comp.png for consistency)
+                        // Upload thumbnail if present (use comp.png for consistency).
+                        // Track whether it ACTUALLY landed: the upload is non-fatal
+                        // (warn-only), so hasCompPng below must reflect real storage,
+                        // not just intent — otherwise a failed upload would mark the
+                        // template "has thumbnail" with no comp.png (the exact
+                        // corrupt/missing class this fix removes).
+                        var compPngUploaded = false;
                         if (files.thumbnailBlob) {
                             var thumbUpload = await sb.storage.from('blitzkrieg')
                                 .upload(pendingBasePath + '/comp.png', files.thumbnailBlob, {
@@ -3055,6 +3243,8 @@
                                 });
                             if (thumbUpload.error) {
                                 debugLog('Thumbnail upload warning: ' + thumbUpload.error.message, 'warn');
+                            } else {
+                                compPngUploaded = true;
                             }
                         }
 
@@ -3084,6 +3274,15 @@
                         if (files.metadata) {
                             showToast('Uploading metadata...');
                             files.metadata.bundleAssetCount = files.bundleFiles ? files.bundleFiles.length : 0;
+                            // Record thumbnail truth at write time (only if the
+                            // comp.png upload above actually succeeded) so the
+                            // library reader never mislabels this as "missing
+                            // thumbnail" — no per-folder storage list needed.
+                            files.metadata.hasCompPng = compPngUploaded;
+                            // The .aep upload above throws on failure, so reaching this
+                            // point guarantees the project file landed. Record it so the
+                            // reader never renders this as a "needs repair" tile.
+                            files.metadata.hasAep = true;
                             var metaBlob = new Blob([JSON.stringify(files.metadata)], { type: 'application/json' });
                             await sb.storage.from('blitzkrieg')
                                 .upload(pendingBasePath + '/metadata.json', metaBlob, {
@@ -3263,20 +3462,56 @@
 
     async function uploadBundleFilesLimited(basePath, bundleFiles) {
         if (!bundleFiles || bundleFiles.length === 0) return;
-        if (window.cloudLibrary && window.cloudLibrary.uploadBundleFiles) {
-            await window.cloudLibrary.uploadBundleFiles(basePath, bundleFiles);
-            return;
-        }
+        // Stream each asset: read from disk ONLY when its turn to upload comes,
+        // then let it be GC'd. Peak renderer memory is bounded by the worker
+        // concurrency (a handful of blobs) instead of the total bundle size — the
+        // whole-bundle residence was the OOM that crashed AE on heavy uploads.
+        // (Deliberately does NOT delegate to cloudLibrary.uploadBundleFiles, which
+        // expects each entry to already carry a pre-read .blob.)
         var sb = window.blitzkriegSupabase;
         var idx = 0;
         var failures = [];
+
+        // Reading one asset transiently costs ~3-3.5x its size (base64 string from
+        // cep.fs + atob binary string + Uint8Array before the Blob). Files stream up to
+        // the MAX_UPLOAD_FILE_BYTES (1 GB) cap, so two ~1 GB reads decoding at once would
+        // peak well past the ~3 GB the CEP renderer heap tolerates (the reported OOM).
+        // So: keep concurrency 2 for throughput on typical small footage, but gate LARGE
+        // files (>= LARGE_READ_BYTES) through a single slot held across read AND upload,
+        // so at most one big base64 decode is ever in flight. A bundle of small files
+        // still runs 2-wide; a bundle with a big file processes that file alone while a
+        // small one may proceed beside it. This, not the 6 GB total cap, is the real bound.
+        var LARGE_READ_BYTES = 300 * 1024 * 1024; // 300 MB source -> ~1 GB+ transient
+        var largeSlotBusy = false;
+        function acquireLargeSlot() {
+            return new Promise(function (resolve) {
+                (function poll() {
+                    if (!largeSlotBusy) { largeSlotBusy = true; resolve(); }
+                    else setTimeout(poll, 40);
+                })();
+            });
+        }
+
         async function worker() {
             while (idx < bundleFiles.length) {
                 var myIdx = idx++;
                 var f = bundleFiles[myIdx];
+                if (!f || !f.relativePath) continue;
+                var isLarge = (f.sizeBytes || 0) >= LARGE_READ_BYTES;
+                if (isLarge) await acquireLargeSlot();
+                var blob;
+                try {
+                    blob = f.blob || await readFileAsBlobAsync(f.localPath, f.contentType || contentTypeForLocalPath(f.relativePath));
+                } catch (readErr) {
+                    // A single unreadable source is skipped (same as the old collect
+                    // step did) rather than failing the whole upload.
+                    if (isLarge) largeSlotBusy = false;
+                    debugLog('Bundle asset read skipped (' + f.relativePath + '): ' + (readErr && readErr.message || readErr), 'warn');
+                    continue;
+                }
                 try {
                     var res = await sb.storage.from('blitzkrieg')
-                        .upload(basePath + '/' + f.relativePath, f.blob, {
+                        .upload(basePath + '/' + f.relativePath, blob, {
                             contentType: f.contentType || contentTypeForLocalPath(f.relativePath),
                             upsert: true,
                         });
@@ -3284,10 +3519,16 @@
                 } catch (e) {
                     failures.push({ path: f.relativePath, error: (e && e.message) || String(e) });
                 }
+                blob = null; // release before the next read on this worker
+                // Release the large slot only AFTER upload, so the 1x blob is gone too
+                // and never overlaps another large file's transient decode.
+                if (isLarge) largeSlotBusy = false;
             }
         }
+
+        var CONCURRENCY = 2;
         var workers = [];
-        for (var wi = 0; wi < Math.min(6, bundleFiles.length); wi++) workers.push(worker());
+        for (var wi = 0; wi < Math.min(CONCURRENCY, bundleFiles.length); wi++) workers.push(worker());
         await Promise.all(workers);
         if (failures.length > 0) {
             throw new Error('Asset upload failed for ' + failures[0].path + ': ' + failures[0].error);
@@ -3395,17 +3636,19 @@
             if (totalBytes > MAX_UPLOAD_TOTAL_BYTES) {
                 throw new Error('This template totals ' + formatBytesShort(totalBytes) +
                     ', over the ' + formatBytesShort(MAX_UPLOAD_TOTAL_BYTES) +
-                    ' panel-upload limit. The panel must hold the whole bundle in memory to upload it, which would crash AE. Reduce the footage (proxy/transcode) or upload this template manually.');
+                    ' panel-upload limit. Upload this template manually (via the offline library) or reduce the footage (proxy/transcode).');
             }
-            try {
-                bundleFiles.push({
-                    relativePath: relPath,
-                    blob: await readFileAsBlobAsync(compDir + '/' + relPath, contentTypeForLocalPath(relPath)),
-                    contentType: contentTypeForLocalPath(relPath)
-                });
-            } catch (assetErr) {
-                debugLog('Bundle asset read skipped (' + relPath + '): ' + (assetErr && assetErr.message || assetErr), 'warn');
-            }
+            // Record the disk path only — do NOT read the blob here. The uploader
+            // (uploadBundleFilesLimited) reads each asset from disk just before it
+            // uploads it, so the panel never holds the whole multi-GB footage
+            // bundle in renderer memory at once. Holding the entire bundle resident
+            // is what OOM-crashed AE on heavy comps.
+            bundleFiles.push({
+                relativePath: relPath,
+                localPath: compDir + '/' + relPath,
+                contentType: contentTypeForLocalPath(relPath),
+                sizeBytes: assetSize   // used by the uploader to serialize large reads
+            });
         }
 
         return {
@@ -8255,6 +8498,7 @@
                 try {
                     var metadata = JSON.parse(text);
                     metadata.cloudThumbnailGenerated = true;
+                    metadata.hasCompPng = true; // generation always (re)writes comp.png
                     metadata.previewFrames = frameCount || 0;
                     metadata.cloudPreviewFrameCount = frameCount || 0;
                     metadata.cloudPreviewGenerated = frameCount > 0;
@@ -8416,6 +8660,11 @@
         }
         // Track session end on panel close
         window.addEventListener('beforeunload', function() {
+            // Land any queued meta-cache write synchronously before AE tears the
+            // panel down (async work is killed on quit) so the next launch loads
+            // instantly from the file instead of re-fetching the whole grid.
+            if (window.cloudLibrary && window.cloudLibrary.flushMetaCacheSync) window.cloudLibrary.flushMetaCacheSync();
+            if (window.cloudLibrary && window.cloudLibrary.flushSignedUrlCacheSync) window.cloudLibrary.flushSignedUrlCacheSync();
             if (window.blitzkriegAnalytics) window.blitzkriegAnalytics.trackSessionEnd();
             if (window.blitzkriegTelemetry) window.blitzkriegTelemetry.endSession();
         });
