@@ -234,6 +234,12 @@
             templates_used: templateNames,
             renders_completed: rendersCompleted,
             session_data: {
+                // Which panel build produced this session. Lives in session_data
+                // (JSONB) — not a top-level column — so it needs no table migration.
+                // Without it there is no remote way to tell if an editor's crash
+                // report is from a build that already has a given fix (OTA can lag),
+                // so "is the editor even on the fixed version?" was unanswerable.
+                panel_version: (typeof window !== 'undefined' && window.BLITZKRIEG_LOCAL_VERSION) || 'unknown',
                 render_events: renderEvents.slice(),
                 template_details: templatesUsed.slice(),
                 session_start: sessionStartTime ? new Date(sessionStartTime).toISOString() : null,

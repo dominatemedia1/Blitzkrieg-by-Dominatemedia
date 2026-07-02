@@ -2705,6 +2705,106 @@ function saveBlitzkriegAuthStorage(authJson) {
     }
 }
 
+function getMetaCacheFilePath() {
+    var settingsFolder = new Folder(buildPath(Folder.userData, "Blitzkrieg"));
+    if (!settingsFolder.exists) {
+        settingsFolder.create();
+    }
+    return buildPath(settingsFolder, "meta-cache.json");
+}
+
+/**
+ * File-backed backstop for the panel's localStorage template-metadata cache.
+ * CEP localStorage is not guaranteed to survive an After Effects quit (the auth
+ * session needed the same file mirror for exactly this reason), so without this
+ * the whole library slow-path reloads on every launch. Load/save/clear mirror
+ * the auth-storage helpers above.
+ */
+function loadBlitzkriegMetaCache() {
+    try {
+        var metaFile = new File(getMetaCacheFilePath());
+        if (metaFile.exists) {
+            metaFile.open('r');
+            metaFile.encoding = 'UTF-8';
+            var content = metaFile.read();
+            metaFile.close();
+            JSON.parse(content);
+            return content;
+        }
+    } catch (e) {
+        $.writeln("Blitzkrieg: Warning - Could not load meta cache: " + e.toString());
+    }
+    return "{}";
+}
+
+function saveBlitzkriegMetaCache(metaJson) {
+    try {
+        JSON.parse(metaJson);
+        var metaFile = new File(getMetaCacheFilePath());
+        metaFile.open('w');
+        metaFile.encoding = 'UTF-8';
+        metaFile.write(metaJson);
+        metaFile.close();
+        return "Success";
+    } catch (e) {
+        return "Error: " + e.toString();
+    }
+}
+
+function clearBlitzkriegMetaCache() {
+    try {
+        var metaFile = new File(getMetaCacheFilePath());
+        if (metaFile.exists) metaFile.remove();
+        return "Success";
+    } catch (e) {
+        return "Error: " + e.toString();
+    }
+}
+
+/**
+ * File-backed backstop for the panel's signed-URL cache. Sibling of the meta cache
+ * mirror above. Without it, localStorage loses the signed thumbnail URLs on AE quit
+ * and the grid re-signs every comp.png on the next launch.
+ */
+function getSignedUrlCacheFilePath() {
+    var settingsFolder = new Folder(buildPath(Folder.userData, "Blitzkrieg"));
+    if (!settingsFolder.exists) {
+        settingsFolder.create();
+    }
+    return buildPath(settingsFolder, "signed-url-cache.json");
+}
+
+function loadBlitzkriegSignedUrlCache() {
+    try {
+        var f = new File(getSignedUrlCacheFilePath());
+        if (f.exists) {
+            f.open('r');
+            f.encoding = 'UTF-8';
+            var content = f.read();
+            f.close();
+            JSON.parse(content);
+            return content;
+        }
+    } catch (e) {
+        $.writeln("Blitzkrieg: Warning - Could not load signed-url cache: " + e.toString());
+    }
+    return "{}";
+}
+
+// NOTE: the signed-URL cache is WRITTEN from the panel via cep.fs (see
+// _writeSignedUrlCacheFile in main.js), not through a jsx save helper, because its
+// payload can exceed a comfortable evalScript string size. Only the read (load) and
+// clear go through jsx here; the file is plain UTF-8 either way.
+function clearBlitzkriegSignedUrlCache() {
+    try {
+        var f = new File(getSignedUrlCacheFilePath());
+        if (f.exists) f.remove();
+        return "Success";
+    } catch (e) {
+        return "Error: " + e.toString();
+    }
+}
+
 // ============================================
 // CLOUD UPLOAD/DOWNLOAD HELPERS
 // ============================================
@@ -2729,6 +2829,64 @@ function stashSelectedCompToTemp(categoryName) {
         tempPath: tempLibPath,
         result: result
     });
+}
+
+/**
+ * READ-ONLY pre-flight estimate of a stash bundle's on-disk footage size, so the JS
+ * layer can warn the editor BEFORE the synchronous export freeze (reduceProject +
+ * sourceFile.copy run on AE's UI thread and can pause AE for tens of seconds on a
+ * multi-GB comp). Walks the SAME selected comp stashSelectedComp exports and sums
+ * used FootageItem file sizes. Deliberately conservative: uses file.length per
+ * source, so image sequences (first frame only) UNDER-count rather than risk a
+ * misleading over-count. Never renders, reduces, copies, or mutates anything. Any
+ * failure returns { error } so the JS layer falls back to the generic message.
+ */
+function estimateStashFootprint() {
+    try {
+        if (!app.project) return JSON.stringify({ error: 'no project' });
+        var sel = app.project.selection;
+        if (sel.length !== 1 || !(sel[0] instanceof CompItem)) {
+            return JSON.stringify({ error: 'no single comp selected' });
+        }
+        var seenComp = {};
+        var seenFoot = {};
+        var totalBytes = 0;
+        var missing = 0;
+
+        function addFootage(item) {
+            if (!item || seenFoot['f' + item.id]) return;
+            seenFoot['f' + item.id] = true;
+            var file = null;
+            try { if (item.mainSource && item.mainSource.file) file = item.mainSource.file; } catch (e1) {}
+            if (!file) { try { if (item.file) file = item.file; } catch (e2) {} }
+            if (!file) return; // solid / placeholder / plugin source: nothing to copy
+            try {
+                if (file.exists) totalBytes += (file.length || 0);
+                else missing++;
+            } catch (e3) { /* unreadable, ignore */ }
+        }
+
+        function walkComp(comp) {
+            if (!comp || seenComp['c' + comp.id]) return;
+            seenComp['c' + comp.id] = true;
+            var n = 0;
+            try { n = comp.numLayers; } catch (eN) { n = 0; }
+            for (var i = 1; i <= n; i++) {
+                var lyr = null, s = null;
+                try { lyr = comp.layer(i); } catch (eL) { lyr = null; }
+                if (!lyr) continue;
+                try { s = lyr.source; } catch (eS) { s = null; }
+                if (!s) continue;
+                if (s instanceof CompItem) walkComp(s);
+                else if (s instanceof FootageItem) addFootage(s);
+            }
+        }
+
+        walkComp(sel[0]);
+        return JSON.stringify({ bytes: totalBytes, footageMissing: missing });
+    } catch (e) {
+        return JSON.stringify({ error: e.toString() });
+    }
 }
 
 /**

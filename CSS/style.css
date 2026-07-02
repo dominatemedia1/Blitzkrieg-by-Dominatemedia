@@ -1149,6 +1149,22 @@ body {
     cursor: not-allowed;
 }
 
+/* Needs-repair tile: metadata present but no .aep in storage, so import always
+   fails. Reads as an attention state (warning tint), not just greyed-disabled, so
+   the editor recognizes it as a broken template to re-upload. Override the green
+   import hover since it can never be imported. */
+.import-btn.needs-repair-btn,
+.stash-item:hover .import-btn.needs-repair-btn {
+    background-color: transparent;
+    color: var(--warning);
+    cursor: not-allowed;
+    opacity: 0.9;
+}
+
+.stash-item.needs-repair .thumbnail {
+    opacity: 0.55;
+}
+
 /* ========================================
    FOOTER / ADD BUTTON
    ======================================== */
