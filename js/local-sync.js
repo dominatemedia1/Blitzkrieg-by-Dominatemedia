@@ -17,6 +17,8 @@
     // rate/ETA accounting, and the live progress callback. Reset on every startFullSync.
     var _fsRun = null;
     var _fsSeq = 0; // monotonic run id — lets a superseded run's workers detect they are stale
+    var MAX_SYNC_FAILS = 3; // consecutive transient sync failures before a template is given up (marked broken) so full-sync converges
+    var SYNC_RETRY_COOLDOWN_MS = 30 * 60 * 1000; // after giving up on a TRANSIENT failure, auto-retry once this cooldown passes (a network blip self-heals; genuinely-broken sources are not retried)
 
     /** Promise that resolves after ms (CEP has setTimeout). */
     function _delay(ms) {
@@ -32,7 +34,26 @@
                 reject(new Error('CEP bridge unavailable'));
                 return;
             }
+            // The evalScript callback can silently never fire (host wedged on a
+            // native dialog / crash). Without a bound this hangs syncTemplate's
+            // dir-create / .aep-verify forever, which — like the download hang —
+            // wedges the whole full-sync loop. Time-bound it so the caller's
+            // reject path runs (verify already fails open; dir-create rejects ->
+            // template marked retryable).
+            // 120s: generous enough that the base64-decode WRITE fallback (used only
+            // when native cep.fs.writeFile is unavailable and it decodes a whole large
+            // .aep in one host round-trip) does not falsely time out, while still
+            // bounding a genuinely wedged host so the sync loop can never hang forever.
+            var settled = false;
+            var timer = setTimeout(function () {
+                if (settled) return;
+                settled = true;
+                reject(new Error('ExtendScript call timed out'));
+            }, 120000);
             window.__adobe_cep__.evalScript(expr, function (result) {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
                 if (!result || result === 'EvalScript error.') {
                     reject(new Error(result || 'ExtendScript call failed'));
                     return;
@@ -553,8 +574,9 @@
                             _prevEntry.complete = aepOk;
                             _prevEntry.contentVersion = contentVersion || '';
                             // A template that DID download and write an .aep is not broken,
-                            // even if a prior run flagged it — clear the stale flag.
-                            if (aepOk && _prevEntry.broken) { delete _prevEntry.broken; delete _prevEntry.brokenTs; }
+                            // even if a prior run flagged it — clear the stale flag and
+                            // the transient-failure counter so it starts fresh next time.
+                            if (aepOk) { _prevEntry.failCount = 0; if (_prevEntry.broken) { delete _prevEntry.broken; delete _prevEntry.brokenTs; delete _prevEntry.brokenKind; } }
                             state.templates[storagePath] = _prevEntry;
                             _saveState(state);
                             return {
@@ -719,23 +741,26 @@
             //
             // CRITICAL memory-safety rule: a template's size is only known AFTER it
             // has synced once (persisted `bytes`, line ~552). On the FIRST full sync
-            // every template is unknown, and we must NOT guess a small size and pack
-            // two together, because two large templates (the library has a multi-GB
-            // one) would then buffer concurrently and OOM the CEP heap, which is
-            // strictly worse than the old serial path. So UNKNOWN size is treated as
-            // "run alone" (estimate = the whole budget): the first full sync stays
-            // effectively serial (safe, no regression). On every later sync sizes are
-            // known, so small templates pack up to CONCURRENCY at once for the speed
-            // win, and any known-large one runs alone.
+            // that persisted size is absent, and we must NOT guess a small size and
+            // pack two together, because two large templates (the library has a
+            // multi-GB one) would then buffer concurrently and OOM the CEP heap.
+            // FIX: pre-size the queue from the storage LISTING (cheap LIST calls, no
+            // downloads) into `_sizeMap` so the first sync knows real sizes and can
+            // pack small templates up to CONCURRENCY while a large one still runs
+            // alone. Until a template is sized, it falls back to UNKNOWN = run alone
+            // (serial-safe), so the sizing pass can never cause an OOM — it only ever
+            // RELAXES serialization once a real (bounded) size is known.
             var _inflightBytes = 0;
             var BYTE_BUDGET = 700 * 1024 * 1024;      // ~700MB of concurrent template buffers
             var UNKNOWN_EST_BYTES = BYTE_BUDGET;       // unknown size -> run alone (memory-safe)
+            var _sizeMap = {};                         // storagePath -> real bytes (from pre-sizing)
 
             function _estBytesFor(sp) {
                 var st = _loadState();
                 var t = st.templates && st.templates[sp];
-                if (t && t.bytes) return t.bytes;
-                return UNKNOWN_EST_BYTES;
+                if (t && t.bytes) return t.bytes;      // persisted after a prior sync
+                if (_sizeMap[sp] > 0) return _sizeMap[sp]; // learned this run via pre-sizing
+                return UNKNOWN_EST_BYTES;              // not yet known -> run alone
             }
 
             // Credit bytes AS EACH FILE LANDS (not per whole template) so the rate
@@ -770,7 +795,16 @@
                     var sp = run.targets[i];
                     if (!sp) continue;
                     var t = tpls[sp];
-                    if (t && t.broken) continue; // never retry known-broken in a run
+                    if (t && t.broken) {
+                        // A genuinely-broken source (missing footage / unrenderable)
+                        // stays skipped until re-stashed. A TRANSIENT give-up (repeated
+                        // download failures / timeouts) is retried once a cooldown has
+                        // passed, so a temporary network problem self-heals instead of
+                        // permanently sidelining a healthy template.
+                        var _transient = t.brokenKind === 'transient';
+                        var _cooled = t.brokenTs && (Date.now() - t.brokenTs) > SYNC_RETRY_COOLDOWN_MS;
+                        if (!(_transient && _cooled)) continue;
+                    }
                     var wantV = run.versionMap[sp];
                     var stale = wantV && t && t.complete && t.contentVersion !== wantV;
                     if (!t || !t.complete || stale) out.push(sp);
@@ -780,6 +814,38 @@
 
             var queue = _pendingFor(myRun);
             var qi = 0;
+
+            // Background pre-sizing: learn each pending template's real byte size via
+            // cheap LIST calls (no downloads) so the byte-budget can pack small
+            // templates concurrently on the FIRST sync instead of running serially.
+            // Runs in parallel with the download workers and fills _sizeMap as it
+            // goes; a template not yet sized just stays serial-safe (UNKNOWN budget).
+            // Bounded concurrency so it does not steal request slots from downloads.
+            (function _presize() {
+                if (!window.cloudLibrary || typeof window.cloudLibrary.getTemplateSize !== 'function') return;
+                var si = 0;
+                var SIZE_CONC = 4;
+                function _sizeWorker() {
+                    // Stop sizing when superseded OR when the run is cancelled/stopped
+                    // (do not keep issuing LIST calls after the user hits Stop).
+                    if (_fsRun !== myRun || _isDead()) return;
+                    if (si >= queue.length) return;
+                    var sp = queue[si++];
+                    // Skip if already known (persisted from a prior sync).
+                    var st = _loadState();
+                    var t = st.templates && st.templates[sp];
+                    if (t && t.bytes) { return _sizeWorker(); }
+                    window.cloudLibrary.getTemplateSize(sp).then(function (res) {
+                        // Only trust a size when the WHOLE template is accounted for
+                        // (res.trustworthy). An untrusted/partial size stays UNKNOWN =
+                        // run-alone, so pre-sizing can only ever relax serialization
+                        // for provably-bounded templates, never risk an OOM.
+                        if (res && res.trustworthy && res.total > 0) _sizeMap[sp] = res.total;
+                        _sizeWorker();
+                    }, function () { _sizeWorker(); });
+                }
+                for (var k = 0; k < SIZE_CONC; k++) _sizeWorker();
+            })();
 
             // A run is DEAD (must fully stop, resolving its promise) when it has been
             // superseded by a newer run, when the persisted sync was cancelled, or when
@@ -832,9 +898,29 @@
                         var st3 = _loadState();
                         if (!st3.templates) st3.templates = {};
                         var entry = st3.templates[sp] || {};
+                        // Retry-cap: a transient 'failed' (e.g. a per-file download
+                        // timeout on a large asset) is retryable, but without a cap a
+                        // genuinely too-slow template re-downloads from scratch every
+                        // run and full-sync never reaches "done". After MAX_SYNC_FAILS
+                        // consecutive failures, promote to broken so _pendingFor skips
+                        // it and the run converges; a "Regenerate/retry" clears it.
                         if (kind === 'broken') {
+                            // Unrenderable source (no .aep / missing footage): permanent
+                            // until re-stashed. Not retried by _pendingFor.
                             entry.broken = (err && err.message) ? err.message : 'unavailable';
+                            entry.brokenKind = 'source';
                             entry.brokenTs = Date.now();
+                            entry.failCount = 0;
+                            st3.templates[sp] = entry;
+                        } else {
+                            entry.failCount = (entry.failCount || 0) + 1;
+                            if (entry.failCount >= MAX_SYNC_FAILS) {
+                                // Transient give-up: converges this run but _pendingFor
+                                // retries it automatically after SYNC_RETRY_COOLDOWN_MS.
+                                entry.broken = 'gave up after ' + entry.failCount + ' failed attempts: ' + (err && err.message ? err.message : 'download failed');
+                                entry.brokenKind = 'transient';
+                                entry.brokenTs = Date.now();
+                            }
                             st3.templates[sp] = entry;
                         }
                         if (!st3.fullSync) st3.fullSync = {};

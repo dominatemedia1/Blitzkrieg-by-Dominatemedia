@@ -1282,6 +1282,10 @@
                             '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>' +
                             ' Generate Missing' +
                         '</button>' +
+                        '<button class="admin-bar-btn admin-bar-btn-secondary" id="admin-generate-previews-btn" title="Render hover-preview frames for templates that have none yet">' +
+                            '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>' +
+                            ' Generate Previews' +
+                        '</button>' +
                         '<button class="admin-bar-btn admin-bar-btn-secondary" id="admin-generate-all-btn" title="Force regenerate ALL templates">' +
                             '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>' +
                             ' Regenerate All' +
@@ -1306,6 +1310,11 @@
                     if (!ensureCepBridgeForAction('Generation')) return;
                     document.getElementById('admin-bar-progress').style.display = 'flex';
                     generateAllMissingThumbnails(false);
+                });
+                document.getElementById('admin-generate-previews-btn').addEventListener('click', function() {
+                    if (!ensureCepBridgeForAction('Generation')) return;
+                    document.getElementById('admin-bar-progress').style.display = 'flex';
+                    generateAllMissingThumbnails(false, true);
                 });
                 document.getElementById('admin-generate-all-btn').addEventListener('click', function() {
                     if (!ensureCepBridgeForAction('Generation')) return;
@@ -2163,6 +2172,7 @@
         // frame fails to load (they share this <img>).
         img.dataset.originalSrc = originalSrc;
         img.dataset.animating = '1';
+        img.dataset.animErrs = ''; // reset per-hover dead-frame counter
 
         // Pre-convert frame paths to proper URLs (handle both file paths and HTTP URLs)
         var frameSrcs = previewFrames.map(function(path) {
@@ -2215,15 +2225,24 @@
             _started = true;
             previewAnimations[uniqueId].rafId = requestAnimationFrame(animate);
         }
-        var _first = new Image();
-        _first.onload = _beginLoop;
-        _first.onerror = _beginLoop; // never stall if frame 0 is missing
-        _first.src = frameSrcs[0];
-        for (var _pf = 1; _pf < frameSrcs.length; _pf++) {
+        // Preload ALL frames and only start the loop once they are decoded (or an
+        // 800ms safety timeout fires) so the FIRST cycle is smooth even for
+        // cloud-signed frames — the old frame-0-only gate let the loop reach a
+        // not-yet-decoded frame and paint blank/stale on pass one. Local file://
+        // frames decode instantly, so the all-frames gate fires immediately.
+        var _loaded = 0;
+        var _need = frameSrcs.length;
+        function _onPreload() {
+            _loaded++;
+            if (_loaded >= _need) _beginLoop();
+        }
+        for (var _pf = 0; _pf < frameSrcs.length; _pf++) {
             var _pim = new Image();
+            _pim.onload = _onPreload;
+            _pim.onerror = _onPreload; // a missing frame must not stall the gate
             _pim.src = frameSrcs[_pf];
         }
-        setTimeout(_beginLoop, 600);
+        setTimeout(_beginLoop, 800);
     }
 
     /**
@@ -2267,6 +2286,21 @@
         var bl = localStorage.getItem('blitzkrieg_thumb_blacklist');
         if (bl) thumbBlacklist = JSON.parse(bl);
     } catch(e) {}
+
+    // Templates the preview-backfill rendered but that produced 0 usable preview
+    // frames (e.g. a still comp). Persisted so a later "Generate Previews" run does
+    // not re-render them forever (they can never satisfy previewFrameCount>0).
+    var _previewZero = {};
+    try {
+        var pz = localStorage.getItem('blitzkrieg_preview_zero');
+        if (pz) _previewZero = JSON.parse(pz);
+    } catch(e) {}
+    function _markPreviewZero(sp) {
+        if (!sp) return;
+        _previewZero[sp] = 1;
+        try { localStorage.setItem('blitzkrieg_preview_zero', JSON.stringify(_previewZero)); } catch(e) {}
+    }
+    function _isPreviewZero(sp) { return !!(sp && _previewZero[sp]); }
 
     // Debounced localStorage write — during a cold load with many missing thumbs,
     // every broken image used to fire a full JSON.stringify+setItem (O(n²) growth
@@ -2700,6 +2734,12 @@
             renderSyncDashboard();
             return;
         }
+        if (activeCategory === '__trash') {
+            if (adminBar) adminBar.style.display = 'none';
+            _setTemplateChromeVisible(false);
+            renderTrashGrid();
+            return;
+        }
         // Template view: restore the grid chrome (search, sort, grid-size) that the
         // virtual views hide, and show the admin bar.
         _setTemplateChromeVisible(true);
@@ -2831,6 +2871,21 @@
         // Restore the original thumbnail and let the animation loop continue.
         if (img.dataset.animating === '1') {
             if (img.dataset.originalSrc) img.src = img.dataset.originalSrc;
+            // A preview frame failed to load (frames absent in storage or the
+            // signed URL expired). Restoring the thumbnail alone lets the rAF loop
+            // keep swapping to the next dead frame every cycle — an endless
+            // flicker between the thumbnail and broken frames. Count the errors;
+            // once a couple of frames have failed, the frame set is bad, so STOP
+            // the animation and leave the static thumbnail painted.
+            var _ae = (parseInt(img.dataset.animErrs || '0', 10) || 0) + 1;
+            img.dataset.animErrs = String(_ae);
+            if (_ae >= 2) {
+                var _tc = (img.closest && img.closest('.thumbnail')) || img.parentElement;
+                if (_tc && currentlyAnimatingId) {
+                    stopPreviewAnimation(_tc, currentlyAnimatingId);
+                }
+                img.dataset.animErrs = '';
+            }
             return;
         }
         // Try alt thumbnail URL before giving up (comp.png vs thumbnail.png)
@@ -3211,6 +3266,10 @@
                 renderSyncDashboard();
                 return;
             }
+            if (activeCategory === '__trash') {
+                renderTrashGrid();
+                return;
+            }
 
             renderUI();
         }
@@ -3232,6 +3291,8 @@
             if (action === 'reject-submission' && subId) { promptRejectSubmission(subId); return; }
             if (action === 'withdraw-submission' && subId) { withdrawSubmission(subId); return; }
             if (action === 'resubmit-submission' && subId) { resubmitSubmission(subId); return; }
+            if (action === 'recover-trash') { recoverTrashItem(actionBtn.dataset.trashPath, actionBtn.dataset.originalPath); return; }
+            if (action === 'purge-trash') { purgeTrashItem(actionBtn); return; }
         }
 
         // Submission card click → open detail modal
@@ -5667,6 +5728,109 @@
      * Load and render submissions grid with visual thumbnails + preview frames
      * @param {string} statusFilter - 'pending', 'approved', 'rejected', or 'pending_review' (admin view)
      */
+    // Admin-only "Recently Deleted" view. Lists soft-deleted templates/categories
+    // (moved to trash/ instead of hard-removed) with Recover + Delete Forever.
+    function renderTrashGrid() {
+        if (!window.blitzkriegAuth || !window.blitzkriegAuth.isAdmin()) {
+            showPlaceholder('Admin access required.');
+            return;
+        }
+        if (!window.cloudLibrary || !window.cloudLibrary.listTrash) {
+            showPlaceholder('Recovery is unavailable in this version.');
+            return;
+        }
+        _setTemplateChromeVisible(false);
+        showSpinner();
+        window.cloudLibrary.listTrash().then(function(items) {
+            hideSpinner();
+            if (!items || items.length === 0) {
+                showPlaceholder('Nothing has been deleted. Deleted templates land here and can be recovered.');
+                return;
+            }
+            var html = '<div class="trash-header"><h2 class="trash-title">Recently Deleted</h2>'
+                + '<p class="trash-subtitle">Deleted templates are kept here. Recover restores a template to its original category. Delete Forever cannot be undone.</p></div>';
+            html += '<div class="trash-list">';
+            items.forEach(function(it) {
+                var when = it.deletedAt ? new Date(it.deletedAt).toLocaleString() : 'unknown date';
+                var cat = it.category || (it.originalPath ? it.originalPath.split('/').slice(0, -1).join('/') : '');
+                var canRecover = !!it.originalPath;
+                html += '<div class="trash-row">';
+                html += '<div class="trash-row-info">';
+                html += '<span class="trash-row-name">' + escapeHTML(it.displayName || it.folderName) + '</span>';
+                html += '<span class="trash-row-meta">' + (cat ? escapeHTML(cat) + ' · ' : '') + 'deleted ' + escapeHTML(when) + '</span>';
+                html += '</div>';
+                html += '<div class="trash-row-actions">';
+                if (canRecover) {
+                    html += '<button class="button-primary trash-recover-btn" data-action="recover-trash" data-trash-path="' + escapeHTML(it.trashPath) + '" data-original-path="' + escapeHTML(it.originalPath) + '">Recover</button>';
+                } else {
+                    html += '<span class="trash-row-note">No original location recorded</span>';
+                }
+                html += '<button class="button-danger trash-purge-btn" data-action="purge-trash" data-trash-path="' + escapeHTML(it.trashPath) + '" data-display-name="' + escapeHTML(it.displayName || it.folderName) + '">Delete Forever</button>';
+                html += '</div>';
+                html += '</div>';
+            });
+            html += '</div>';
+            stashGrid.innerHTML = html;
+        }).catch(function(err) {
+            hideSpinner();
+            showPlaceholder('Failed to load Recently Deleted: ' + (err && err.message || 'Unknown error'));
+            debugLog('renderTrashGrid error: ' + (err && err.message || err), 'error');
+        });
+    }
+
+    function recoverTrashItem(trashPath, originalPath) {
+        if (!window.blitzkriegAuth || !window.blitzkriegAuth.isAdmin()) {
+            showToast('Admin permission required.', true);
+            return;
+        }
+        if (!trashPath) return;
+        showSpinner();
+        window.cloudLibrary.recoverTemplate(trashPath, originalPath).then(function() {
+            hideSpinner();
+            showToast('Recovered to ' + (originalPath || 'the library') + '.');
+            window.cloudLibrary.invalidateCache();
+            renderTrashGrid(); // refresh the trash list
+        }, function(err) {
+            hideSpinner();
+            showToast('Recover failed: ' + (err && err.message || err), true);
+        });
+    }
+
+    function purgeTrashItem(btn) {
+        if (!window.blitzkriegAuth || !window.blitzkriegAuth.isAdmin()) {
+            showToast('Admin permission required.', true);
+            return;
+        }
+        if (!btn) return;
+        var trashPath = btn.dataset.trashPath;
+        if (!trashPath) return;
+        // Two-click confirmation (no native dialog / modal, which is CEP-safe).
+        // First click arms the button; a second click within 4s permanently deletes.
+        if (btn.dataset.armed !== '1') {
+            btn.dataset.armed = '1';
+            var original = btn.textContent;
+            btn.textContent = 'Click again to confirm';
+            btn.classList.add('trash-purge-armed');
+            btn._disarm = setTimeout(function() {
+                btn.dataset.armed = '';
+                btn.textContent = original;
+                btn.classList.remove('trash-purge-armed');
+            }, 4000);
+            return;
+        }
+        if (btn._disarm) { clearTimeout(btn._disarm); btn._disarm = null; }
+        btn.dataset.armed = '';
+        showSpinner();
+        window.cloudLibrary.purgeTrash(trashPath).then(function() {
+            hideSpinner();
+            showToast('Permanently deleted.');
+            renderTrashGrid();
+        }, function(err) {
+            hideSpinner();
+            showToast('Delete failed: ' + (err && err.message || err), true);
+        });
+    }
+
     function renderSubmissionsGrid(statusFilter) {
         var sb = window.blitzkriegSupabase;
         if (!sb) return;
@@ -9497,7 +9661,12 @@
                         try { localStorage.setItem('blitzkrieg_thumb_blacklist', JSON.stringify(thumbBlacklist)); } catch(e) {}
                     }
 
-                    return updateMetadataAfterGeneration(comp.storagePath, actualFramesUploaded).then(function() { return true; }).catch(function() { return true; });
+                    // Return the frame count so the preview-backfill batch can tell a
+                    // template that produced 0 usable frames from one that got real
+                    // previews (used to stop re-rendering the former every run).
+                    return updateMetadataAfterGeneration(comp.storagePath, actualFramesUploaded)
+                        .then(function() { return { previewFrames: actualFramesUploaded }; })
+                        .catch(function() { return { previewFrames: actualFramesUploaded }; });
                 });
             });
         }).then(function(result) {
@@ -9573,8 +9742,13 @@
      * Admin batch: generate thumbnails + preview frames for all templates missing them.
      * Processes sequentially to avoid overwhelming AE.
      * @param {boolean} forceAll - If true, regenerate even for templates that have thumbnails
+     * @param {boolean} previewBackfill - If true, render FULL hover-preview frames for
+     *        every template that has none yet (previewFrameCount === 0). Uses the same
+     *        paced/chunked/heartbeat batch engine as the other modes, but targets ONLY
+     *        the missing-preview set (not the whole library like forceAll) so hover
+     *        previews can be backfilled safely without the freeze-prone full re-render.
      */
-    function generateAllMissingThumbnails(forceAll) {
+    function generateAllMissingThumbnails(forceAll, previewBackfill) {
         if (!window.blitzkriegAuth || !window.blitzkriegAuth.isAdmin()) {
             showToast('Admin access required.', true);
             return;
@@ -9595,7 +9769,19 @@
         // brick the button until panel reload.
         var compsToProcess;
         try {
-            if (forceAll) {
+            if (previewBackfill) {
+                // Backfill hover-preview frames for every template that has none.
+                // Keys on previewFrameCount === 0 (metadata) so a template that
+                // already has frames is never re-rendered, and the run CONVERGES.
+                // Skips known-broken (unrenderable) sources so it doesn't churn on
+                // missing-footage comps every time.
+                compsToProcess = allComps.filter(function(c) {
+                    if (!c.storagePath) return false;
+                    if (_isTemplateBroken(c.storagePath)) return false;
+                    if (_isPreviewZero(c.storagePath)) return false; // already tried, yields no frames
+                    return !(c.previewFrameCount > 0);
+                });
+            } else if (forceAll) {
                 // Force regenerate all cloud templates
                 compsToProcess = allComps.filter(function(c) { return !!c.storagePath; });
             } else {
@@ -9623,8 +9809,8 @@
                 });
             }
             // Default run = thumbnail-only (fast, never freezes). "Force regenerate
-            // ALL" still renders full preview animations for every template.
-            var thumbnailOnlyMode = !forceAll;
+            // ALL" and the preview-backfill both render full preview animations.
+            var thumbnailOnlyMode = !forceAll && !previewBackfill;
         } catch (setupErr) {
             generateAllMissingThumbnails._running = false;
             debugLog('generateAllMissingThumbnails setup failed: ' + (setupErr && setupErr.message || setupErr), 'error');
@@ -9633,7 +9819,7 @@
         }
 
         if (compsToProcess.length === 0) {
-            showToast('All templates already have thumbnails!');
+            showToast(previewBackfill ? 'All templates already have hover previews!' : 'All templates already have thumbnails!');
             var emptyBar = document.getElementById('admin-bar-progress');
             if (emptyBar) emptyBar.style.display = 'none';
             generateAllMissingThumbnails._running = false;
@@ -9775,6 +9961,12 @@
                     skipped++;
                 } else {
                     succeeded++;
+                    // Preview-backfill convergence: a template that rendered but produced
+                    // 0 usable preview frames can never satisfy previewFrameCount>0, so
+                    // record it and stop re-rendering it on the next backfill run.
+                    if (previewBackfill && comp.storagePath && res && res.previewFrames === 0) {
+                        _markPreviewZero(comp.storagePath);
+                    }
                 }
                 _advance(false);
             }, function(err) {

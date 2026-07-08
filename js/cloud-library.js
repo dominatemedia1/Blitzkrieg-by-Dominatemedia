@@ -21,6 +21,16 @@
 
     var sb = window.blitzkriegSupabase;
     var BUCKET = 'blitzkrieg';
+    // Soft-delete lives here. Deleted templates are MOVED under trash/ (never
+    // hard-removed) so an admin can recover them. Excluded from library listing.
+    var TRASH_PREFIX = 'trash';
+    // Monotonic per-session token appended to every trash folder name. Date.now()
+    // alone collides when a bulk delete (CONCURRENCY 10) trashes two templates that
+    // share a leaf folder name (e.g. Backgrounds/Intro + Titles/Intro) in the same
+    // millisecond: both would land in trash/<ms>_Intro, commingling files and losing
+    // one on recover. Incrementing this synchronously (no await between read+bump)
+    // guarantees a unique destination per delete.
+    var _trashSeq = 0;
 
     // Signed URL expiry: 4 hours (long enough for a workday session)
     var SIGNED_URL_EXPIRY = 14400;
@@ -1098,7 +1108,7 @@
         };
         var categories = allRootItems.filter(function (item) {
             if (item.id !== null) return false;
-            if (item.name === 'pending' || item.name === '.emptyFolderPlaceholder' || item.name === MANIFEST_KEY) return false;
+            if (item.name === 'pending' || item.name === TRASH_PREFIX || item.name === '.emptyFolderPlaceholder' || item.name === MANIFEST_KEY) return false;
             if (HIDDEN_CATEGORIES[item.name.toLowerCase()]) return false;
             return true;
         });
@@ -1680,6 +1690,40 @@
         return 'application/octet-stream';
     }
 
+    // A per-file download MUST be time-bounded. Supabase .download() runs fetch()
+    // with NO timeout; a stalled TCP stream (ITP / proxy / half-open socket) makes
+    // the await hang FOREVER, which wedges the entire full-sync idle loop: the
+    // in-flight byte budget the stuck template holds is never released, so every
+    // sync worker parks in the admission-wait loop and the queue deadlocks (the
+    // "sync stuck" symptom). Race the download against a timeout that REJECTS so
+    // the sync worker's existing fail-and-continue path (classify as retryable,
+    // advance the queue) actually fires — a stalled fetch never rejects on its
+    // own. Abort the underlying request when possible so the dead socket is
+    // released rather than left dangling. 3 min is generous for large footage yet
+    // still bounds a true hang; a genuinely slow-but-progressing file that trips
+    // it is classified 'failed' (retryable), not 'broken', so it retries next run.
+    var DOWNLOAD_TIMEOUT_MS = 180000;
+    function _downloadWithTimeout(path) {
+        var controller = null;
+        try { if (typeof AbortController === 'function') controller = new AbortController(); } catch (e) { controller = null; }
+        var opts = controller ? { signal: controller.signal } : undefined;
+        var timer = null;
+        var timeoutPromise = new Promise(function (_, reject) {
+            timer = setTimeout(function () {
+                if (controller) { try { controller.abort(); } catch (e) {} }
+                reject(new Error('Download timed out after ' + DOWNLOAD_TIMEOUT_MS + 'ms: ' + path));
+            }, DOWNLOAD_TIMEOUT_MS);
+        });
+        var dlPromise = sb.storage.from(BUCKET).download(path, opts).then(function (res) {
+            if (timer) { clearTimeout(timer); timer = null; }
+            return res;
+        }, function (err) {
+            if (timer) { clearTimeout(timer); timer = null; }
+            throw err;
+        });
+        return Promise.race([dlPromise, timeoutPromise]);
+    }
+
     async function downloadStorageFiles(paths, basePath, concurrency, onFileDone) {
         var results = new Array(paths.length);
         var next = 0;
@@ -1688,7 +1732,7 @@
             while (next < paths.length) {
                 var idx = next++;
                 var path = paths[idx];
-                var res = await sb.storage.from(BUCKET).download(path);
+                var res = await _downloadWithTimeout(path);
                 if (res.error || !res.data) {
                     throw new Error('Failed to download bundle file ' + path + ': ' + (res.error && res.error.message || 'unknown'));
                 }
@@ -2139,22 +2183,158 @@
         return filePaths;
     }
 
-    // Delete a template from the bucket (admin-only, RLS enforced)
-    // Now recursively deletes all files including nested preview/ subfolders
-    async function deleteTemplate(storagePath) {
-        var filePaths = await collectAllFiles(storagePath);
-
-        if (filePaths.length > 0) {
-            // Batch delete in chunks of 100
-            for (var b = 0; b < filePaths.length; b += 100) {
-                var batch = filePaths.slice(b, b + 100);
-                var removeResult = await sb.storage.from(BUCKET).remove(batch);
-                if (removeResult.error) {
-                    throw new Error('Failed to delete template: ' + removeResult.error.message);
-                }
+    // Sum a template's total byte size from the storage LISTING (item.metadata.size)
+    // WITHOUT downloading anything. Recurses subfolders like collectAllFiles. Used by
+    // the full-sync byte-budget so it can pack small templates concurrently on the
+    // first sync (where per-template sizes aren't yet persisted) instead of running
+    // strictly serial. Cheap: same LIST calls, zero downloads.
+    //
+    // Returns { total, trustworthy }. MEMORY-SAFETY CRITICAL: if ANY file lacks a
+    // positive numeric metadata.size, `trustworthy` is false and the caller MUST
+    // fall back to "run alone" — never pack a template whose size we cannot fully
+    // account for, or a large .aep with absent size metadata could be mis-sized as
+    // tiny, packed with others, and OOM the CEP heap. We only relax serialization
+    // when the whole template's byte count is known.
+    async function getTemplateSize(storagePath) {
+        var items = await listAllPaginated(storagePath, { sortBy: { column: 'name', order: 'asc' } });
+        var total = 0;
+        var trustworthy = true;
+        var subPromises = [];
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].id === null) {
+                subPromises.push(getTemplateSize(storagePath + '/' + items[i].name));
+            } else if (items[i].metadata && typeof items[i].metadata.size === 'number' && items[i].metadata.size > 0) {
+                total += items[i].metadata.size;
+            } else {
+                trustworthy = false; // a file with no known size -> cannot trust the sum
             }
         }
+        if (subPromises.length > 0) {
+            var nested = await Promise.all(subPromises);
+            for (var n = 0; n < nested.length; n++) {
+                total += nested[n].total;
+                if (!nested[n].trustworthy) trustworthy = false;
+            }
+        }
+        return { total: total, trustworthy: trustworthy };
+    }
+
+    // SOFT-delete a template (admin-only, RLS enforced). Instead of a permanent
+    // storage.remove() (which destroyed the .aep + assets with no recovery — a
+    // violation of the never-destroy-data rule), MOVE the whole folder into a
+    // 'trash/<timestamp>_<folder>/' prefix and drop a _trashmeta.json recording
+    // its original path. The library listing excludes 'trash/', so it disappears
+    // from the grid, but an admin can recover it via recoverTemplate(). Reuses the
+    // same storage.move() primitive as moveTemplate/renameCategory.
+    async function deleteTemplate(storagePath) {
+        var allFiles = await collectAllFiles(storagePath);
+        if (allFiles.length === 0) { invalidateCacheForPath(storagePath); return; }
+
+        var folderName = storagePath.split('/').pop();
+        var stamp = Date.now();
+        var trashBase = TRASH_PREFIX + '/' + stamp + '_' + (_trashSeq++) + '_' + folderName;
+
+        // Move every file, preserving the folder's internal structure.
+        for (var i = 0; i < allFiles.length; i++) {
+            var oldPath = allFiles[i];
+            var newPath = trashBase + oldPath.substring(storagePath.length);
+            var mv = await sb.storage.from(BUCKET).move(oldPath, newPath);
+            if (mv.error) {
+                throw new Error('Failed to move template to trash: ' + mv.error.message);
+            }
+        }
+
+        // Recovery manifest so an admin can restore it to its original category.
+        try {
+            var trashMeta = { originalPath: storagePath, deletedAt: stamp, kind: 'template' };
+            var mb = new Blob([JSON.stringify(trashMeta)], { type: 'application/json' });
+            await sb.storage.from(BUCKET).upload(trashBase + '/_trashmeta.json', mb, {
+                contentType: 'application/json', upsert: true
+            });
+        } catch (metaErr) {
+            // Best-effort: the folder name still carries enough to recover manually.
+            _log('deleteTemplate: trashmeta write failed (recoverable via folder name): ' + (metaErr && metaErr.message || metaErr), 'warn');
+        }
         invalidateCacheForPath(storagePath);
+    }
+
+    // List everything currently in the trash. Reads each folder's _trashmeta.json
+    // for its original path + deletion time. Admin-only surface (Recently Deleted).
+    async function listTrash() {
+        var items;
+        try {
+            items = await listAllPaginated(TRASH_PREFIX, { sortBy: { column: 'name', order: 'desc' } });
+        } catch (e) {
+            return []; // no trash/ folder yet
+        }
+        var out = [];
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].id !== null) continue; // only subfolders are trashed items
+            var trashPath = TRASH_PREFIX + '/' + items[i].name;
+            var meta = null;
+            try {
+                var d = await sb.storage.from(BUCKET).download(trashPath + '/_trashmeta.json');
+                if (!d.error && d.data) meta = JSON.parse(await d.data.text());
+            } catch (metaErr) { /* fall back to folder name */ }
+            var origPath = (meta && meta.originalPath) ? meta.originalPath : '';
+            var nm = items[i].name;
+            // Prefer the recorded original name. Fallback: trash folder is
+            // "<stamp>_<seq>_<origFolder>"; drop the two numeric prefixes and keep
+            // the rest (the original folder name may itself contain underscores).
+            var derivedFolder = nm;
+            var parts = nm.split('_');
+            if (parts.length > 2 && /^[0-9]+$/.test(parts[0]) && /^[0-9]+$/.test(parts[1])) {
+                derivedFolder = parts.slice(2).join('_');
+            }
+            var displayName = origPath ? origPath.split('/').pop() : derivedFolder;
+            out.push({
+                trashPath: trashPath,
+                folderName: nm,
+                originalPath: origPath,
+                displayName: displayName,
+                category: origPath ? origPath.split('/').slice(0, -1).join('/') : '',
+                deletedAt: (meta && meta.deletedAt) ? meta.deletedAt : 0
+            });
+        }
+        return out;
+    }
+
+    // Restore a trashed template back to a real category (admin-only). targetPath
+    // defaults to the recorded originalPath. Moves every file back and drops the
+    // leftover _trashmeta.json marker.
+    async function recoverTemplate(trashPath, targetPath) {
+        if (!trashPath) throw new Error('trashPath required');
+        if (!targetPath) throw new Error('No original path recorded for this item; pick a category to recover into.');
+        var allFiles = await collectAllFiles(trashPath);
+        for (var i = 0; i < allFiles.length; i++) {
+            var oldPath = allFiles[i];
+            var rel = oldPath.substring(trashPath.length); // leading '/...'
+            if (rel === '/_trashmeta.json') continue;      // don't restore the marker
+            var newPath = targetPath + rel;
+            var mv = await sb.storage.from(BUCKET).move(oldPath, newPath);
+            if (mv.error) {
+                throw new Error('Failed to recover template: ' + mv.error.message);
+            }
+        }
+        try { await sb.storage.from(BUCKET).remove([trashPath + '/_trashmeta.json']); } catch (e) { /* marker cleanup best-effort */ }
+        invalidateCacheForPath(targetPath);
+        invalidateCache();
+    }
+
+    // Permanently purge one trashed item (admin-only, explicit "Delete forever").
+    // This is the ONLY hard remove() left on templates and is gated behind an
+    // explicit admin confirm in the Recently Deleted view.
+    async function purgeTrash(trashPath) {
+        if (!trashPath || trashPath.indexOf(TRASH_PREFIX + '/') !== 0) {
+            throw new Error('purgeTrash refused: path is not under trash/');
+        }
+        var allFiles = await collectAllFiles(trashPath);
+        for (var b = 0; b < allFiles.length; b += 100) {
+            var batch = allFiles.slice(b, b + 100);
+            var rm = await sb.storage.from(BUCKET).remove(batch);
+            if (rm.error) throw new Error('Failed to purge: ' + rm.error.message);
+        }
+        invalidateCache();
     }
 
     async function removePreviewFrames(storagePath) {
@@ -2240,19 +2420,32 @@
         invalidateCache();
     }
 
-    // Delete an entire category (now recursively handles nested subfolders)
+    // SOFT-delete an entire category (admin-only). Like deleteTemplate, moves the
+    // whole category subtree into trash/ instead of a permanent remove(), so a
+    // mis-click on "delete category + all templates" is recoverable. Each template
+    // keeps its internal structure under trash/<stamp>_<category>/.
     async function deleteCategory(categoryName) {
         var allFiles = await collectAllFiles(categoryName);
+        if (allFiles.length === 0) { invalidateCache(); return; }
 
-        if (allFiles.length > 0) {
-            // Batch delete in chunks of 100
-            for (var b = 0; b < allFiles.length; b += 100) {
-                var batch = allFiles.slice(b, b + 100);
-                var removeResult = await sb.storage.from(BUCKET).remove(batch);
-                if (removeResult.error) {
-                    throw new Error('Failed to delete files: ' + removeResult.error.message);
-                }
+        var stamp = Date.now();
+        var trashBase = TRASH_PREFIX + '/' + stamp + '_' + (_trashSeq++) + '_' + categoryName;
+        for (var i = 0; i < allFiles.length; i++) {
+            var oldPath = allFiles[i];
+            var newPath = trashBase + oldPath.substring(categoryName.length);
+            var mv = await sb.storage.from(BUCKET).move(oldPath, newPath);
+            if (mv.error) {
+                throw new Error('Failed to move category to trash: ' + mv.error.message);
             }
+        }
+        try {
+            var trashMeta = { originalPath: categoryName, deletedAt: stamp, kind: 'category' };
+            var mb = new Blob([JSON.stringify(trashMeta)], { type: 'application/json' });
+            await sb.storage.from(BUCKET).upload(trashBase + '/_trashmeta.json', mb, {
+                contentType: 'application/json', upsert: true
+            });
+        } catch (metaErr) {
+            _log('deleteCategory: trashmeta write failed: ' + (metaErr && metaErr.message || metaErr), 'warn');
         }
         invalidateCache();
     }
@@ -2502,6 +2695,10 @@
         uploadTemplate: uploadTemplate,
         deleteTemplate: deleteTemplate,
         deleteTemplates: deleteTemplates,
+        getTemplateSize: getTemplateSize,
+        listTrash: listTrash,
+        recoverTemplate: recoverTemplate,
+        purgeTrash: purgeTrash,
         renameTemplate: renameTemplate,
         renameCategory: renameCategory,
         deleteCategory: deleteCategory,
