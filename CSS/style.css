@@ -1726,13 +1726,23 @@ header { display: contents; }
 .nav-item-actions {
     display: flex;
     gap: 2px;
-    margin-left: auto;
+    /* Overlay on hover (absolute) rather than displacing the label, so long
+       category names are not clipped further exactly when the user reads them.
+       A matching background chip keeps the buttons legible over the label. */
+    position: absolute;
+    right: var(--sp-2);
+    top: 50%;
+    transform: translateY(-50%);
+    padding-left: var(--sp-3);
+    background: linear-gradient(90deg, rgba(0,0,0,0), var(--bg-card-hover) 30%);
     opacity: 0;
+    pointer-events: none;
     transition: opacity var(--transition-fast);
 }
 
 .nav-item:hover .nav-item-actions {
     opacity: 1;
+    pointer-events: auto;
 }
 
 .nav-action-btn {
@@ -3077,11 +3087,11 @@ body.debug-panel-open #app {
 
 /* Admin Generate Toolbar */
 .admin-generate-bar {
-    background: linear-gradient(135deg, rgba(34, 197, 94, 0.08), rgba(59, 130, 246, 0.06));
-    border: 1px solid rgba(34, 197, 94, 0.2);
+    background: var(--accent-green-subtle);
+    border: 1px solid rgba(34, 197, 94, 0.18);
     border-radius: var(--radius-lg);
-    padding: 10px 14px;
-    margin: 0 var(--sp-4) var(--sp-3);
+    padding: 8px 12px;
+    margin: 0 var(--sp-4) var(--sp-2);
 }
 .admin-bar-content {
     display: flex;
@@ -3091,7 +3101,7 @@ body.debug-panel-open #app {
 }
 .admin-bar-label {
     font-size: 11px;
-    color: var(--text-muted);
+    color: var(--text-tertiary);
     flex: 1;
     min-width: 120px;
 }
@@ -4219,6 +4229,40 @@ body.debug-panel-open #app {
     color: var(--text-faint);
 }
 
+/* Full resolved library path (untruncated) + drive capacity + inline status.
+   Answers "where do files go / is there room / did it save" without a toast. */
+.sync-path-resolved {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    background: var(--bg-input);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: var(--sp-2) var(--sp-3);
+    margin-bottom: var(--sp-2);
+    word-break: break-all;
+    line-height: 1.4;
+}
+
+.sync-path-capacity {
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-bottom: var(--sp-2);
+}
+
+.sync-path-capacity-low {
+    color: var(--warning);
+}
+
+.sync-path-status {
+    font-size: 11px;
+    margin-top: var(--sp-2);
+    line-height: 1.4;
+}
+
+.sync-path-status-info { color: var(--text-tertiary); }
+.sync-path-status-warn { color: var(--warning); }
+.sync-path-status-error { color: var(--error); }
+
 .sync-path-btn {
     flex-shrink: 0;
     font-size: 11px;
@@ -4253,3 +4297,85 @@ body.debug-panel-open #app {
 @keyframes blitz-spin {
     to { transform: rotate(360deg); }
 }
+
+/* ─────────────── Sync & Analytics dashboard ─────────────── */
+.sync-dashboard { padding: var(--sp-4); max-width: 860px; margin: 0 auto; }
+.sync-dash-title-row { display: flex; align-items: center; justify-content: space-between; }
+.sync-dash-title { font-size: 18px; font-weight: 600; color: var(--text-primary); margin: 0 0 var(--sp-3); }
+.sync-dash-nopath {
+    background: var(--accent-green-subtle); border: 1px solid var(--border-default);
+    color: var(--text-secondary); border-radius: var(--radius-md);
+    padding: var(--sp-3); margin-bottom: var(--sp-3); font-size: 13px; line-height: 1.5;
+}
+.sync-dash-stats { display: flex; gap: var(--sp-4); flex-wrap: wrap; margin-bottom: var(--sp-3); }
+.sd-stat { font-size: 13px; color: var(--text-tertiary); }
+.sd-stat strong { color: var(--text-primary); font-weight: 600; }
+.sd-stat-pending strong { color: var(--warning); }
+.sd-stat-broken strong { color: var(--error); }
+.sync-dash-progress {
+    height: 8px; background: var(--bg-elevated); border-radius: 999px;
+    overflow: hidden; margin-bottom: var(--sp-2);
+}
+.sync-dash-bar {
+    height: 100%; width: 0%; background: var(--accent-green);
+    border-radius: 999px; transition: width 0.4s ease;
+}
+.sync-dash-eta { font-size: 12px; color: var(--text-tertiary); margin-bottom: var(--sp-3); min-height: 16px; }
+.sync-dash-actions { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-bottom: var(--sp-4); }
+.sync-dash-actions button { font-size: 13px; padding: 6px 14px; }
+.sync-dash-filters { display: flex; gap: var(--sp-1); flex-wrap: wrap; margin-bottom: var(--sp-3); border-bottom: 1px solid var(--border-subtle); padding-bottom: var(--sp-2); }
+.sd-filter {
+    background: transparent; border: 1px solid var(--border-default);
+    color: var(--text-tertiary); border-radius: var(--radius-md);
+    padding: 4px 12px; font-size: 12px; cursor: pointer; transition: all var(--transition-fast);
+}
+.sd-filter:hover { color: var(--text-secondary); border-color: var(--border-strong); }
+.sd-filter.active { background: var(--accent-green-subtle); border-color: var(--accent-green); color: var(--accent-green-text); }
+/* One bordered container with divider rows, not N individually-bordered cards -
+   scans as a clean table even at 250 templates. */
+.sync-dash-list {
+    display: flex; flex-direction: column;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+}
+.sd-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 7px var(--sp-3);
+    background: transparent;
+    border-bottom: 1px solid var(--border-subtle);
+}
+.sd-row:last-child { border-bottom: none; }
+.sd-row:hover { background: var(--bg-card-hover); }
+/* Keep the "needs re-stash" rows legible via a left accent, not a full border. */
+.sd-row-broken { box-shadow: inset 3px 0 0 rgba(248,113,113,0.55); }
+.sd-row-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sd-row-name { font-size: 13px; color: var(--text-primary); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 480px; }
+.sd-row-cat { font-size: 11px; color: var(--text-muted); }
+.sd-row-meta { display: flex; align-items: center; gap: var(--sp-2); flex-shrink: 0; }
+.sd-row-size { font-size: 11px; color: var(--text-muted); }
+.sd-row-reason { font-size: 11px; color: var(--error); }
+.sd-chip { font-size: 11px; font-weight: 600; padding: 2px 10px; border-radius: 999px; white-space: nowrap; }
+.sd-chip-complete { background: rgba(74,222,128,0.12); color: var(--accent-green-text); }
+.sd-chip-syncing  { background: rgba(250,204,21,0.14); color: var(--warning); }
+.sd-chip-pending  { background: var(--bg-elevated); color: var(--text-tertiary); }
+.sd-chip-broken   { background: rgba(248,113,113,0.14); color: var(--error); }
+.sd-chip-failed   { background: rgba(250,204,21,0.14); color: var(--warning); }
+.sd-empty { color: var(--text-muted); font-size: 13px; padding: var(--sp-4); text-align: center; }
+
+/* ─────────────── Grid filter bar (favorites-by-editor + submitted-by) ─────────────── */
+.grid-filter-bar {
+    display: flex; flex-wrap: wrap; gap: var(--sp-4);
+    padding: var(--sp-1) var(--sp-4) var(--sp-2);
+    margin-bottom: 0;
+    background: transparent; border: none;
+}
+.gfb-group { display: flex; align-items: center; gap: var(--sp-1); flex-wrap: wrap; }
+.gfb-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-right: 4px; }
+.gfb-chip {
+    background: transparent; border: 1px solid var(--border-default);
+    color: var(--text-tertiary); border-radius: 999px;
+    padding: 3px 12px; font-size: 12px; cursor: pointer; transition: all var(--transition-fast);
+}
+.gfb-chip:hover { color: var(--text-secondary); border-color: var(--border-strong); }
+.gfb-chip.active { background: var(--accent-green-subtle); border-color: var(--accent-green); color: var(--accent-green-text); }

@@ -412,41 +412,114 @@ function buildPath(parent, child) {
 }
 
 /**
- * Returns a safe temp Folder for writing files.
- * On macOS, Folder.temp resolves to /var/folders/.../T/TemporaryItems/ which
- * has OS-managed cleanup and permission restrictions that prevent After Effects'
- * rendering engine (saveFrameToPng) from writing files reliably.
- * Tries multiple fallbacks: /tmp, ~/Library/Caches, desktop, then Folder.temp.
- * Validates writability with a test file before returning.
+ * Returns true only if BOTH a file AND a SUBFOLDER can be created inside `f` using the
+ * SAME raw-concatenation the panel uses downstream (new Folder(f.fsName + "/child")).
+ *
+ * The old probe tested a FILE only. On AE 2026 (hardened runtime on newer macOS),
+ * ExtendScript can create a file in /tmp but Folder.create() there FAILS — /tmp is a
+ * symlink to /private/tmp and folder creation through it is rejected. The file-only
+ * probe therefore green-lit /tmp, and every import ("Could not create /tmp/blitzkrieg_import_*")
+ * and generation ("Failed to create temp dirs: fail") died at the subfolder create.
+ *
+ * Probing with RAW concat (f.fsName, not buildPath) is deliberate: it mirrors exactly
+ * what main.js does, so a base whose spaces would break the raw downstream create is
+ * rejected HERE rather than chosen and failing later.
+ */
+function _tempCandidateUsable(f) {
+    var stamp = String((new Date()).getTime()) + '_' + Math.floor(Math.random() * 1000000);
+    var base = f.fsName; // RAW path — exactly what main.js concatenates a child onto
+    // File probe
+    var fileOk = false;
+    try {
+        var tf = new File(base + '/_blitz_wtest_' + stamp + '.tmp');
+        tf.open('w'); tf.write('ok'); tf.close();
+        if (tf.exists) { fileOk = true; try { tf.remove(); } catch (rf) {} }
+    } catch (eF) {}
+    if (!fileOk) return false;
+    // Folder probe — the operation that actually fails on AE 2026 /tmp
+    var dirOk = false;
+    try {
+        var td = new Folder(base + '/_blitz_dtest_' + stamp);
+        if (td.create() && td.exists) { dirOk = true; try { td.remove(); } catch (rd) {} }
+    } catch (eD) {}
+    return dirOk;
+}
+
+/**
+ * Returns a safe temp Folder where BOTH files and subfolders can actually be created.
+ * Candidates are tried in order and each is validated with _tempCandidateUsable (which
+ * probes real subfolder creation), so the choice is empirical, not assumed — whatever
+ * a given AE version / macOS sandbox actually permits wins.
+ *
+ * macOS order: /tmp (fast, works AE 2018-2025) -> ~/Library/Caches/Blitzkrieg (normal
+ * user-writable dir, NOT the restrictive OS TemporaryItems folder, the AE 2026 winner)
+ * -> ~/Library/Application Support/Blitzkrieg/tmp (the app's proven data dir) ->
+ * Folder.temp. Windows: Folder.temp (%TEMP%).
  */
 function getSafeTempFolder() {
-    var candidates = [];
-    // macOS: prefer /tmp (always writable, no TemporaryItems restrictions)
-    if ($.os.indexOf('Mac') !== -1 || $.os.indexOf('Macintosh') !== -1) {
-        candidates.push(new Folder('/tmp'));
-        // Fallback: user Library/Caches
-        try { candidates.push(new Folder(Folder.userData.fsName + '/Caches')); } catch(e) {}
-    }
-    // Cross-platform fallbacks (never use Desktop — leftover temp files confuse users)
-    // Windows: Folder.temp resolves to %TEMP%; macOS: to /var/folders/.../TemporaryItems
-    candidates.push(Folder.temp);
+    var isMac = ($.os.indexOf('Mac') !== -1 || $.os.indexOf('Macintosh') !== -1);
 
-    for (var ci = 0; ci < candidates.length; ci++) {
-        var f = candidates[ci];
-        if (!f || !f.exists) continue;
-        // Write test: verify AE can actually create files here
-        try {
-            var testFile = new File(f.fsName + '/_blitz_write_test_' + Date.now() + '.tmp');
-            testFile.open('w');
-            testFile.write('ok');
-            testFile.close();
-            if (testFile.exists) {
-                testFile.remove();
-                return f;
-            }
-        } catch (wErr) { /* try next candidate */ }
+    // Each builder returns a candidate Folder (creating it on demand) or null.
+    // They run in order and the FIRST whose real subfolder-create probe passes
+    // wins, so the ~/Library fallback dirs are created ONLY on a machine that
+    // actually needs them (e.g. AE 2026) — never as a side effect on AE
+    // 2018-2025 where /tmp wins the probe first.
+    var builders = [];
+    if (isMac) {
+        // 0) $TMPDIR - the app's OWN per-user sandbox temp dir (typically
+        //    /var/folders/.../T/). CRITICAL for AE 2026: the RENDER engine
+        //    (saveFrameToPng) has GUARANTEED write access here, whereas it can be
+        //    TCC/sandbox-blocked from ~/Library/Caches even though ExtendScript
+        //    File/Folder can create there (the folder-create probe passing does NOT
+        //    prove the render engine can open a file for writing). Unlike Folder.temp
+        //    (which resolves to this dir's restrictive TemporaryItems child), $TMPDIR
+        //    itself is fully writable, so it is tried FIRST on macOS.
+        builders.push(function () {
+            var td = $.getenv('TMPDIR');
+            if (!td) return null;
+            var tdRoot = new Folder(td);
+            if (!tdRoot.exists) return null;
+            var bkTmp = new Folder(buildPath(tdRoot, "Blitzkrieg"));
+            if (!bkTmp.exists) bkTmp.create();
+            return bkTmp.exists ? bkTmp : null;
+        });
+        // 1) /tmp — fast, world-writable on AE 2018-2025. AE 2026 creates FILES here
+        //    but rejects Folder.create() (symlink to /private/tmp), so the probe drops
+        //    it on AE 2026 and we fall through.
+        builders.push(function () { return new Folder('/tmp'); });
+        // 2) ~/Library/Caches/Blitzkrieg — a normal user-writable directory (NOT the OS
+        //    TemporaryItems folder that saveFrameToPng chokes on) and not a symlink, so
+        //    ExtendScript Folder.create() works under the AE 2026 sandbox. Folder.userData
+        //    is ~/Library/Application Support, so .parent is ~/Library.
+        builders.push(function () {
+            var cachesRoot = new Folder(buildPath(Folder.userData.parent, "Caches"));
+            if (!cachesRoot.exists) return null;
+            var bkCache = new Folder(buildPath(cachesRoot, "Blitzkrieg"));
+            if (!bkCache.exists) bkCache.create();
+            return bkCache.exists ? bkCache : null;
+        });
+        // 3) ~/Library/Application Support/Blitzkrieg/tmp — the app's own proven-writable
+        //    data dir (settings persist here). "Application Support" contains a space; if
+        //    that space breaks the raw downstream create, the probe rejects this candidate.
+        builders.push(function () {
+            var bkRoot = new Folder(buildPath(Folder.userData, "Blitzkrieg"));
+            if (!bkRoot.exists) bkRoot.create();
+            var bkTmp = new Folder(buildPath(bkRoot, "tmp"));
+            if (!bkTmp.exists) bkTmp.create();
+            return bkTmp.exists ? bkTmp : null;
+        });
     }
-    // Absolute last resort
+    // 4) Cross-platform last resort. Windows: %TEMP% (fully writable). macOS: may be the
+    //    restrictive TemporaryItems folder, hence lowest priority.
+    builders.push(function () { return Folder.temp; });
+
+    for (var bi = 0; bi < builders.length; bi++) {
+        var f = null;
+        try { f = builders[bi](); } catch (eb) { f = null; }
+        if (!f || !f.exists) continue;
+        if (_tempCandidateUsable(f)) return f;
+    }
+    // Absolute last resort — hand back some folder rather than null.
     return Folder.temp;
 }
 
@@ -1034,6 +1107,14 @@ function stashSelectedComp(libraryPath, categoryName) {
         var stashMemoryErrorHit = false; // surfaced in the return value so the
                                          // editor gets a specific Motion Tile hint
 
+        // Suppress render-phase dialogs. saveFrameToPng below can raise modal AE
+        // warnings (e.g. "Object Matte will not render correctly because the source
+        // frame rate changed", or "Could not create file" on Windows) that block the
+        // stash on the UI thread. generatePreviewsToDisk already wraps its render in
+        // suppression; the stash render must match or it stalls waiting for a click.
+        var _stashRenderSuppressed = false;
+        try { app.beginSuppressDialogs(); _stashRenderSuppressed = true; } catch (sdRErr) {}
+
         try {
             // Save main thumbnail (middle frame)
             var frameTime = compToSave.workAreaStart + (compToSave.workAreaDuration / 2);
@@ -1086,6 +1167,11 @@ function stashSelectedComp(libraryPath, categoryName) {
             } else {
                 $.writeln("Blitzkrieg: Warning - Could not generate thumbnail: " + e.toString());
             }
+        }
+
+        if (_stashRenderSuppressed) {
+            try { app.endSuppressDialogs(false); } catch (edRErr) {}
+            _stashRenderSuppressed = false;
         }
 
         // --- Save Metadata ---
@@ -1689,6 +1775,15 @@ function importComp(aepPath, displayName) {
             return "Error: Import returned no items.";
         }
 
+        // Re-arm dialog suppression for the relink + cleanup + open phase. The
+        // AE-native import warnings that block a batch (e.g. "Object Matte will not
+        // render correctly because the source frame rate changed from 24 to 30 fps",
+        // plus file-not-found / could-not-open alerts) fire during footage replace()
+        // and openInViewer() below, NOT during importFile - so the suppression that
+        // ended right after importFile lets them leak. Re-arming here covers both the
+        // first-attempt-success and the unsuppressed-retry paths uniformly.
+        try { app.beginSuppressDialogs(); _importDialogsSuppressed = true; } catch (sdErr2) {}
+
         // Recursive comp discovery — imported AEPs can have nested folders.
         // Strategy: collect ALL comps, then pick the best one.
         //  1. Exact name match → use it
@@ -1989,7 +2084,7 @@ function importComp(aepPath, displayName) {
             var _openScript =
                 '(function(){' +
                 '  if(_blitzImportGeneration!==' + _thisGen + ')return;' +
-                '  function open(c){c.selected=true;var v=c.openInViewer();if(v)try{v.setActive();}catch(e){}}' +
+                '  function open(c){var s=false;try{app.beginSuppressDialogs();s=true;}catch(e){}try{c.selected=true;var v=c.openInViewer();if(v){try{v.setActive();}catch(e){}}}catch(e){}if(s){try{app.endSuppressDialogs(false);}catch(e){}}}' +
                 '  function findById(p){' +
                 '    for(var i=1;i<=p.numItems;i++){' +
                 '      try{' +
@@ -2018,6 +2113,13 @@ function importComp(aepPath, displayName) {
             try { app.scheduleTask(_openScript, 500, false); } catch(e) {}
         }
 
+        // End the relink/open-phase suppression re-armed after import. The scheduled
+        // openInViewer task registered above re-arms its own suppression because it
+        // runs ~500ms later, outside this synchronous scope.
+        if (_importDialogsSuppressed) {
+            try { app.endSuppressDialogs(false); } catch (edPhaseErr) {}
+            _importDialogsSuppressed = false;
+        }
         app.endUndoGroup();
         var _resultMsg = mainComp ? "Success: '" + compName + "' imported." : "Success: Project imported.";
         // Append a clear, parseable warning ONLY for footage that survived cleanup
@@ -3029,6 +3131,52 @@ function decodeBase64FileToBinary(base64FilePath, outputPath) {
  * A forged `tempPath` (e.g. '/Users/victim/Documents') would otherwise wipe the
  * user's home directory. We compare against getSafeTempFolder() as the allow-list.
  */
+// Sweep stale Blitzkrieg temp bundles left by prior imports/generations. Cloud
+// import bundles are intentionally NOT deleted on success (the imported project
+// references their footage by disk path, so deleting them pops AE's native
+// "missing files" modal). This reaper — called once on panel load — reclaims those
+// bundles after they are old enough that nothing references them. It only removes
+// dirs whose embedded timestamp is older than maxAgeMs, so a bundle from the import
+// the user just did is never touched. Returns "OK: <count removed>".
+function blitzReapStaleTempDirs(maxAgeMs) {
+    try {
+        var maxAge = maxAgeMs;
+        if (!maxAge || maxAge < 0) maxAge = 21600000; // 6h default
+        // Scan BOTH the Blitzkrieg temp folder (import/gen bundles) AND its parent
+        // ($TMPDIR root), because render-relocation dirs (blitzkrieg_relo_*) are created
+        // directly under $TMPDIR, a sibling of the Blitzkrieg folder, not inside it.
+        var bases = [];
+        try { var b0 = getSafeTempFolder(); if (b0 && b0.exists) bases.push(b0); } catch (stErr) {}
+        try { if (bases.length && bases[0].parent && bases[0].parent.exists) bases.push(bases[0].parent); } catch (pErr) {}
+        if (bases.length === 0) return 'OK: 0';
+        var now = (new Date()).getTime();
+        var removed = 0;
+        var seen = {};
+        var re = /^blitzkrieg_(import|gen|relo)_(\d+)/;
+        for (var bi = 0; bi < bases.length; bi++) {
+            var entries;
+            try { entries = bases[bi].getFiles(); } catch (glErr) { continue; }
+            if (!entries) continue;
+            for (var i = 0; i < entries.length; i++) {
+                var f = entries[i];
+                if (!(f instanceof Folder)) continue;
+                var m = re.exec(f.name);
+                if (!m) continue;
+                var key;
+                try { key = f.fsName; } catch (fnErr) { key = f.name; }
+                if (seen[key]) continue;   // the Blitzkrieg folder itself is under $TMPDIR; avoid double-processing
+                seen[key] = true;
+                var ts = parseInt(m[2], 10);
+                if (!ts || (now - ts) < maxAge) continue; // too new / unparseable — keep
+                try { removeFolderRecursive(f); removed++; } catch (rmErr) {}
+            }
+        }
+        return 'OK: ' + removed;
+    } catch (e) {
+        return 'ERROR: ' + e.toString();
+    }
+}
+
 function cleanupTempStash(tempPath) {
     try {
         if (!isValidPath(tempPath)) {
@@ -3081,7 +3229,7 @@ function cleanupTempStash(tempPath) {
  * @param {string} outputDir - Directory to write comp.png and preview/ frames into
  * @returns {string} JSON: {frameCount: N} or {error: "..."}
  */
-function generatePreviewsToDisk(aepPath, outputDir) {
+function generatePreviewsToDisk(aepPath, outputDir, thumbnailOnly) {
     // NOTE: We always suppress dialogs before importFile() to prevent blocking
     // "missing file" dialogs. On AE 2024/2025 this MAY cause importFile() to throw
     // "Object is invalid" — the import try/catch handles this by ending suppression
@@ -3304,8 +3452,85 @@ function generatePreviewsToDisk(aepPath, outputDir) {
             compWorkAreaStart,
             compWorkAreaStart + (compDuration * 0.25)
         ];
+        // Relocation support (AE 2026 hardened runtime). If the render engine
+        // (saveFrameToPng) cannot OPEN the output file for writing in the chosen
+        // temp base, relocate the output folder to $TMPDIR - the app's own per-user
+        // sandbox temp where the render engine has GUARANTEED write access - and
+        // retry. This is empirical at the exact failing operation, so it recovers
+        // even if getSafeTempFolder's Folder.create probe green-lit a base (e.g.
+        // ~/Library/Caches) that the render engine later refuses. The modal
+        // "File couldn't be opened for writing ( 3 :: 0 )" dialog is a SYMPTOM of
+        // that refusal and is NOT suppressible via beginSuppressDialogs on macOS,
+        // so we prevent it by writing where the engine can open the file.
+        var _relocatedRoot = null;
+        function _isWriteOpenError(errStr) {
+            var s = String(errStr).toLowerCase();
+            if (s.indexOf('opened for writing') !== -1) return true;
+            if (s.indexOf('could not be created') !== -1) return true;
+            if (s.indexOf('couldn') !== -1 && s.indexOf('open') !== -1) return true;
+            if (s.indexOf('could') !== -1 && s.indexOf('open') !== -1 && s.indexOf('writ') !== -1) return true;
+            if (s.indexOf('( 3 :: 0 )') !== -1) return true;
+            return false;
+        }
+        function _renderWritableBase() {
+            var cand = [];
+            var td = $.getenv('TMPDIR');
+            if (td) cand.push(new Folder(td));
+            try { if (Folder.temp && Folder.temp.parent) cand.push(Folder.temp.parent); } catch (eB) {}
+            cand.push(Folder.temp);
+            for (var ci = 0; ci < cand.length; ci++) {
+                if (cand[ci] && cand[ci].exists) return cand[ci];
+            }
+            return Folder.temp;
+        }
+        function _relocateOutputFolder() {
+            try {
+                var base = _renderWritableBase();
+                if (!base || !base.exists) return null;
+                var stamp = String((new Date()).getTime()) + '_' + Math.floor(Math.random() * 1000000);
+                var reloRoot = new Folder(buildPath(base, 'blitzkrieg_relo_' + stamp));
+                if (!reloRoot.exists) reloRoot.create();
+                if (!reloRoot.exists) return null;
+                var reloOut = new Folder(buildPath(reloRoot, 'output'));
+                if (!reloOut.exists) reloOut.create();
+                if (!reloOut.exists) return null;
+                _relocatedRoot = reloRoot.fsName;
+                return reloOut;
+            } catch (eR) { return null; }
+        }
+
+        // PROACTIVE writability probe (AE 2026 hardened runtime). saveFrameToPng pops a
+        // NON-suppressible "File couldn't be opened for writing ( 3 :: 0 )" modal that
+        // blocks the entire UI thread when the render engine cannot write the chosen
+        // base. The post-throw relocation below can only recover AFTER a human dismisses
+        // that modal — during a 100+ comp batch that is the "stuck at 0/N frozen" hang.
+        // So probe write access up front with a plain File write; if it fails, relocate
+        // to a guaranteed-writable base BEFORE any saveFrameToPng, so the modal path is
+        // never entered.
+        _currentStep = 'probe_render_writable';
+        (function () {
+            function _canWrite(folder) {
+                try {
+                    if (!folder || !folder.exists) return false;
+                    var probe = new File(folder.fsName + '/.blitz_wtest_' + String((new Date()).getTime()));
+                    probe.encoding = 'BINARY';
+                    if (!probe.open('w')) return false;
+                    var okw = probe.write('x');
+                    probe.close();
+                    var existed = probe.exists;
+                    try { probe.remove(); } catch (rmErr) {}
+                    return okw && existed;
+                } catch (pErr) { return false; }
+            }
+            if (!_canWrite(outFolder)) {
+                var _preRe = _relocateOutputFolder();
+                if (_preRe) { outFolder = _preRe; }
+            }
+        })();
+
         var thumbFile = new File(outFolder.fsName + '/comp.png');
         var thumbMemoryError = null;
+        var _thumbRelocated = false;
         for (var tt = 0; tt < thumbTimes.length; tt++) {
             try {
                 mainComp.saveFrameToPng(thumbTimes[tt], thumbFile);
@@ -3318,6 +3543,19 @@ function generatePreviewsToDisk(aepPath, outputDir) {
                 if (tem.indexOf('memory allocation') !== -1 && tem.indexOf('exceed') !== -1) {
                     thumbMemoryError = thumbErr.toString();
                     break; // no point retrying other timestamps — it's a comp-wide issue
+                }
+                // AE 2026: render engine refused to open the file for writing in the
+                // current base. Relocate to $TMPDIR and retry the whole timestamp
+                // sweep ONCE against the new, engine-writable location.
+                if (!_thumbRelocated && _isWriteOpenError(thumbErr.toString())) {
+                    var _reloOut = _relocateOutputFolder();
+                    if (_reloOut) {
+                        outFolder = _reloOut;
+                        thumbFile = new File(outFolder.fsName + '/comp.png');
+                        _thumbRelocated = true;
+                        tt = -1; // restart sweep against relocated folder
+                        continue;
+                    }
                 }
                 /* otherwise try next timestamp */
             }
@@ -3356,14 +3594,37 @@ function generatePreviewsToDisk(aepPath, outputDir) {
         if (hasMissingFootage) {
             _cleanup();
             if (aepFile && aepFile.exists) { try { aepFile.remove(); } catch(e) {} }
-            return JSON.stringify({
+            var _toResult = {
                 frameCount: 0,
                 duration: compDuration,
                 width: compWidth,
                 height: compHeight,
                 thumbnailOnly: true,
-                missingFootage: missingFootageNames
-            });
+                missingFootage: missingFootageNames,
+                outputDir: outFolder.fsName
+            };
+            if (_relocatedRoot) _toResult.relocatedTempDir = _relocatedRoot;
+            return JSON.stringify(_toResult);
+        }
+
+        // Caller requested THUMBNAIL-ONLY (the default "Generate Missing" batch).
+        // comp.png is rendered and uploaded; skip the expensive 12-72 frame preview
+        // loop entirely. Rendering previews for 100+ comps means thousands of
+        // saveFrameToPng calls on the synchronous UI thread — the batch freeze. Preview
+        // animations are optional and produced by the explicit "Force regenerate ALL".
+        if (thumbnailOnly) {
+            _cleanup();
+            if (aepFile && aepFile.exists) { try { aepFile.remove(); } catch (e) {} }
+            var _tmResult = {
+                frameCount: 0,
+                duration: compDuration,
+                width: compWidth,
+                height: compHeight,
+                thumbnailMode: true,
+                outputDir: outFolder.fsName
+            };
+            if (_relocatedRoot) _tmResult.relocatedTempDir = _relocatedRoot;
+            return JSON.stringify(_tmResult);
         }
 
         // --- Render preview frames ---
@@ -3430,8 +3691,10 @@ function generatePreviewsToDisk(aepPath, outputDir) {
             frameCount: previewFrameCount,
             duration: compDuration,
             width: compWidth,
-            height: compHeight
+            height: compHeight,
+            outputDir: outFolder.fsName
         };
+        if (_relocatedRoot) result.relocatedTempDir = _relocatedRoot;
         if (incompleteFrames) {
             result.incompleteFrames = true;
             result.plannedFrameCount = plannedFrameCount;
@@ -3905,6 +4168,83 @@ function blitzPickFolder() {
         if (f) return f.fsName;
         return '';
     } catch (_) { return 'Error: ' + _.message; }
+}
+
+/** Open a folder in Finder/Explorer so the user can SEE where files land. Returns
+ *  JSON. Uses system.callSystem (a shell open) rather than Folder.execute() so AE's
+ *  "Warn User When Executing Files" security prompt does NOT pop on every reveal. */
+function blitzRevealInFinder(rawPath) {
+    try {
+        var f = folderFromPath(rawPath);
+        // If the exact folder is missing (e.g. library not synced yet), fall back to
+        // the nearest existing ancestor so Reveal still opens something useful.
+        var target = f;
+        var guard = 0;
+        while (target && !target.exists && target.parent && guard < 40) {
+            target = target.parent; guard++;
+        }
+        if (!target || !target.exists) return JSON.stringify({ error: 'Folder not found: ' + rawPath });
+        var p = target.fsName;
+        var isWin = ($.os && $.os.indexOf('Windows') !== -1);
+        if (typeof system !== 'undefined' && system.callSystem) {
+            if (isWin) system.callSystem('explorer "' + p + '"');
+            else system.callSystem('open "' + p + '"');
+            return JSON.stringify({ ok: true });
+        }
+        // Last resort if callSystem is unavailable: execute() (may prompt).
+        target.execute();
+        return JSON.stringify({ ok: true });
+    } catch (e) { return JSON.stringify({ error: e + '' }); }
+}
+
+/** Report free/total bytes on the volume holding rawPath + whether it is writable.
+ *  macOS uses `df -Pk` (POSIX single-line). Fails SOFT: any problem returns
+ *  {error:...} (or zeros) so the capacity UI degrades and NEVER blocks Set-Path. */
+function blitzGetDiskFree(rawPath) {
+    try {
+        var f = folderFromPath(rawPath);
+        // Walk up to the nearest EXISTING ancestor. A not-yet-created library
+        // folder (e.g. a fresh /Volumes/LaCie/Blitzkrieg Library the user just
+        // picked) will be made by setLibraryPath, so probe the volume/parent that
+        // actually exists for BOTH free space and writability - otherwise df runs
+        // against a missing path (returns nothing) and the write test fails, which
+        // would blank the capacity line and wrongly report "not writable".
+        var probe = f;
+        var guard = 0;
+        while (probe && !probe.exists && probe.parent && guard < 40) {
+            probe = probe.parent; guard++;
+        }
+        var probePath = (probe && probe.fsName) ? probe.fsName : ((f && f.fsName) ? f.fsName : rawPath);
+        var writable = false;
+        if (probe && probe.exists) {
+            try {
+                var tf = new File(probe.fsName + '/.blitz_write_test');
+                tf.encoding = 'UTF-8';
+                if (tf.open('w')) { tf.write('ok'); tf.close(); tf.remove(); writable = true; }
+            } catch (we) { writable = false; }
+        }
+        var freeBytes = 0, totalBytes = 0;
+        var isWin = ($.os && $.os.indexOf('Windows') !== -1);
+        if (!isWin && typeof system !== 'undefined' && system.callSystem) {
+            var out = system.callSystem('/bin/df -Pk "' + probePath + '"');
+            if (out) {
+                var lines = String(out).split('\n');
+                var row = '';
+                for (var i = lines.length - 1; i >= 0; i--) {
+                    if (lines[i] && lines[i].replace(/^\s+|\s+$/g, '').length > 0) { row = lines[i]; break; }
+                }
+                var parts = row.replace(/^\s+|\s+$/g, '').split(/\s+/);
+                // POSIX df columns: Filesystem 1024-blocks Used Available Capacity Mounted
+                if (parts.length >= 4) {
+                    var totalK = parseFloat(parts[1]);
+                    var availK = parseFloat(parts[3]);
+                    if (!isNaN(totalK)) totalBytes = totalK * 1024;
+                    if (!isNaN(availK)) freeBytes = availK * 1024;
+                }
+            }
+        }
+        return JSON.stringify({ freeBytes: freeBytes, totalBytes: totalBytes, writable: writable });
+    } catch (e) { return JSON.stringify({ error: e + '' }); }
 }
 
 function blitzLocalListAep(rawPath) {

@@ -227,6 +227,36 @@
         });
     }
 
+    // Crash-detection breadcrumbs for the submit/stash flow. trackSubmitStart is
+    // persisted BEFORE the synchronous AE export; a hard AE crash during collect/reduce
+    // kills the panel's JS context, so NO error can be logged and NO submit_end fires.
+    // A submit_start whose trace_id has no matching submit_end is therefore a detectable
+    // crash (the "AE just crashes when I submit" report), diagnosable per panel_version.
+    function trackSubmitStart(traceId, category, footprintBytes, footageMissing) {
+        track('submit_start', {
+            templateCategory: category,
+            metadata: {
+                trace_id: traceId || null,
+                panel_version: (typeof window !== 'undefined' && window.BLITZKRIEG_LOCAL_VERSION) || null,
+                est_footage_bytes: typeof footprintBytes === 'number' ? footprintBytes : null,
+                footage_missing: typeof footageMissing === 'number' ? footageMissing : null
+            }
+        });
+    }
+
+    // outcome: 'success' | 'failed' | 'blocked_oversize'
+    function trackSubmitEnd(traceId, category, outcome, detail) {
+        track('submit_end', {
+            templateCategory: category,
+            metadata: {
+                trace_id: traceId || null,
+                panel_version: (typeof window !== 'undefined' && window.BLITZKRIEG_LOCAL_VERSION) || null,
+                outcome: outcome || 'unknown',
+                detail: detail ? String(detail).substring(0, 300) : null
+            }
+        });
+    }
+
     // Expose globally
     window.blitzkriegAnalytics = {
         trackImport: trackImport,
@@ -241,5 +271,7 @@
         trackBulkOp: trackBulkOp,
         trackStash: trackStash,
         trackGenerate: trackGenerate,
+        trackSubmitStart: trackSubmitStart,
+        trackSubmitEnd: trackSubmitEnd,
     };
 })();

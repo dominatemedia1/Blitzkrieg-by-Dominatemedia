@@ -189,7 +189,10 @@
     var META_CACHE_KEY = 'blitzkrieg_meta_cache';
     // Bump when cache schema changes or naming fixes require fresh data.
     // Stale cache with lower version is rejected — forces slow-path reload.
-    var CACHE_VERSION = 2;
+    // v3: adds storage-truth thumbnail enrichment (hasCompPng / cloudPreviewFrameCount
+    // reconciled from storage.objects) so the pre-enrichment local cache, which
+    // wrongly flags ~110 comps as missing thumbnails, is discarded once on upgrade.
+    var CACHE_VERSION = 3;
 
     // ── File-backed backstop for the meta cache ────────────────────────────
     // getCachedMetadata has no TTL, so if localStorage survived an AE restart the
@@ -314,7 +317,11 @@
     // CACHE-3: manifest schema version this client understands. A manifest with a
     // HIGHER version was written by a newer panel build and may have a shape this
     // build cannot read correctly, so we ignore it and rebuild via the slow path.
-    var MANIFEST_VERSION = 1;
+    // v2: manifest entries now carry storage-truth thumbnail enrichment (hasCompPng /
+    // cloudPreviewFrameCount reconciled from storage.objects). A v1 manifest lacks it
+    // and would keep every editor showing the false "missing thumbnail" state, so a v1
+    // manifest is treated as absent (rejected below) and rebuilt+republished as v2 once.
+    var MANIFEST_VERSION = 2;
     // 5 min TTL — was 30 min, but submissions approved by admins or templates
     // added outside the panel (Supabase dashboard, scripts) don't always trigger
     // invalidateManifest(), so users could see a stale list for up to 30 min.
@@ -368,6 +375,68 @@
         return Promise.race([listPromise, timeoutPromise]);
     }
 
+    // Fast child-folder listing via the blitzkrieg_list_folders RPC (index-only
+    // scan, ~70ms) instead of Storage list() -> storage.search(), which does a
+    // grouped full scan of EVERY nested object under the prefix and times out at
+    // the DB level on the largest category (Pre-comps: ~2200 objects / 99
+    // folders) even at a 60s client timeout. Returns items shaped like Storage
+    // list() folder entries ({name, id:null}) so every caller that filters on
+    // `item.id === null` works unchanged. Throws on error (missing function on an
+    // older DB, RLS, timeout) so the caller falls back to the Storage list()
+    // retry ladder and behaviour degrades gracefully rather than breaking.
+    function _listFoldersViaRpc(catName, timeoutMs) {
+        timeoutMs = timeoutMs || 15000;
+        var rpcPromise = sb.rpc('blitzkrieg_list_folders', { _category: catName });
+        var timeoutPromise = new Promise(function (_, reject) {
+            setTimeout(function () {
+                reject(new Error('RPC folder-list timed out after ' + timeoutMs + 'ms'));
+            }, timeoutMs);
+        });
+        return Promise.race([rpcPromise, timeoutPromise]).then(function (res) {
+            if (!res || res.error) {
+                throw new Error('blitzkrieg_list_folders("' + catName + '") failed: ' + ((res && res.error && res.error.message) || 'unknown'));
+            }
+            var rows = res.data || [];
+            var out = [];
+            for (var i = 0; i < rows.length; i++) {
+                var nm = rows[i] && rows[i].name;
+                if (nm) out.push({ name: nm, id: null });
+            }
+            return out;
+        });
+    }
+
+    // Storage-truth for thumbnail/preview state via the blitzkrieg_thumbnail_status
+    // RPC (one index-only aggregate over storage.objects). Returns a map keyed
+    // "category/folder" -> {has_png, preview_frame_count}, or null on ANY error so
+    // enrichment degrades to today's metadata-only behaviour and never throws. This
+    // is how the read path learns that a bulk-imported comp already HAS a comp.png in
+    // storage even when its metadata.json (written before the hasCompPng flag) says it
+    // does not, so the panel stops offering to regenerate 100+ comps that already
+    // exist (the mass regenerate that crashes AE 2026).
+    function _fetchThumbnailStatus() {
+        var rpcPromise = sb.rpc('blitzkrieg_thumbnail_status');
+        var timeoutPromise = new Promise(function (_, reject) {
+            setTimeout(function () {
+                reject(new Error('blitzkrieg_thumbnail_status timed out'));
+            }, 15000);
+        });
+        return Promise.race([rpcPromise, timeoutPromise]).then(function (res) {
+            if (!res || res.error || !res.data) return null;
+            var rows = res.data;
+            var map = {};
+            for (var i = 0; i < rows.length; i++) {
+                var r = rows[i];
+                if (!r || !r.category || !r.folder) continue;
+                map[r.category + '/' + r.folder] = {
+                    has_png: !!r.has_png,
+                    preview_frame_count: r.preview_frame_count || 0
+                };
+            }
+            return map;
+        }).then(null, function () { return null; });
+    }
+
     // CEP 8/9 fallback for `new CustomEvent(name, {detail})` — old Chromium
     // missing the constructor. Single helper instead of try/catch duplicated
     // at every dispatch site.
@@ -399,6 +468,15 @@
             // slow path rebuilds from storage instead.
             if (manifest.version && manifest.version > MANIFEST_VERSION) {
                 _log('fetchManifest: manifest version ' + manifest.version + ' > supported ' + MANIFEST_VERSION + '; ignoring, slow path will rebuild', 'warn');
+                return null;
+            }
+            // An OLDER manifest predates a schema/enrichment change (e.g. v1 lacks the
+            // storage-truth hasCompPng/cloudPreviewFrameCount fields, so it would keep
+            // every editor showing the false "missing thumbnail" state). Treat it as
+            // absent so the slow path rebuilds it WITH enrichment and republishes at the
+            // current version. Missing version === treated as 1 (pre-versioning).
+            if ((manifest.version || 1) < MANIFEST_VERSION) {
+                _log('fetchManifest: manifest version ' + (manifest.version || 1) + ' < supported ' + MANIFEST_VERSION + '; ignoring, slow path will rebuild + republish', 'warn');
                 return null;
             }
             var age = Date.now() - (manifest.ts || 0);
@@ -990,9 +1068,15 @@
     async function fetchAllMetadata() {
         var t0 = Date.now();
 
-        // Step 1: List all top-level folders (categories) — paginated
+        // Step 1: List all top-level folders (categories) — paginated, with the
+        // SAME adaptive-timeout retry (15s/30s/60s) the per-category lists use.
+        // Without this the root list was the one unretried list call: a single
+        // 15s timeout on a cold load (no cache + no manifest) rejected the whole
+        // library with no second attempt. (listCategoryWithRetry is an async
+        // function declaration, hoisted to the top of fetchAllMetadata, so it is
+        // callable here even though it is defined lower down.)
         _log('fetchAllMetadata: listing root...', 'info');
-        var allRootItems = await listAllPaginated('', { sortBy: { column: 'name', order: 'asc' } });
+        var allRootItems = await listCategoryWithRetry('', 3, { column: 'name', order: 'asc' });
         _log('fetchAllMetadata: root has ' + allRootItems.length + ' items (folders + files)', 'info');
 
         // Log all root item names for debugging
@@ -1050,7 +1134,27 @@
         // instead of (slowest category list) + (total metadata / CONCURRENCY).
         _log('fetchAllMetadata: listing ' + categories.length + ' category folders in parallel (streaming metadata)...', 'info');
 
-        async function listCategoryWithRetry(catName, maxAttempts) {
+        // sortBy is optional — the root list needs name-asc ordering; category
+        // lists pass none. Kept as an explicit param (not Object.assign, which is
+        // ES6 and absent in CEP 8/9) so both callers share ONE retry ladder.
+        async function listCategoryWithRetry(catName, maxAttempts, sortBy) {
+            // Real categories (not the root list) get the fast index-only RPC
+            // first: it returns just the child folder names in ~70ms and never
+            // hits the storage.search() DB timeout that made the largest
+            // category (Pre-comps, 99 folders / ~2200 nested objects)
+            // permanently unlistable and trapped every cold load in the 3-minute
+            // slow path. Root (catName === '') still needs Storage list() because
+            // it must also surface files (archives, manifest) and tell folders
+            // from files. On any RPC failure we fall through to the Storage
+            // list() retry ladder below, so an older DB without the function
+            // still works.
+            if (catName) {
+                try {
+                    return await _listFoldersViaRpc(catName);
+                } catch (rpcErr) {
+                    _log('listCategory "' + catName + '": fast RPC failed (' + (rpcErr && rpcErr.message || rpcErr) + '); falling back to storage.list', 'warn');
+                }
+            }
             maxAttempts = maxAttempts || 3;
             var attempts = 0;
             var lastErr;
@@ -1059,7 +1163,9 @@
                 attempts++;
                 var attemptTimeout = LIST_TIMEOUT_BY_ATTEMPT[attemptIdx] || LIST_TIMEOUT_BY_ATTEMPT[LIST_TIMEOUT_BY_ATTEMPT.length - 1];
                 try {
-                    return await listAllPaginated(catName, { _timeoutMs: attemptTimeout });
+                    var listOpts = { _timeoutMs: attemptTimeout };
+                    if (sortBy) listOpts.sortBy = sortBy;
+                    return await listAllPaginated(catName, listOpts);
                 } catch (err) {
                     lastErr = err;
                     _log('listCategory "' + catName + '" attempt ' + attempts + '/' + maxAttempts + ' (timeout ' + attemptTimeout + 'ms) failed: ' + (err && err.message || err), 'warn');
@@ -1215,6 +1321,36 @@
         if (hasCategoryFailures) {
             metadataResults._failedCategories = failedCategoryNames.slice();
             _log('fetchAllMetadata: ' + failedCategoryNames.length + ' categories failed to list: [' + failedCategoryNames.join(', ') + ']. Caller will merge stale cache or skip writes.', 'warn');
+        }
+
+        // STORAGE-TRUTH ENRICHMENT. metadata.json is often stale: bulk-imported comps
+        // have a real comp.png (and sometimes preview frames) in storage but metadata
+        // written before the hasCompPng flag, so thumbnailVerified/previewFrameCount
+        // read false and the panel wrongly offers to REGENERATE them (mass import into
+        // the live project -> AE 2026 crash). Overlay the REAL per-comp storage state
+        // (one indexed RPC) so thumbnailVerified + previewFrameCount reflect reality.
+        // Because this mutates metadataResults, the corrected state flows into the comp
+        // objects, the localStorage cache, AND the published manifest (all consume this
+        // same array). Null result on any error = keep today's metadata-only behaviour.
+        try {
+            var _statusMap = await _fetchThumbnailStatus();
+            if (_statusMap) {
+                var _reconciled = 0;
+                for (var _ei = 0; _ei < metadataResults.length; _ei++) {
+                    var _mr = metadataResults[_ei];
+                    if (!_mr || _mr.metadata == null) continue;
+                    var _s = _statusMap[_mr.categoryName + '/' + _mr.folderName];
+                    if (!_s) continue;
+                    if (_s.has_png && !_mr.metadata.hasCompPng) { _mr.metadata.hasCompPng = true; _reconciled++; }
+                    var _prevCount = _mr.metadata.cloudPreviewFrameCount || 0;
+                    if (_s.preview_frame_count > _prevCount) _mr.metadata.cloudPreviewFrameCount = _s.preview_frame_count;
+                }
+                _log('fetchAllMetadata: storage-truth enrichment applied (' + _reconciled + ' thumbnails reconciled from storage)', 'success');
+            } else {
+                _log('fetchAllMetadata: storage-truth enrichment skipped (RPC unavailable) - metadata-only signals', 'info');
+            }
+        } catch (_enrErr) {
+            _log('fetchAllMetadata: storage-truth enrichment error: ' + (_enrErr && _enrErr.message || _enrErr), 'warn');
         }
 
         return metadataResults;
@@ -1544,7 +1680,7 @@
         return 'application/octet-stream';
     }
 
-    async function downloadStorageFiles(paths, basePath, concurrency) {
+    async function downloadStorageFiles(paths, basePath, concurrency, onFileDone) {
         var results = new Array(paths.length);
         var next = 0;
         var limit = concurrency || 6;
@@ -1562,6 +1698,14 @@
                     blob: res.data,
                     contentType: contentTypeForPath(path)
                 };
+                // Per-file progress so the sync UI can credit bytes AS THEY LAND
+                // (not only when the whole template finishes) - the fix for the
+                // "12 KB/s" artifact where a long in-flight template starved the
+                // rate. Also our live throughput probe. Never let a UI callback
+                // break the download loop.
+                if (typeof onFileDone === 'function') {
+                    try { onFileDone(res.data.size || 0, path); } catch (cbErr) { /* ignore */ }
+                }
             }
         }
         var workers = [];
@@ -1721,12 +1865,12 @@
     // footage, and AEP. Unlike downloadTemplate() which only returns the
     // import-essential bundle (AEP + footage), this returns every file in
     // the template folder for a complete local mirror. Used by local-sync.js.
-    async function mirrorTemplate(storagePath) {
+    async function mirrorTemplate(storagePath, onFileDone) {
         var allFiles = await collectAllFiles(storagePath);
         if (allFiles.length === 0) {
             throw new Error('No files found in template folder: ' + storagePath);
         }
-        var downloaded = await downloadStorageFiles(allFiles, storagePath, 6);
+        var downloaded = await downloadStorageFiles(allFiles, storagePath, 6, onFileDone);
         var aepPath = '';
         var totalSize = 0;
         for (var i = 0; i < downloaded.length; i++) {
@@ -1755,6 +1899,41 @@
             fileCount: downloaded.length,
             sizeBytes: totalSize
         };
+    }
+
+    // Lightweight THUMBNAIL-ONLY mirror: comp.png (+ metadata.json best-effort).
+    // Powers the auto-seeded local thumbnail cache that gives Animation-Composer-style
+    // instant, offline thumbnails on launch, WITHOUT downloading the full ~67GB library
+    // that mirrorTemplate pulls. Fleet-wide this is ~158MB (378 comp.png). The render
+    // path (_applyLocalAssetCache) serves the resulting file://comp.png with zero network.
+    async function mirrorThumbnail(storagePath) {
+        var compPngPath = storagePath + '/comp.png';
+        // comp.png is the one essential file. downloadStorageFiles THROWS if it is
+        // genuinely absent — the caller treats that as "nothing to cache" and skips
+        // the template (it has no thumbnail to serve locally anyway).
+        var downloaded = await downloadStorageFiles([compPngPath], storagePath, 1);
+        var files = [];
+        var totalSize = 0;
+        for (var i = 0; i < downloaded.length; i++) {
+            if (downloaded[i] && downloaded[i].blob) {
+                files.push(downloaded[i]);
+                totalSize += downloaded[i].blob.size;
+            }
+        }
+        // metadata.json is optional for a thumbnail cache — best-effort, never fatal.
+        try {
+            var metaRes = await sb.storage.from(BUCKET).download(storagePath + '/metadata.json');
+            if (!metaRes.error && metaRes.data) {
+                files.push({
+                    path: storagePath + '/metadata.json',
+                    relativePath: 'metadata.json',
+                    blob: metaRes.data,
+                    contentType: 'application/json'
+                });
+                totalSize += metaRes.data.size;
+            }
+        } catch (e) { /* thumbnail cache does not require metadata.json */ }
+        return { files: files, fileCount: files.length, sizeBytes: totalSize };
     }
 
     // Verify a local mirror folder has the essential files needed for import.
@@ -2262,6 +2441,61 @@
     }
 
     // Expose globally
+    // ── Team-shared favorites ────────────────────────────────────────
+    // Server-backed so every Blitzkrieg team member sees the whole team's
+    // favorites (RLS: select = any member, insert/delete = own rows only).
+    async function getTeamFavorites() {
+        try {
+            var res = await sb.from('blitzkrieg_favorites')
+                .select('storage_path,user_id,team_member_id,team_members(full_name)');
+            if (res.error) { _log('getTeamFavorites: ' + res.error.message, 'warn'); return []; }
+            var rows = res.data || [];
+            var out = [];
+            for (var i = 0; i < rows.length; i++) {
+                var r = rows[i];
+                out.push({
+                    storagePath: r.storage_path,
+                    userId: r.user_id,
+                    teamMemberId: r.team_member_id,
+                    memberName: (r.team_members && r.team_members.full_name) ? r.team_members.full_name : 'Someone'
+                });
+            }
+            return out;
+        } catch (e) { _log('getTeamFavorites failed: ' + e.message, 'warn'); return []; }
+    }
+
+    async function addFavorite(storagePath, templateName, category, teamMemberId) {
+        var row = { storage_path: storagePath, template_name: templateName || null, category: category || null };
+        if (teamMemberId) row.team_member_id = teamMemberId;
+        var res = await sb.from('blitzkrieg_favorites').insert(row);
+        // 23505 = unique violation (already favorited) — treat as success (idempotent).
+        if (res.error && res.error.code !== '23505') throw new Error(res.error.message);
+        return true;
+    }
+
+    async function removeFavorite(storagePath) {
+        // RLS scopes the delete to the caller's own row (user_id = auth.uid()).
+        var res = await sb.from('blitzkrieg_favorites').delete().eq('storage_path', storagePath);
+        if (res.error) throw new Error(res.error.message);
+        return true;
+    }
+
+    // Approved-template authorship map (storage_path -> submitter name) via a
+    // guarded SECURITY DEFINER RPC, so the "submitted by" filter works team-wide
+    // without loosening the submissions-table RLS.
+    async function getTemplateSubmitters() {
+        try {
+            var res = await sb.rpc('blitzkrieg_template_submitters');
+            if (res.error) { _log('getTemplateSubmitters: ' + res.error.message, 'warn'); return []; }
+            var rows = res.data || [];
+            var out = [];
+            for (var i = 0; i < rows.length; i++) {
+                out.push({ storagePath: rows[i].storage_path, submitterName: rows[i].submitter_name, teamMemberId: rows[i].team_member_id });
+            }
+            return out;
+        } catch (e) { _log('getTemplateSubmitters failed: ' + e.message, 'warn'); return []; }
+    }
+
     window.cloudLibrary = {
         listTemplates: listTemplates,
         downloadTemplate: downloadTemplate,
@@ -2291,6 +2525,11 @@
         copyStorageFiles: copyStorageFiles,
         removeStorageFiles: removeStorageFiles,
         mirrorTemplate: mirrorTemplate,
+        mirrorThumbnail: mirrorThumbnail,
+        getTeamFavorites: getTeamFavorites,
+        addFavorite: addFavorite,
+        removeFavorite: removeFavorite,
+        getTemplateSubmitters: getTemplateSubmitters,
         getTemplateFileList: getTemplateFileList,
         verifyTemplateIntegrity: verifyTemplateIntegrity,
     };

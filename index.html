@@ -277,6 +277,16 @@
                         <span class="nav-label">Recent</span>
                         <span class="nav-count" id="recent-count">0</span>
                     </div>
+                    <div class="nav-item" data-category="__sync">
+                        <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 2v6h-6"></path>
+                            <path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path>
+                            <path d="M3 22v-6h6"></path>
+                            <path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path>
+                        </svg>
+                        <span class="nav-label">Sync &amp; Analytics</span>
+                        <span class="nav-count" id="sync-nav-count">0</span>
+                    </div>
                 </div>
 
                 <!-- Categories Section - Populated by JavaScript -->
@@ -301,48 +311,8 @@
                     </div>
                 </div>
 
-                <!-- My Submissions Section (all users) -->
-                <div class="nav-section" id="submissions-section">
-                    <div class="nav-section-title">My Submissions</div>
-                    <div class="nav-item" data-category="__submissions_pending">
-                        <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <circle cx="12" cy="12" r="10"></circle>
-                            <polyline points="12 6 12 12 16 14"></polyline>
-                        </svg>
-                        <span class="nav-label">Pending</span>
-                        <span class="nav-count" id="my-submissions-pending-count">0</span>
-                    </div>
-                    <div class="nav-item" data-category="__submissions_approved">
-                        <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <polyline points="20 6 9 17 4 12"></polyline>
-                        </svg>
-                        <span class="nav-label">Approved</span>
-                        <span class="nav-count" id="my-submissions-approved-count">0</span>
-                    </div>
-                    <div class="nav-item" data-category="__submissions_rejected">
-                        <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <line x1="18" y1="6" x2="6" y2="18"></line>
-                            <line x1="6" y1="6" x2="18" y2="18"></line>
-                        </svg>
-                        <span class="nav-label">Rejected</span>
-                        <span class="nav-count" id="my-submissions-rejected-count">0</span>
-                    </div>
-                </div>
-
-                <!-- Review Queue Section (admin-only) -->
-                <div class="nav-section nav-section-admin-only" id="review-section" style="display:none;">
-                    <div class="nav-section-title">Review Queue</div>
-                    <div class="nav-item" data-category="__review_pending">
-                        <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                            <polyline points="14 2 14 8 20 8"></polyline>
-                            <line x1="12" y1="18" x2="12" y2="12"></line>
-                            <line x1="9" y1="15" x2="15" y2="15"></line>
-                        </svg>
-                        <span class="nav-label">Pending Review</span>
-                        <span class="nav-count" id="review-pending-count">0</span>
-                    </div>
-                </div>
+                <!-- My Submissions (Pending/Approved) removed: submissions auto-publish to the library on Add. -->
+                <!-- Review Queue removed: submissions auto-approve on add. -->
 
                 <!-- Analytics Section (admin-only) -->
                 <div class="nav-section nav-section-admin-only" id="analytics-section" style="display:none;">
@@ -366,14 +336,17 @@
                 </div>
                 <div class="sync-settings" id="sync-settings" style="display:none;">
                     <label class="sync-label" for="sync-library-path">Local Library Path</label>
+                    <div class="sync-path-resolved" id="sync-path-resolved" title="" style="display:none;"></div>
+                    <div class="sync-path-capacity" id="sync-path-capacity" style="display:none;"></div>
                     <div class="sync-path-row">
                         <input type="text" id="sync-library-path" class="sync-path-input" placeholder="~/Blitzkrieg Library" spellcheck="false">
-                        <button id="sync-path-browse" class="button-secondary sync-path-btn" title="Browse for library folder">Browse</button>
+                        <button id="sync-path-browse" class="button-secondary sync-path-btn" title="Choose a library folder (an external drive is fine for the full 67 GB)">Browse</button>
                     </div>
                     <div class="sync-actions">
                         <button id="sync-path-save" class="button-primary sync-save-btn">Set Library Path</button>
-                        <button id="sync-force-all" class="button-secondary sync-force-btn" title="Download all templates to local library">Sync All</button>
+                        <button id="sync-path-reveal" class="button-secondary sync-path-btn" title="Open the library folder in Finder" style="display:none;">Reveal</button>
                     </div>
+                    <div class="sync-path-status" id="sync-path-status" style="display:none;"></div>
                 </div>
             </div>
 

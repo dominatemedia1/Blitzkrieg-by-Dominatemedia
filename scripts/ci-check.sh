@@ -78,6 +78,35 @@ for f in js/*.js; do
   is_vendored "$f" && continue
   if grep -nE "${JS_USERFACING}.*(—|–|‘|’|“|”)" "$f"; then note "em-dash/curly-quote in a user-facing string in $f (above)"; fi
 done
+# The same-line heuristic above misses a smart char on a CONTINUATION line of a
+# MULTI-LINE user-facing assignment (marker on a prior line, e.g. a textContent set
+# split across lines). This targeted pass, for every user-facing marker line that does
+# not terminate on its own line, joins the statement up to its ';' and flags a smart
+# char anywhere in it. Marker-anchored, so dev-only debugLog/_log strings are exempt.
+for f in js/*.js; do
+  is_vendored "$f" && continue
+  python3 - "$f" <<'PY' || note "em-dash/curly-quote in a multi-line user-facing string in $f (above)"
+import sys, re
+MARK = re.compile(r'(showToast\(|innerHTML|\.textContent|\.title\s*=|setAttribute\(|placeholder|aria-label|\.value\s*=)')
+SMART = re.compile(r'[—–‘’“”]')
+lines = open(sys.argv[1], encoding='utf-8').read().split('\n')
+bad = False
+i = 0
+while i < len(lines):
+    code = lines[i].split('//', 1)[0]
+    if MARK.search(code):
+        # Gather the statement (this line + continuations) until a ';' or blank/brace.
+        stmt = code; j = i
+        while ';' not in stmt and j + 1 < len(lines) and (j - i) < 8:
+            j += 1
+            stmt += '\n' + lines[j].split('//', 1)[0]
+        if SMART.search(stmt):
+            print(f"{sys.argv[1]}:{i+1}: {lines[i].strip()[:90]}")
+            bad = True
+    i += 1
+sys.exit(1 if bad else 0)
+PY
+done
 # index.html is all user-facing markup; flag any occurrence.
 if [ -f index.html ] && grep -nE '(—|–|‘|’|“|”)' index.html; then note "em-dash/curly-quote in index.html (above)"; fi
 

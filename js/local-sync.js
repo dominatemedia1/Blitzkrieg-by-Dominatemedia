@@ -12,6 +12,17 @@
 
     var STATE_KEY = 'blitzkrieg_local_sync';
 
+    // Runtime (non-persisted) control state for the full-library background mirror.
+    // Persisted flags live in state.fullSync; this holds the in-flight loop handles,
+    // rate/ETA accounting, and the live progress callback. Reset on every startFullSync.
+    var _fsRun = null;
+    var _fsSeq = 0; // monotonic run id — lets a superseded run's workers detect they are stale
+
+    /** Promise that resolves after ms (CEP has setTimeout). */
+    function _delay(ms) {
+        return new Promise(function (resolve) { setTimeout(resolve, ms); });
+    }
+
     // ── internal helpers ──────────────────────────────────────────
 
     /** Call an ExtendScript function and return a Promise of the parsed JSON result. */
@@ -192,6 +203,30 @@
         },
 
         /**
+         * Open the library folder (or any path) in Finder/Explorer so the user can
+         * SEE where synced files land. Resolves regardless of outcome.
+         * @param {string} path
+         * @returns {Promise<Object>}
+         */
+        revealInFinder: function (path) {
+            if (!path) return Promise.resolve({ error: 'no path' });
+            var safe = path.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+            return _callExtendScript('blitzRevealInFinder("' + safe + '")');
+        },
+
+        /**
+         * Free/total bytes + writability for the volume holding `path`. Fails soft:
+         * resolves with {error} or zeros so callers never block on it.
+         * @param {string} path
+         * @returns {Promise<{freeBytes:number, totalBytes:number, writable:boolean}>}
+         */
+        getDiskFree: function (path) {
+            if (!path) return Promise.resolve({ error: 'no path' });
+            var safe = path.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+            return _callExtendScript('blitzGetDiskFree("' + safe + '")');
+        },
+
+        /**
          * Check whether a template is available locally.
          * @param {string} storagePath — "Category/FolderName"
          * @returns {Promise<{exists:boolean, complete:boolean, aepPath:string, fileCount:number}>}
@@ -343,15 +378,102 @@
         },
 
         /**
+         * THUMBNAIL variant of getLocalDirsIfComplete. Returns the local dir when the
+         * template has its comp.png on disk — either from a FULL mirror (complete=.aep
+         * present) OR from a thumbnail-only mirror (thumbComplete=comp.png present). Used
+         * by the render path to serve file://comp.png for auto-seeded thumbnail caches.
+         * NOTE: the IMPORT path must keep using getLocalDir(s)IfComplete (which requires
+         * the .aep) — a thumbnail-only dir has no project file to import.
+         * @param {Array<{storagePath:string, contentVersion?:string}>} items
+         * @returns {Object} map of storagePath -> absolute local dir ('' if no local comp.png)
+         */
+        getLocalThumbDirs: function (items) {
+            var out = {};
+            if (!items || !items.length) return out;
+            var state = _loadState();
+            var lib = state && state.libraryPath;
+            if (!lib) return out;
+            var templates = (state && state.templates) || {};
+            for (var i = 0; i < items.length; i++) {
+                var it = items[i];
+                if (!it || !it.storagePath) continue;
+                var tpl = templates[it.storagePath];
+                if (!tpl || (!tpl.complete && !tpl.thumbComplete)) { out[it.storagePath] = ''; continue; }
+                // Match getLocalDirsIfComplete: reject only on a KNOWN version mismatch.
+                if (it.contentVersion && tpl.contentVersion && tpl.contentVersion !== it.contentVersion) {
+                    out[it.storagePath] = '';
+                    continue;
+                }
+                out[it.storagePath] = lib + '/' + it.storagePath;
+            }
+            return out;
+        },
+
+        /**
+         * Download ONLY a template's comp.png (+ metadata.json best-effort) to the local
+         * mirror — the lightweight half of Animation-Composer parity. Sets a separate
+         * `thumbComplete` flag so the render path serves file://comp.png without implying
+         * the full .aep bundle is present. ~420KB/template vs the whole folder.
+         * @param {string} storagePath
+         * @param {string} [contentVersion]
+         * @returns {Promise<{thumbComplete:boolean, fileCount:number}>}
+         */
+        syncThumbnail: function (storagePath, contentVersion) {
+            if (!storagePath) return Promise.reject(new Error('storagePath required'));
+            if (!window.cloudLibrary || !window.cloudLibrary.mirrorThumbnail) {
+                return Promise.reject(new Error('cloudLibrary.mirrorThumbnail unavailable'));
+            }
+            var libPath = _getLibraryPath();
+            if (!libPath) return Promise.reject(new Error('Library path not configured'));
+
+            return _ensureLibraryRoot().then(function () {
+                return _ensureDirs(libPath, storagePath);
+            }).then(function () {
+                return window.cloudLibrary.mirrorThumbnail(storagePath);
+            }).then(function (mirrored) {
+                var files = (mirrored && mirrored.files) || [];
+                var writes = [];
+                var wroteCompPng = false;
+                for (var i = 0; i < files.length; i++) {
+                    var rel = files[i].relativePath;
+                    if (!rel) continue;
+                    if (rel === 'comp.png') wroteCompPng = true;
+                    writes.push(_writeBlob(libPath + '/' + storagePath + '/' + rel, files[i].blob));
+                }
+                if (!wroteCompPng) {
+                    // No comp.png to cache — leave thumbComplete unset so we do not
+                    // point the render path at a file:// that does not exist.
+                    return { thumbComplete: false, fileCount: 0 };
+                }
+                return Promise.all(writes).then(function () {
+                    var state = _loadState();
+                    if (!state.templates) state.templates = {};
+                    var existing = state.templates[storagePath] || {};
+                    existing.thumbTs = Date.now();
+                    existing.thumbComplete = true;
+                    // Preserve any full-mirror flag; only stamp the thumbnail fields.
+                    if (typeof existing.complete === 'undefined') existing.complete = false;
+                    if (!existing.contentVersion) existing.contentVersion = contentVersion || '';
+                    state.templates[storagePath] = existing;
+                    _saveState(state);
+                    return { thumbComplete: true, fileCount: files.length };
+                });
+            });
+        },
+
+        /**
          * Download a single template to the local mirror.
          * Uses cloudLibrary.mirrorTemplate() to download all files,
          * then writes everything to the local mirror folder.
          * @param {string} storagePath
          * @param {string} [contentVersion] — opaque content fingerprint stored
          *        alongside the mirror so a later sync can detect cloud changes.
+         * @param {function} [onFileDone] — called with (bytes) as each bundle file
+         *        finishes downloading, so the sync UI credits progress in-flight
+         *        (honest MB/s / ETA) instead of only when a whole template lands.
          * @returns {Promise<{localAepPath:string, fileCount:number}>}
          */
-        syncTemplate: function (storagePath, contentVersion) {
+        syncTemplate: function (storagePath, contentVersion, onFileDone) {
             if (!storagePath) return Promise.reject(new Error('storagePath required'));
             if (!window.cloudLibrary || !window.cloudLibrary.mirrorTemplate) {
                 return Promise.reject(new Error('cloudLibrary unavailable'));
@@ -363,9 +485,10 @@
             return _ensureLibraryRoot().then(function () {
                 return _ensureDirs(libPath, storagePath);
             }).then(function () {
-                return window.cloudLibrary.mirrorTemplate(storagePath);
+                return window.cloudLibrary.mirrorTemplate(storagePath, onFileDone);
             }).then(function (mirrored) {
                 var files = mirrored.files || [];
+                var mirroredBytes = mirrored.sizeBytes || 0;
                 var localAepPath = '';
                 var dirsNeeded = {};
 
@@ -421,12 +544,18 @@
                         return verify.then(function (aepOk) {
                             var state = _loadState();
                             if (!state.templates) state.templates = {};
-                            state.templates[storagePath] = {
-                                ts: Date.now(),
-                                files: files.length,
-                                complete: aepOk,
-                                contentVersion: contentVersion || ''
-                            };
+                            // Merge into any existing entry so a prior thumbComplete/
+                            // thumbTs (set by syncThumbnail) is preserved, not clobbered.
+                            var _prevEntry = state.templates[storagePath] || {};
+                            _prevEntry.ts = Date.now();
+                            _prevEntry.files = files.length;
+                            _prevEntry.bytes = mirroredBytes;
+                            _prevEntry.complete = aepOk;
+                            _prevEntry.contentVersion = contentVersion || '';
+                            // A template that DID download and write an .aep is not broken,
+                            // even if a prior run flagged it — clear the stale flag.
+                            if (aepOk && _prevEntry.broken) { delete _prevEntry.broken; delete _prevEntry.brokenTs; }
+                            state.templates[storagePath] = _prevEntry;
                             _saveState(state);
                             return {
                                 localAepPath: aepOk ? localAepPath : '',
@@ -495,16 +624,486 @@
             var state = _loadState();
             var templates = state.templates || {};
             var keys = Object.keys(templates);
-            var synced = 0;
+            var synced = 0;      // full template mirror (67GB "Sync All")
+            var thumbSynced = 0; // thumbnail cached locally (the automatic default)
             for (var i = 0; i < keys.length; i++) {
-                if (templates[keys[i]].complete) synced++;
+                var t = templates[keys[i]];
+                if (t.complete) synced++;
+                if (t.complete || t.thumbComplete) thumbSynced++;
             }
             return {
                 libraryPath: state.libraryPath || '',
                 synced: synced,
+                thumbSynced: thumbSynced,
                 tracked: keys.length,
                 lastFullSync: state.lastFullSync || 0
             };
+        },
+
+        // ── Full-library background mirror (67GB) ─────────────────────────
+        // A persistent, pausable, resumable queue that downloads every template's
+        // full bundle to the local mirror. Survives panel reload: on next load
+        // main.js re-invokes startFullSync with the same target list and the loop
+        // resumes from whatever is not yet `complete`. Progress is reported per
+        // completed template PLUS a running ETA so the UI never looks frozen.
+
+        /**
+         * Classify a sync error. A template whose cloud folder has no downloadable
+         * bundle (no .aep / missing footage that will never resolve) is BROKEN
+         * (needs re-stash, not retry). Everything else is a transient FAILURE.
+         */
+        _classifySyncError: function (err) {
+            var msg = (err && err.message ? err.message : String(err || '')).toLowerCase();
+            if (msg.indexOf('no files found') !== -1
+                || msg.indexOf('no .aep') !== -1
+                || msg.indexOf('not found') !== -1
+                || msg.indexOf('object not found') !== -1) {
+                return 'broken';
+            }
+            return 'failed';
+        },
+
+        /**
+         * Begin (or resume) the full-library mirror.
+         * @param {string[]} storagePaths — every template path to ensure mirrored
+         * @param {Object} versionMap — storagePath -> content version (re-pull on change)
+         * @param {function} onTick — called with getFullSyncStatus() shape on each change
+         * @returns {Promise<Object>} resolves with the final status when drained/paused
+         */
+        startFullSync: function (storagePaths, versionMap, onTick) {
+            if (!storagePaths || !storagePaths.length) {
+                return Promise.resolve({ active: false, done: 0, total: 0 });
+            }
+            if (!_getLibraryPath()) {
+                return Promise.reject(new Error('Library path not configured'));
+            }
+            // Already running — just adopt the newest tick callback + targets and return.
+            if (_fsRun && _fsRun.running) {
+                if (onTick) _fsRun.tick = onTick;
+                return _fsRun.promise;
+            }
+
+            var self = this;
+            var state = _loadState();
+            var fs = state.fullSync || {};
+            fs.active = true;
+            fs.paused = false;
+            fs.cancelled = false;
+            if (!fs.startedAt) fs.startedAt = Date.now();
+            if (!fs.failures) fs.failures = {};
+            state.fullSync = fs;
+            _saveState(state);
+
+            var myRun = {
+                id: ++_fsSeq,
+                running: true,
+                tick: onTick || null,
+                t0: Date.now(),
+                doneThisRun: 0,
+                bytesThisRun: 0,
+                samples: [],   // rolling {t, b} points for a smoothed recent MB/s
+                current: '',
+                targets: storagePaths.slice(),
+                versionMap: versionMap || {},
+                promise: null
+            };
+            _fsRun = myRun;
+
+            // Size-aware template concurrency. mirrorTemplate buffers a whole
+            // template's files in memory before writing, so we cannot naively run N
+            // templates at once (two large ones would blow the heap). We run a small
+            // pool (CONCURRENCY) governed by an in-flight BYTE BUDGET: a worker only
+            // picks up the next template if its estimated size still fits the budget,
+            // UNLESS nothing is in flight (so a single oversized template always makes
+            // progress, alone, exactly like the old serial behavior).
+            //
+            // CRITICAL memory-safety rule: a template's size is only known AFTER it
+            // has synced once (persisted `bytes`, line ~552). On the FIRST full sync
+            // every template is unknown, and we must NOT guess a small size and pack
+            // two together, because two large templates (the library has a multi-GB
+            // one) would then buffer concurrently and OOM the CEP heap, which is
+            // strictly worse than the old serial path. So UNKNOWN size is treated as
+            // "run alone" (estimate = the whole budget): the first full sync stays
+            // effectively serial (safe, no regression). On every later sync sizes are
+            // known, so small templates pack up to CONCURRENCY at once for the speed
+            // win, and any known-large one runs alone.
+            var _inflightBytes = 0;
+            var BYTE_BUDGET = 700 * 1024 * 1024;      // ~700MB of concurrent template buffers
+            var UNKNOWN_EST_BYTES = BYTE_BUDGET;       // unknown size -> run alone (memory-safe)
+
+            function _estBytesFor(sp) {
+                var st = _loadState();
+                var t = st.templates && st.templates[sp];
+                if (t && t.bytes) return t.bytes;
+                return UNKNOWN_EST_BYTES;
+            }
+
+            // Credit bytes AS EACH FILE LANDS (not per whole template) so the rate
+            // and ETA reflect live throughput. Keeps a trailing sample window so the
+            // displayed MB/s is a recent-average, not a since-start average that a
+            // single slow template would drag toward zero (the "12 KB/s" bug).
+            function _creditBytes(bytes) {
+                if (!bytes || _fsRun !== myRun) return;
+                myRun.bytesThisRun += bytes;
+                var now = Date.now();
+                myRun.samples.push({ t: now, b: myRun.bytesThisRun });
+                // Keep ~30s of samples (cap length so memory stays bounded).
+                var cutoff = now - 30000;
+                while (myRun.samples.length > 2 && myRun.samples[0].t < cutoff) {
+                    myRun.samples.shift();
+                }
+                if (myRun.samples.length > 240) myRun.samples.shift();
+            }
+
+            function _emit() {
+                if (_fsRun && _fsRun.tick) {
+                    try { _fsRun.tick(self.getFullSyncStatus()); } catch (e) { /* UI callback must never break the loop */ }
+                }
+            }
+
+            // Recompute pending from persisted state for THIS run's target set.
+            function _pendingFor(run) {
+                var st = _loadState();
+                var tpls = st.templates || {};
+                var out = [];
+                for (var i = 0; i < run.targets.length; i++) {
+                    var sp = run.targets[i];
+                    if (!sp) continue;
+                    var t = tpls[sp];
+                    if (t && t.broken) continue; // never retry known-broken in a run
+                    var wantV = run.versionMap[sp];
+                    var stale = wantV && t && t.complete && t.contentVersion !== wantV;
+                    if (!t || !t.complete || stale) out.push(sp);
+                }
+                return out;
+            }
+
+            var queue = _pendingFor(myRun);
+            var qi = 0;
+
+            // A run is DEAD (must fully stop, resolving its promise) when it has been
+            // superseded by a newer run, when the persisted sync was cancelled, or when
+            // the persisted sync is no longer active. NOTE: pause is NOT death — a paused
+            // run keeps its single loop alive and idles, so resume never has to spawn a
+            // second loop (which previously raced the first and corrupted files).
+            function _isDead() {
+                if (_fsRun !== myRun) return true; // superseded
+                var st = _loadState();
+                return !st.fullSync || st.fullSync.cancelled || !st.fullSync.active;
+            }
+            function _isPaused() {
+                var st = _loadState();
+                return !!(st.fullSync && st.fullSync.paused);
+            }
+
+            function worker() {
+                function step() {
+                    if (_isDead()) return Promise.resolve();
+                    if (_isPaused()) {
+                        // Idle in place (do not take a new item, do not end the loop).
+                        myRun.current = '';
+                        _emit();
+                        return _delay(600).then(step);
+                    }
+                    if (qi >= queue.length) return Promise.resolve(); // drained
+                    // Byte-budget admission: if taking the next template would push the
+                    // in-flight buffer estimate over budget AND something is already
+                    // running, wait and retry rather than pulling it now. When nothing
+                    // is in flight we always take it (a single giant runs alone).
+                    var peekEst = _estBytesFor(queue[qi]);
+                    if (_inflightBytes > 0 && (_inflightBytes + peekEst) > BYTE_BUDGET) {
+                        return _delay(400).then(step);
+                    }
+                    var sp = queue[qi++];
+                    var est = peekEst;
+                    _inflightBytes += est;
+                    myRun.current = sp;
+                    _emit();
+                    return api.syncTemplate(sp, myRun.versionMap[sp] || '', _creditBytes).then(function (r) {
+                        _inflightBytes -= est; if (_inflightBytes < 0) _inflightBytes = 0;
+                        myRun.doneThisRun++;
+                        // Bytes were already credited per-file via _creditBytes during
+                        // the download (do NOT add te.bytes here or it double-counts).
+                        _emit();
+                        return step();
+                    }, function (err) {
+                        _inflightBytes -= est; if (_inflightBytes < 0) _inflightBytes = 0;
+                        var kind = self._classifySyncError(err);
+                        var st3 = _loadState();
+                        if (!st3.templates) st3.templates = {};
+                        var entry = st3.templates[sp] || {};
+                        if (kind === 'broken') {
+                            entry.broken = (err && err.message) ? err.message : 'unavailable';
+                            entry.brokenTs = Date.now();
+                            st3.templates[sp] = entry;
+                        }
+                        if (!st3.fullSync) st3.fullSync = {};
+                        if (!st3.fullSync.failures) st3.fullSync.failures = {};
+                        st3.fullSync.failures[sp] = kind + ': ' + (err && err.message ? err.message : err);
+                        _saveState(st3);
+                        myRun.doneThisRun++;
+                        console.warn('[local-sync] full-sync ' + kind + ' for ' + sp + ': ' + (err && err.message || err));
+                        return step();
+                    });
+                }
+                return step();
+            }
+
+            // Up to 3 templates at once, but the per-worker BYTE BUDGET gate (in step)
+            // keeps total in-flight buffers bounded so small templates pack together
+            // while a large one runs alone. This is the speed win over the old serial
+            // (CONCURRENCY 1) path without risking the OOM that naive concurrency would.
+            // downloadStorageFiles still uses 6 concurrent requests per template (the
+            // CEP per-host cap); 3 templates leaves enough slots for interactive
+            // thumbnail signing + imports to stay responsive.
+            var CONCURRENCY = 3;
+            var workers = [];
+            for (var w = 0; w < Math.min(CONCURRENCY, queue.length || 1); w++) workers.push(worker());
+
+            myRun.promise = Promise.all(workers).then(function () {
+                // Only the CURRENT run may mutate shared runtime/persisted completion
+                // state — a stale run resolving late must never clobber a live one.
+                if (_fsRun === myRun) { myRun.running = false; myRun.current = ''; }
+                var st = _loadState();
+                if (!st.fullSync) st.fullSync = {};
+                var remaining = _pendingFor(myRun).length;
+                if (_fsRun === myRun && !st.fullSync.paused && !st.fullSync.cancelled && remaining === 0) {
+                    st.fullSync.active = false;
+                    st.fullSync.completedAt = Date.now();
+                    st.lastFullSync = Date.now();
+                    _saveState(st);
+                }
+                _emit();
+                return self.getFullSyncStatus();
+            });
+            _emit();
+            return myRun.promise;
+        },
+
+        pauseFullSync: function () {
+            var state = _loadState();
+            if (!state.fullSync) state.fullSync = {};
+            state.fullSync.paused = true;
+            _saveState(state);
+            // Do NOT tear down _fsRun. The single loop stays alive and idles on the
+            // persisted `paused` flag, so Resume never has to spawn a second loop
+            // (which previously raced the first and could corrupt a mirrored bundle).
+            return this.getFullSyncStatus();
+        },
+
+        resumeFullSync: function () {
+            var state = _loadState();
+            if (!state.fullSync) state.fullSync = {};
+            state.fullSync.paused = false;
+            state.fullSync.cancelled = false;
+            state.fullSync.active = true;
+            _saveState(state);
+            return this.getFullSyncStatus();
+        },
+
+        cancelFullSync: function () {
+            var state = _loadState();
+            if (!state.fullSync) state.fullSync = {};
+            state.fullSync.active = false;
+            state.fullSync.cancelled = true;
+            state.fullSync.paused = false;
+            _saveState(state);
+            // Do NOT force _fsRun.running=false. An in-flight template download cannot
+            // be aborted (no cancellation token), and forcing running=false here would
+            // let a fresh startFullSync (e.g. an immediate Download-all click) bypass the
+            // re-entrancy guard and spawn a SECOND worker that writes the same file
+            // concurrently with the still-draining one — corrupting the bundle. Instead
+            // the worker sees _isDead() (cancelled) at its next step and stops; the
+            // completion handler then sets running=false only after Promise.all drains,
+            // so there is never a window where two runs write the same path.
+            return this.getFullSyncStatus();
+        },
+
+        /**
+         * Live status of the full-library mirror: counts, ETA, throughput.
+         * done/total are computed from persisted state so they are correct even
+         * after a reload (before startFullSync re-arms the runtime).
+         */
+        getFullSyncStatus: function (allPaths) {
+            var state = _loadState();
+            var fs = state.fullSync || {};
+            var tpls = state.templates || {};
+            // The universe of templates: explicit arg, else the last run's targets,
+            // else everything currently tracked in state.
+            var targets = allPaths && allPaths.length ? allPaths
+                : (_fsRun && _fsRun.targets && _fsRun.targets.length ? _fsRun.targets : Object.keys(tpls));
+            var total = targets.length;
+            var complete = 0, broken = 0, pending = 0, failed = 0;
+            for (var i = 0; i < targets.length; i++) {
+                var t = tpls[targets[i]];
+                if (t && t.complete) complete++;
+                else if (t && t.broken) broken++;
+                else { pending++; if (fs.failures && fs.failures[targets[i]]) failed++; }
+            }
+            // "running" = the loop is actively downloading (alive AND not paused).
+            var running = !!(_fsRun && _fsRun.running) && !fs.paused;
+            var etaMs = 0, bytesPerSec = 0, doneThisRun = 0;
+            if (_fsRun) {
+                doneThisRun = _fsRun.doneThisRun;
+                var now = Date.now();
+                var elapsed = now - _fsRun.t0;
+                // Rolling throughput from the trailing sample window: rate over the
+                // span of recent per-file completions. This credits the in-flight
+                // template and reflects CURRENT speed, not a since-start average a
+                // single slow item drags down. Fall back to cumulative if too few
+                // samples yet.
+                var samples = _fsRun.samples || [];
+                if (samples.length >= 2) {
+                    var first = samples[0];
+                    var last = samples[samples.length - 1];
+                    var span = last.t - first.t;
+                    if (span > 0) bytesPerSec = Math.round((last.b - first.b) / (span / 1000));
+                } else if (elapsed > 0 && _fsRun.bytesThisRun > 0) {
+                    bytesPerSec = Math.round(_fsRun.bytesThisRun / (elapsed / 1000));
+                }
+                // ETA: prefer a byte-based estimate (remaining templates * avg bytes
+                // per completed template, divided by the live rate). Fall back to the
+                // per-item wall-clock average when we lack a byte rate.
+                if (doneThisRun > 0 && bytesPerSec > 0) {
+                    var avgBytes = _fsRun.bytesThisRun / doneThisRun;
+                    etaMs = Math.round((avgBytes * pending) / bytesPerSec * 1000);
+                } else if (doneThisRun > 0 && elapsed > 0) {
+                    etaMs = Math.round((elapsed / doneThisRun) * pending);
+                }
+            }
+            return {
+                active: !!fs.active,
+                paused: !!fs.paused,
+                cancelled: !!fs.cancelled,
+                running: running,
+                total: total,
+                complete: complete,
+                broken: broken,
+                failed: failed,
+                pending: pending - failed < 0 ? 0 : pending,
+                current: _fsRun ? _fsRun.current : '',
+                etaMs: etaMs,
+                bytesPerSec: bytesPerSec,
+                sessionBytes: _fsRun ? _fsRun.bytesThisRun : 0,
+                startedAt: fs.startedAt || 0,
+                completedAt: fs.completedAt || 0
+            };
+        },
+
+        /**
+         * Per-template status list for the Sync & Analytics view.
+         * @param {Array} comps — comp objects (need .storagePath, .name, .category)
+         * @returns {Array<{storagePath,name,category,status,bytes,reason}>}
+         *          status ∈ 'complete' | 'syncing' | 'broken' | 'failed' | 'pending'
+         */
+        getTemplateStatuses: function (comps) {
+            var state = _loadState();
+            var tpls = state.templates || {};
+            var fs = state.fullSync || {};
+            var current = _fsRun ? _fsRun.current : '';
+            var out = [];
+            for (var i = 0; i < comps.length; i++) {
+                var sp = comps[i].storagePath;
+                if (!sp) continue;
+                var t = tpls[sp];
+                var status = 'pending';
+                var reason = '';
+                // Broken wins over complete: a template can be mirrored (complete .aep)
+                // yet still reference footage that is missing from storage — that is the
+                // actionable "needs re-stash" state and must surface in the list, not be
+                // masked by the fact that its .aep downloaded.
+                if (t && t.broken) { status = 'broken'; reason = t.broken; }
+                else if (t && t.complete) status = 'complete';
+                else if (sp === current) status = 'syncing';
+                else if (fs.failures && fs.failures[sp]) { status = 'failed'; reason = fs.failures[sp]; }
+                out.push({
+                    storagePath: sp,
+                    name: comps[i].name || sp,
+                    category: comps[i].category || '',
+                    status: status,
+                    bytes: t && t.bytes ? t.bytes : 0,
+                    thumb: !!(t && (t.complete || t.thumbComplete)),
+                    reason: reason
+                });
+            }
+            return out;
+        },
+
+        /** Mark a template broken (e.g. import-time relink failure surfaced missing footage). */
+        markBroken: function (storagePath, reason) {
+            if (!storagePath) return;
+            var state = _loadState();
+            if (!state.templates) state.templates = {};
+            var t = state.templates[storagePath] || {};
+            t.broken = reason || 'needs re-stash';
+            t.brokenTs = Date.now();
+            state.templates[storagePath] = t;
+            _saveState(state);
+        },
+
+        /** Clear a broken flag (after a re-stash) so the template syncs again. */
+        clearBroken: function (storagePath) {
+            var state = _loadState();
+            if (state.templates && state.templates[storagePath]) {
+                delete state.templates[storagePath].broken;
+                delete state.templates[storagePath].brokenTs;
+                _saveState(state);
+            }
+        },
+
+        /**
+         * Resolve the local mirror directory for a storagePath (library root +
+         * "/Category/Folder"). Returns '' if no library path is configured. Used by
+         * the import flow to write a freshly-downloaded bundle straight into the
+         * PERSISTENT mirror instead of a temp dir that later gets deleted (deleting
+         * a temp bundle broke by-path footage references and popped AE's native
+         * "missing files" modal seconds after import).
+         */
+        getTemplateMirrorDir: function (storagePath) {
+            return _localPath(storagePath);
+        },
+
+        /** Ensure the mirror directory tree exists for a storagePath; resolves the dir. */
+        ensureTemplateMirrorDir: function (storagePath) {
+            var libPath = _getLibraryPath();
+            if (!libPath) return Promise.reject(new Error('Library path not configured'));
+            return _ensureLibraryRoot().then(function () {
+                return _ensureDirs(libPath, storagePath);
+            }).then(function () {
+                return _localPath(storagePath);
+            });
+        },
+
+        /**
+         * After an import bundle (AEP + footage) has been written into the local
+         * mirror dir, mark the template complete so the NEXT import takes the instant
+         * local fast-path and the synced counter reflects it. Verifies the .aep landed
+         * non-empty first. Merges into any existing entry so a prior thumbComplete is
+         * preserved. Resolves true if marked complete.
+         */
+        markTemplateComplete: function (storagePath, aepFsPath, contentVersion) {
+            if (!storagePath || !aepFsPath) return Promise.resolve(false);
+            function _mark() {
+                var state = _loadState();
+                if (!state.templates) state.templates = {};
+                var prev = state.templates[storagePath] || {};
+                prev.ts = Date.now();
+                prev.complete = true;
+                prev.contentVersion = contentVersion || '';
+                state.templates[storagePath] = prev;
+                _saveState(state);
+                return true;
+            }
+            var safe = aepFsPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+            return _callExtendScript('blitzLocalExists("' + safe + '")').then(function (st) {
+                var ok = !!(st && st.exists && st.size > 0);
+                if (!ok) return false;
+                return _mark();
+            }, function () {
+                // Verify CALL errored transiently; the write already succeeded, so
+                // trust the .aep presence and mark complete (best-effort size gate).
+                return _mark();
+            });
         },
 
         /**

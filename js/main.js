@@ -408,6 +408,7 @@
         'import': 600000,                // 10 min — large AEP imports
         'generatePreviewFrames': 120000, // 2 min — frame render
         'stash': 300000,                 // 5 min — stash + read-back + upload
+        'batch': 900000,                 // 15 min — Generate Missing batch; RE-ARMED per comp in processNext so it only fires if the whole batch is truly wedged (not mid-healthy-run)
         'unknown': 90000
     };
     function setStashInProgress(val, label) {
@@ -446,10 +447,19 @@
     var bulkMode = false; // Whether bulk selection mode is active
 
     // Favorites and recent comps
-    var favoriteComps = []; // Array of uniqueIds
+    var favoriteComps = []; // Array of uniqueIds (legacy local-only cache / offline fallback)
     var recentComps = []; // Array of {uniqueId, timestamp}
     var MAX_RECENT_COMPS = 10;
     var cachedLibraryPath = null; // In-memory cache for library path
+
+    // Team-shared favorites (server-backed). teamFavorites holds EVERY member's
+    // favorites so the Favorites view can be filtered by editor; myFavoritePaths
+    // drives the star toggle state for the logged-in user.
+    var teamFavorites = [];        // [{storagePath,userId,teamMemberId,memberName}]
+    var myFavoritePaths = {};      // storagePath -> true (mine)
+    var favEditorFilter = 'all';   // 'all' | userId — Favorites view editor filter
+    var templateSubmitters = {};   // storagePath -> submitterName (approved templates)
+    var submitterFilter = 'all';   // 'all' | submitterName — library "submitted by" filter
 
     // Drag and drop state
     var draggedComp = null;
@@ -761,9 +771,60 @@
         var pathInput = document.getElementById('sync-library-path');
         var browseBtn = document.getElementById('sync-path-browse');
         var saveBtn = document.getElementById('sync-path-save');
+        var revealBtn = document.getElementById('sync-path-reveal');
         var forceBtn = document.getElementById('sync-force-all');
+        var resolvedEl = document.getElementById('sync-path-resolved');
+        var capacityEl = document.getElementById('sync-path-capacity');
+        var statusEl = document.getElementById('sync-path-status');
 
         if (!badge || !settings) return;
+
+        // Inline status line inside the settings panel (NOT a toast, per house rule).
+        // level: 'info' | 'warn' | 'error'.
+        var _setPathStatus = function (msg, level) {
+            if (!statusEl) return;
+            if (!msg) { statusEl.style.display = 'none'; statusEl.textContent = ''; return; }
+            statusEl.textContent = msg;
+            statusEl.className = 'sync-path-status sync-path-status-' + (level || 'info');
+            statusEl.style.display = 'block';
+        };
+
+        // Show the FULL resolved path (not the clipped input), a Reveal button, and
+        // the drive free-space so the user always knows WHERE sync writes and whether
+        // the drive has room for the ~67 GB library.
+        var _renderPathInfo = function (path) {
+            if (resolvedEl) {
+                if (path) {
+                    resolvedEl.textContent = path;
+                    resolvedEl.title = path;
+                    resolvedEl.style.display = 'block';
+                } else {
+                    resolvedEl.style.display = 'none';
+                }
+            }
+            if (revealBtn) revealBtn.style.display = path ? '' : 'none';
+            if (!capacityEl) return;
+            if (!path || !window.localSync || !window.localSync.getDiskFree) {
+                capacityEl.style.display = 'none';
+                return;
+            }
+            window.localSync.getDiskFree(path).then(function (info) {
+                if (!info || info.error || !info.totalBytes) { capacityEl.style.display = 'none'; return; }
+                var free = formatBytesShort(info.freeBytes);
+                var total = formatBytesShort(info.totalBytes);
+                var volNote = 'Library folder - ' + free + ' free of ' + total;
+                capacityEl.textContent = volNote;
+                // ~67 GB library; warn (do not block) if the drive clearly lacks room.
+                var LIBRARY_EST = 70 * 1024 * 1024 * 1024;
+                if (info.freeBytes > 0 && info.freeBytes < LIBRARY_EST) {
+                    capacityEl.className = 'sync-path-capacity sync-path-capacity-low';
+                    capacityEl.textContent = volNote + ' (the full library needs about 67 GB)';
+                } else {
+                    capacityEl.className = 'sync-path-capacity';
+                }
+                capacityEl.style.display = 'block';
+            }, function () { capacityEl.style.display = 'none'; });
+        };
 
         // Show sync UI if localSync is available
         if (window.localSync) {
@@ -771,7 +832,8 @@
             if (currentPath) {
                 badge.style.display = 'flex';
                 settings.style.display = 'block';
-                if (pathInput) pathInput.value = currentPath;
+                if (pathInput) { pathInput.value = currentPath; pathInput.title = currentPath; }
+                _renderPathInfo(currentPath);
                 _updateSyncBadge();
                 // Show default path suggestion if not set
                 window.localSync.getDefaultPath().then(function(defPath) {
@@ -791,23 +853,67 @@
                 }).catch(function() {});
             }
 
-            // Badge click toggles settings visibility
+            // Badge click opens the ONE sync surface: the Sync and Analytics
+            // dashboard (same destination as the nav item). Previously it toggled a
+            // second path panel in the sidebar, which is the confusing "two ways in"
+            // Petter flagged. The path editor lives only in the sidebar block below.
             badge.addEventListener('click', function() {
-                settings.style.display = settings.style.display === 'none' ? 'block' : 'none';
+                if (!window.localSync.getLibraryPath()) {
+                    // No path set yet: make sure the sidebar editor is visible so they
+                    // can choose a folder (nothing to show in the dashboard yet).
+                    if (settings) settings.style.display = 'block';
+                    return;
+                }
+                activeCategory = '__sync';
+                updateNavActiveState();
+                renderSyncDashboard();
+                var paths = [];
+                for (var bsi = 0; bsi < allComps.length; bsi++) if (allComps[bsi].storagePath) paths.push(allComps[bsi].storagePath);
+                var st = window.localSync.getFullSyncStatus(paths);
+                if (!st.running && !st.paused && st.pending > 0) _startFullLibrarySync();
+                _syncDashTick();
             });
 
-            // Save path button
+            // Save path button — inline status, no toast (house rule).
             if (saveBtn) {
                 saveBtn.addEventListener('click', function() {
-                    var path = (pathInput && pathInput.value.trim()) || pathInput.placeholder;
-                    if (!path) { showToast('Enter a library path first', true); return; }
-                    window.localSync.setLibraryPath(path).then(function(savedPath) {
-                        showToast('Library path set: ' + savedPath);
-                        settings.style.display = 'none';
-                        _updateSyncBadge();
-                    }).catch(function(err) {
-                        showToast('Failed: ' + (err && err.message || err), true);
-                    });
+                    var path = (pathInput && pathInput.value.trim()) || (pathInput && pathInput.placeholder);
+                    if (!path) { _setPathStatus('Enter a library path first.', 'warn'); return; }
+                    // Soft writability/capacity check BEFORE committing (never blocks).
+                    var _commit = function () {
+                        window.localSync.setLibraryPath(path).then(function(savedPath) {
+                            if (pathInput) { pathInput.value = savedPath; pathInput.title = savedPath; }
+                            _renderPathInfo(savedPath);
+                            _setPathStatus('Library folder set. New downloads go here.', 'info');
+                            _updateSyncBadge();
+                        }, function(err) {
+                            _setPathStatus('Could not set that folder: ' + (err && err.message || err), 'error');
+                        });
+                    };
+                    if (window.localSync.getDiskFree) {
+                        window.localSync.getDiskFree(path).then(function (info) {
+                            if (info && !info.error && info.totalBytes && info.writable === false) {
+                                _setPathStatus('That folder is not writable. Pick another location or drive.', 'error');
+                                return;
+                            }
+                            _commit();
+                        }, function () { _commit(); });
+                    } else { _commit(); }
+                });
+            }
+
+            // Reveal button — open the library folder in Finder so the user SEES it.
+            if (revealBtn) {
+                revealBtn.addEventListener('click', function() {
+                    var path = window.localSync.getLibraryPath();
+                    if (!path) { _setPathStatus('Set a library path first.', 'warn'); return; }
+                    if (!window.__adobe_cep__ || !window.localSync.revealInFinder) {
+                        _setPathStatus('Reveal is only available inside After Effects.', 'warn');
+                        return;
+                    }
+                    window.localSync.revealInFinder(path).then(function (r) {
+                        if (r && r.error) _setPathStatus('Could not open the folder: ' + r.error, 'error');
+                    }, function () {});
                 });
             }
 
@@ -815,7 +921,7 @@
             if (browseBtn) {
                 browseBtn.addEventListener('click', function() {
                     if (!window.__adobe_cep__) {
-                        showToast('Browse only available inside After Effects', true);
+                        _setPathStatus('Browse is only available inside After Effects.', 'warn');
                         return;
                     }
                     safeEvalScript('blitzPickFolder()', function(result) {
@@ -825,66 +931,40 @@
                             if (picked.charAt(0) === '"' && picked.charAt(picked.length - 1) === '"') {
                                 picked = picked.substring(1, picked.length - 1);
                             }
-                            if (pathInput) pathInput.value = picked;
+                            // Keep the library self-contained in a named subfolder so
+                            // picking a drive root (e.g. /Volumes/LaCie) does not scatter
+                            // category folders across the drive.
+                            var tail = picked.replace(/[\/\\]+$/, '');
+                            if (tail.toLowerCase().indexOf('blitzkrieg library') === -1) {
+                                picked = tail + '/Blitzkrieg Library';
+                            }
+                            if (pathInput) { pathInput.value = picked; pathInput.title = picked; }
+                            // Preview the picked drive's capacity before the user commits.
+                            _renderPathInfo(picked);
+                            _setPathStatus('Click Set Library Path to confirm this location.', 'info');
                         }
                     });
                 });
             }
 
-            // Force sync all button
+            // "Open Sync Manager" button — routes to the Sync & Analytics view which
+            // shows live ETA, per-template status, and pause/resume for the full
+            // background mirror. (Replaces the old blind syncAll that gave no feedback.)
             if (forceBtn) {
                 forceBtn.addEventListener('click', function() {
                     if (!window.localSync.getLibraryPath()) {
                         showToast('Set a library path first', true);
                         return;
                     }
+                    activeCategory = '__sync';
+                    updateNavActiveState();
+                    renderSyncDashboard();
+                    // Kick the background mirror if it is idle with work pending.
                     var paths = [];
-                    var versionMap = {};
-                    for (var fsi = 0; fsi < allComps.length; fsi++) {
-                        var _sp = allComps[fsi].storagePath;
-                        if (_sp) {
-                            paths.push(_sp);
-                            // Pass the current content version so Sync All also re-pulls
-                            // templates whose cloud content changed since they were synced,
-                            // not just ones that were never downloaded.
-                            versionMap[_sp] = allComps[fsi].contentVersion || '';
-                        }
-                    }
-                    if (paths.length === 0) { showToast('No templates to sync', true); return; }
-                    showToast('Starting full library sync...');
-                    forceBtn.disabled = true;
-                    forceBtn.textContent = 'Syncing...';
-                    window.localSync.syncAll(paths, function(progress) {
-                        // Intermediate progress only — completion is handled on resolve
-                        // (the progress count includes failures and would mislead).
-                        if (progress && progress.total > 0 && progress.current) {
-                            forceBtn.textContent = 'Syncing ' + progress.done + '/' + progress.total;
-                        }
-                    }, versionMap).then(function(result) {
-                        forceBtn.disabled = false;
-                        forceBtn.textContent = 'Sync All';
-                        var did = result ? (result.synced || 0) : 0;
-                        var failed = result ? (result.failed || 0) : 0;
-                        if (did === 0 && failed === 0) {
-                            showToast('Library already up to date');
-                        } else {
-                            showToast('Library sync complete: ' + did + ' synced' + (failed ? ', ' + failed + ' failed' : ''), failed > 0);
-                        }
-                        // Re-point freshly-synced templates at their disk mirror, then
-                        // refresh ONLY when a template view is active (renderCompsGrid
-                        // would otherwise rebuild analytics/submissions/review).
-                        _applyLocalAssetCache(allComps);
-                        if (activeCategory !== '__analytics'
-                            && String(activeCategory).indexOf('__submissions_') !== 0
-                            && activeCategory !== '__review_pending') {
-                            renderCompsGrid();
-                        }
-                        _updateSyncBadge();
-                    }, function(err) {
-                        forceBtn.disabled = false;
-                        forceBtn.textContent = 'Sync All';
-                        showToast('Sync failed: ' + (err && err.message || err), true);
-                    });
+                    for (var fsi = 0; fsi < allComps.length; fsi++) if (allComps[fsi].storagePath) paths.push(allComps[fsi].storagePath);
+                    var s = window.localSync.getFullSyncStatus(paths);
+                    if (!s.running && !s.paused && s.pending > 0) _startFullLibrarySync();
+                    _syncDashTick();
                 });
             }
         }
@@ -1173,12 +1253,10 @@
             });
         }
 
-        // Show footer for all users, but adjust button text for non-admins
+        // Auto-approve: everyone "adds" comps straight to the library.
         var isAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
-        if (!isAdmin) {
-            var addBtnSpan = document.querySelector('#add-comp-btn span');
-            if (addBtnSpan) addBtnSpan.textContent = 'Submit Selected Comp';
-        }
+        var addBtnSpan = document.querySelector('#add-comp-btn span');
+        if (addBtnSpan) addBtnSpan.textContent = 'Add Selected Comp';
 
         // Show/hide admin-only sidebar sections
         var adminSections = document.querySelectorAll('.nav-section-admin-only');
@@ -1646,6 +1724,13 @@
             // dozens of Supabase URLs on every launch (the "thumbnails reload every
             // launch" complaint). Stale/unsynced templates fall through to signing.
             _applyLocalAssetCache(allComps);
+            // Animation-Composer parity: after the grid paints, background-seed a
+            // local THUMBNAIL cache (comp.png only, ~158MB fleet-wide) so subsequent
+            // launches show thumbnails instantly from disk with zero network — instead
+            // of streaming ~378 remote images every launch. Full .aep Sync All stays
+            // manual. Guarded to run once per session; skips already-cached templates.
+            _autoSeedThumbnailMirror(allComps);
+            _loadTeamFavorites(); // refresh team-shared favorites + submitter map
             _invalidateCategoryCache();
             // Only render template grid if we're on a template view.
             // Do NOT overwrite analytics, submissions, or review views.
@@ -1667,11 +1752,21 @@
             // Update admin bar with missing thumbnail count
             updateAdminBarLabel();
 
-            // NO background auto-sync. Local mirroring is MANUAL only — the user
-            // triggers it with the "Sync All" button (#sync-force-all). This stops
-            // the panel from silently downloading the entire library on every
-            // launch. The badge still reflects current local-mirror coverage.
             _updateSyncBadge();
+            _updateSyncNavCount();
+
+            // Full-library background mirror (Petter opted into "download all").
+            // Auto-resume ONLY when the user has not explicitly paused/stopped it —
+            // so a deliberate Pause/Stop in the Sync view is respected across reloads,
+            // while a first load (or an interrupted run) picks up where it left off.
+            if (window.localSync && window.localSync.getFullSyncStatus && window.localSync.getLibraryPath && window.localSync.getLibraryPath()) {
+                var _fssPaths = [];
+                for (var _fi = 0; _fi < allComps.length; _fi++) if (allComps[_fi].storagePath) _fssPaths.push(allComps[_fi].storagePath);
+                var _fss = window.localSync.getFullSyncStatus(_fssPaths);
+                if (!_fss.paused && !_fss.cancelled && _fss.pending > 0) {
+                    _startFullLibrarySync();
+                }
+            }
 
             if (pendingLibraryReload) {
                 pendingLibraryReload = false;
@@ -1866,7 +1961,7 @@
             var actionBtns = (renameBtnHtml || deleteBtnHtml) ? (
                 '<div class="nav-item-actions">' + renameBtnHtml + deleteBtnHtml + '</div>'
             ) : '';
-            return '<div class="nav-item' + (isActive ? ' active' : '') + '" data-category="' + safeCat + '" draggable="false">' +
+            return '<div class="nav-item' + (isActive ? ' active' : '') + '" data-category="' + safeCat + '" title="' + safeLabel + '" draggable="false">' +
                 '<svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
                     '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>' +
                 '</svg>' +
@@ -1884,7 +1979,7 @@
                 var displayName = a.name.replace(/\.(rar|zip|7z)$/i, '');
                 var sizeStr = a.size > 1073741824 ? (a.size / 1073741824).toFixed(1) + ' GB' :
                               a.size > 1048576 ? (a.size / 1048576).toFixed(0) + ' MB' : '';
-                return '<div class="nav-item archive-item" data-archive="' + safeName + '" title="Archive — click to download">' +
+                return '<div class="nav-item archive-item" data-archive="' + safeName + '" title="Archive - click to download">' +
                     '<svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
                         '<path d="M21 8v13H3V8"></path><path d="M1 3h22v5H1z"></path><path d="M10 12h4"></path>' +
                     '</svg>' +
@@ -2063,8 +2158,11 @@
         // DYNAMIC PLAYBACK: Calculate interval to match actual composition duration
         var frameInterval = calculateFrameInterval(duration, previewFrames.length);
 
-        // Store original src for restoration
+        // Store original src for restoration. Mark the element as animating so
+        // handleThumbError does not blacklist the static thumbnail when a preview
+        // frame fails to load (they share this <img>).
         img.dataset.originalSrc = originalSrc;
+        img.dataset.animating = '1';
 
         // Pre-convert frame paths to proper URLs (handle both file paths and HTTP URLs)
         var frameSrcs = previewFrames.map(function(path) {
@@ -2102,10 +2200,30 @@
             previewAnimations[uniqueId].rafId = requestAnimationFrame(animate);
         }
 
+        // Preload the frames before cycling so the FIRST hover shows real images,
+        // not blank/half-decoded swaps (the "hover does nothing" symptom). The
+        // animation entry exists synchronously (rafId 0) so stopPreviewAnimation
+        // can cancel it even if the hover ends during preload; the rAF loop only
+        // starts once the first frame is decoded, or after a short safety timeout.
         previewAnimations[uniqueId] = {
-            rafId: requestAnimationFrame(animate),
+            rafId: 0,
             stop: function() { isRunning = false; }
         };
+        var _started = false;
+        function _beginLoop() {
+            if (_started || !isRunning || !previewAnimations[uniqueId]) return;
+            _started = true;
+            previewAnimations[uniqueId].rafId = requestAnimationFrame(animate);
+        }
+        var _first = new Image();
+        _first.onload = _beginLoop;
+        _first.onerror = _beginLoop; // never stall if frame 0 is missing
+        _first.src = frameSrcs[0];
+        for (var _pf = 1; _pf < frameSrcs.length; _pf++) {
+            var _pim = new Image();
+            _pim.src = frameSrcs[_pf];
+        }
+        setTimeout(_beginLoop, 600);
     }
 
     /**
@@ -2134,6 +2252,7 @@
         if (img && img.dataset.originalSrc) {
             img.src = img.dataset.originalSrc;
         }
+        if (img) img.dataset.animating = '';
 
         // Remove playing indicator
         var indicator = thumbnailContainer.querySelector('.preview-indicator');
@@ -2173,16 +2292,13 @@
             if (thumbBlacklist[c.storagePath]) return true;
             return false;
         }).length;
-        var noPreview = cloudComps.filter(function(c) {
-            return !c.previewFrameCount;
-        }).length;
-        if (missing === 0 && noPreview === 0) {
-            label.textContent = 'All ' + cloudComps.length + ' templates have thumbnails + previews';
+        // Report only missing THUMBNAILS. Preview animations are optional hover
+        // eye-candy and are NOT part of "Generate Missing" (batch-rendering them
+        // froze AE) — so we no longer nag about them here.
+        if (missing === 0) {
+            label.textContent = 'All ' + cloudComps.length + ' templates have thumbnails';
         } else {
-            var parts = [];
-            if (missing > 0) parts.push(missing + ' missing thumbnails');
-            if (noPreview > 0) parts.push(noPreview + ' missing previews');
-            label.textContent = parts.join(', ') + (refreshCepBridgeState()
+            label.textContent = missing + ' missing thumbnail' + (missing === 1 ? '' : 's') + (refreshCepBridgeState()
                 ? '. Click Generate to fix'
                 : '. Open in After Effects to generate');
         }
@@ -2199,11 +2315,38 @@
             badge.style.display = 'none';
             return;
         }
-        var state = window.localSync.getSyncState();
-        var synced = (state && typeof state.synced === 'number') ? state.synced : 0;
+        // Headline number = FULL-mirror count (templates whose .aep + footage are on
+        // disk) because that is exactly what makes an import instant/offline — the same
+        // `complete` flag the import fast-path gates on. Counting thumbnails here was the
+        // "246 synced but import still downloads" lie. Thumbnail-cache count goes in the
+        // tooltip so the two are never conflated. Every import now mirrors its template,
+        // so this number climbs on its own; "Sync Remaining" completes the rest.
         var cloudComps = allComps.filter(function(c) { return !!c.storagePath; });
         var total = cloudComps.length;
-        var displaySynced = Math.min(synced, total); // clamp — cloud deletions can make synced > total
+        // Count only CURRENT-library templates that are truly import-ready (full .aep
+        // mirrored AND content-current) by intersecting allComps with the sync state.
+        // A global complete-count could include stale entries for cloud-deleted templates
+        // and over-report readiness.
+        var _syncItems = [];
+        for (var _ci = 0; _ci < cloudComps.length; _ci++) {
+            _syncItems.push({ storagePath: cloudComps[_ci].storagePath, contentVersion: cloudComps[_ci].contentVersion || '' });
+        }
+        var displaySynced = 0;
+        var thumbCached = 0;
+        try {
+            var _readyMap = (window.localSync.getLocalDirsIfComplete ? window.localSync.getLocalDirsIfComplete(_syncItems) : {}) || {};
+            var _thumbMap = (window.localSync.getLocalThumbDirs ? window.localSync.getLocalThumbDirs(_syncItems) : {}) || {};
+            for (var _ri = 0; _ri < cloudComps.length; _ri++) {
+                var _sp = cloudComps[_ri].storagePath;
+                if (_readyMap[_sp]) displaySynced++;
+                if (_thumbMap[_sp]) thumbCached++;
+            }
+        } catch (_e) {
+            var _st = window.localSync.getSyncState();
+            displaySynced = Math.min((_st && _st.synced) || 0, total);
+            thumbCached = Math.min((_st && _st.thumbSynced) || 0, total);
+        }
+        var thumbTip = thumbCached > 0 ? ' · ' + thumbCached + '/' + total + ' thumbnails cached' : '';
 
         badge.style.display = 'flex';
         if (total === 0) {
@@ -2212,15 +2355,15 @@
             badge.innerHTML = '<svg class="sync-badge-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><span>No templates</span>';
         } else if (displaySynced >= total) {
             badge.className = 'sync-badge sync-badge-complete';
-            badge.title = 'Library fully synced: ' + displaySynced + '/' + total;
+            badge.title = 'All ' + total + ' templates ready for instant offline import' + thumbTip;
             badge.innerHTML = '<svg class="sync-badge-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg><span>' + displaySynced + '/' + total + ' synced</span>';
         } else if (displaySynced > 0) {
             badge.className = 'sync-badge sync-badge-partial';
-            badge.title = 'Syncing: ' + displaySynced + '/' + total + ' cached locally. Click to sync all.';
-            badge.innerHTML = '<svg class="sync-badge-icon sync-spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg><span>' + displaySynced + '/' + total + ' synced</span>';
+            badge.title = displaySynced + '/' + total + ' templates ready for instant import' + thumbTip + '. Click, then Sync Remaining to finish.';
+            badge.innerHTML = '<svg class="sync-badge-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg><span>' + displaySynced + '/' + total + ' synced</span>';
         } else {
             badge.className = 'sync-badge sync-badge-none';
-            badge.title = 'Nothing synced yet. Click to start.';
+            badge.title = 'No templates mirrored for offline import yet' + thumbTip + '. Click, then Sync Remaining.';
             badge.innerHTML = '<svg class="sync-badge-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><span>0/' + total + ' synced</span>';
         }
     }
@@ -2236,7 +2379,11 @@
     function _applyLocalAssetCache(comps) {
         if (!comps || !comps.length) return;
         if (!window.localSync || typeof window.localSync.getLibraryPath !== 'function' || !window.localSync.getLibraryPath()) return;
-        var hasBatch = typeof window.localSync.getLocalDirsIfComplete === 'function';
+        // Prefer the thumbnail-aware resolver so auto-seeded thumbnail-only mirrors
+        // (comp.png on disk, no full .aep) also serve their thumbnail from disk. Falls
+        // back to the complete-mirror resolver on older local-sync builds.
+        var hasThumbBatch = typeof window.localSync.getLocalThumbDirs === 'function';
+        var hasBatch = hasThumbBatch || typeof window.localSync.getLocalDirsIfComplete === 'function';
         if (!hasBatch && typeof window.localSync.getLocalDirIfComplete !== 'function') return;
         // Resolve every template's current local dir in ONE state parse. The per-comp
         // getLocalDirIfComplete re-parsed the whole sync-state blob ~2x per comp, so a
@@ -2249,7 +2396,11 @@
                     items.push({ storagePath: comps[j].storagePath, contentVersion: comps[j].contentVersion });
                 }
             }
-            try { dirMap = window.localSync.getLocalDirsIfComplete(items); } catch (e) { dirMap = null; }
+            try {
+                dirMap = hasThumbBatch
+                    ? window.localSync.getLocalThumbDirs(items)
+                    : window.localSync.getLocalDirsIfComplete(items);
+            } catch (e) { dirMap = null; }
         }
         var served = 0;
         for (var i = 0; i < comps.length; i++) {
@@ -2280,6 +2431,102 @@
             served++;
         }
         if (served > 0) debugLog('Cache: serving ' + served + ' thumbnail(s) from local disk mirror', 'info');
+    }
+
+    // Animation-Composer parity (complaint 1). A one-time, background, throttled seed of
+    // a local THUMBNAIL cache: download each template's comp.png (~420KB) to the local
+    // mirror so future launches paint thumbnails instantly from file:// with zero network.
+    // This is ~158MB fleet-wide (comp.png only) — NOT the ~67GB full library (that stays
+    // behind the manual Sync All). If no library path is configured yet, a default one is
+    // established so instant thumbnails work out of the box. Idempotent + resumable:
+    // already-cached templates are skipped, so it self-limits on later launches.
+    var _thumbSeedStarted = false;
+    function _autoSeedThumbnailMirror(comps) {
+        if (_thumbSeedStarted) return;
+        if (!window.localSync || !window.cloudLibrary) return;
+        if (typeof window.cloudLibrary.mirrorThumbnail !== 'function') return;
+        if (typeof window.localSync.syncThumbnail !== 'function'
+            || typeof window.localSync.getLocalThumbDirs !== 'function') return;
+        if (!comps || !comps.length) return;
+        _thumbSeedStarted = true;
+
+        function _run(libPath) {
+            // Only seed templates that actually have a thumbnail and are not already cached.
+            var items = [];
+            for (var i = 0; i < comps.length; i++) {
+                if (comps[i] && comps[i].storagePath && comps[i].thumbnailVerified) {
+                    items.push({ storagePath: comps[i].storagePath, contentVersion: comps[i].contentVersion });
+                }
+            }
+            var cachedMap = {};
+            try { cachedMap = window.localSync.getLocalThumbDirs(items); } catch (e) { cachedMap = {}; }
+            var todo = [];
+            for (var k = 0; k < items.length; k++) {
+                if (!cachedMap[items[k].storagePath]) todo.push(items[k]);
+            }
+            if (!todo.length) {
+                debugLog('Local thumbnail mirror already warm (' + items.length + ' templates)', 'info');
+                return;
+            }
+            debugLog('Auto-seeding local thumbnail mirror: ' + todo.length + ' of ' + items.length
+                + ' templates (~' + Math.round(todo.length * 0.42) + 'MB, background)', 'info');
+
+            var idx = 0, active = 0, done = 0, failed = 0;
+            var CONC = 3;
+            var reRenderQueued = false;
+            function _reRenderThrottled(delay) {
+                if (reRenderQueued) return;
+                reRenderQueued = true;
+                setTimeout(function () {
+                    reRenderQueued = false;
+                    try {
+                        _applyLocalAssetCache(allComps);
+                        var onTemplateView = activeCategory !== '__analytics'
+                            && String(activeCategory).indexOf('__submissions_') !== 0
+                            && activeCategory !== '__review_pending';
+                        if (onTemplateView && typeof renderCompsGrid === 'function') renderCompsGrid();
+                    } catch (e) {}
+                }, delay || 1500);
+            }
+            function _next() {
+                if (idx >= todo.length) {
+                    if (active === 0) {
+                        debugLog('Local thumbnail mirror seed complete: ' + done + ' cached, ' + failed + ' skipped', 'info');
+                        _reRenderThrottled(200);
+                        _updateSyncBadge(); // reflect newly-cached thumbnails in "N/250 synced"
+                    }
+                    return;
+                }
+                var it = todo[idx++];
+                active++;
+                window.localSync.syncThumbnail(it.storagePath, it.contentVersion).then(function () {
+                    done++; active--;
+                    if (done % 25 === 0) _reRenderThrottled();
+                    _next();
+                }, function () {
+                    // A single template failing (e.g. no comp.png) never aborts the seed.
+                    failed++; active--;
+                    _next();
+                });
+            }
+            for (var c = 0; c < CONC && c < todo.length; c++) _next();
+        }
+
+        var existingPath = window.localSync.getLibraryPath();
+        if (existingPath) { _run(existingPath); return; }
+        // No library path yet — establish the default so instant thumbnails work out of
+        // the box. Thumbnails only (~158MB); never auto-downloads the full library.
+        window.localSync.getDefaultPath().then(function (defPath) {
+            return window.localSync.setLibraryPath(defPath);
+        }).then(function (setPath) {
+            debugLog('Local thumbnail mirror path established at ' + setPath, 'info');
+            _run(setPath);
+        }, function (err) {
+            // Could not create the mirror dir — leave thumbnails on the cloud path and
+            // allow a retry on a later launch.
+            debugLog('Could not establish local thumbnail mirror path: ' + (err && err.message || err), 'warn');
+            _thumbSeedStarted = false;
+        });
     }
 
     function buildCompCardHtml(comp) {
@@ -2329,6 +2576,12 @@
             generatePreviewBtn = '<button class="generate-preview-btn' + cepDisabledClass + '" title="' + escapeHTML(hasCepBridge ? 'Generate Thumbnail' : cepActionTitle) + '"' + cepDisabledAttr + '><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg> Thumb</button>';
         } else if (!hasPreview && !comp.storagePath) {
             generatePreviewBtn = '<button class="generate-preview-btn' + cepDisabledClass + '" title="' + escapeHTML(hasCepBridge ? 'Generate Preview Animation' : cepActionTitle) + '"' + cepDisabledAttr + '><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> Preview</button>';
+        } else if (isAdmin && comp.storagePath && comp.thumbnailVerified && !hasPreview && !isBlacklisted) {
+            // Has a static thumbnail but NO hover preview frames. Offer a targeted,
+            // per-comp preview render (the same safe on-demand full render as the
+            // per-card Generate) so admins can backfill the missing hover animation
+            // without the all-library "Regenerate All" pass that froze AE.
+            generatePreviewBtn = '<button class="generate-preview-btn' + cepDisabledClass + '" title="' + escapeHTML(hasCepBridge ? 'Generate Preview Animation' : cepActionTitle) + '"' + cepDisabledAttr + '><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> Preview</button>';
         }
         // Suppress Generate on a needs-repair tile: generation imports the .aep to
         // render a frame, so with no .aep it would fail exactly like Import.
@@ -2359,7 +2612,7 @@
             ? '<img' + (thumbSrc ? ' data-src="' + safeThumbSrc + '"' : '') + altAttr + localThumbAttr + cloudThumbAttrs + ' alt="Thumbnail" class="comp-thumbnail lazy-thumb">' + placeholderHtml
             : placeholderHtml;
 
-        var isFav = isFavorite(comp.uniqueId);
+        var isFav = isFavoriteComp(comp);
         var favClass = isFav ? ' is-favorite' : '';
         var favTitle = isFav ? 'Remove from favorites' : 'Add to favorites';
         var favFill = isFav ? 'currentColor' : 'none';
@@ -2418,6 +2671,13 @@
     }
 
     function renderCompsGrid() {
+        // Leaving the Sync view (or re-entering any view) stops its live refresh timer.
+        if (activeCategory !== '__sync') _clearSyncViewTimer();
+        // Special (__-prefixed) views never show the template filter bar.
+        if (activeCategory.indexOf('__') === 0) {
+            var _gfb = document.getElementById('grid-filter-bar');
+            if (_gfb) _gfb.style.display = 'none';
+        }
         // Guard: if a special view is active, delegate and don't render template cards
         var adminBar = document.getElementById('admin-generate-bar');
         if (activeCategory === '__analytics') {
@@ -2435,8 +2695,18 @@
             renderSubmissionsGrid('pending_review');
             return;
         }
-        // Show admin bar for template views
+        if (activeCategory === '__sync') {
+            if (adminBar) adminBar.style.display = 'none';
+            renderSyncDashboard();
+            return;
+        }
+        // Template view: restore the grid chrome (search, sort, grid-size) that the
+        // virtual views hide, and show the admin bar.
+        _setTemplateChromeVisible(true);
         if (adminBar) adminBar.style.display = '';
+
+        // Editor / submitter filter bar (Favorites view + submitter data).
+        _renderGridFilterBar();
 
         // Inject bulk action bar if admin (once)
         var renderIsAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
@@ -2469,11 +2739,8 @@
         });
         previewAnimations = {};
 
-        // Update favorites count in sidebar
-        var favCountEl = document.getElementById('favorites-count');
-        if (favCountEl) {
-            favCountEl.textContent = favoriteComps.length;
-        }
+        // Update favorites count in sidebar (team-aware)
+        _updateFavoritesCount();
 
         // Update recent count in sidebar
         var recentCountEl = document.getElementById('recent-count');
@@ -2505,12 +2772,15 @@
         var filteredComps = sortComps(allComps.filter(function (comp) {
             // Filter by category (parentheses for clarity)
             var matchesCategory = (activeCategory === 'All') ||
-                                  (activeCategory === 'Favorites' && isFavorite(comp.uniqueId)) ||
+                                  (activeCategory === 'Favorites' && _isInFavoritesView(comp)) ||
                                   (activeCategory === 'Recent' && isRecent(comp.uniqueId)) ||
                                   (comp.categories && comp.categories.indexOf(activeCategory) !== -1);
             // Filter by search — indexOf instead of ES6 .includes() for CEP 8/9 compat
             var matchesSearch = !searchTerm || buildSearchText(comp).indexOf(searchTerm) !== -1;
-            return matchesCategory && matchesSearch;
+            // "Submitted by" filter (applies to All + real categories, not the virtual views).
+            var matchesSubmitter = submitterFilter === 'all'
+                || (comp.storagePath && templateSubmitters[comp.storagePath] === submitterFilter);
+            return matchesCategory && matchesSearch && matchesSubmitter;
         }));
         if (filteredComps.length === 0) {
             if (allComps.length === 0) {
@@ -2554,6 +2824,15 @@
     // Error handler: try alt URL first, then hide broken img, show placeholder, blacklist
     function handleThumbError() {
         var img = this;
+        // Hover-animation guard: the preview animation swaps THIS element's src to
+        // preview-frame URLs. If a frame 404s or its signature expired, onerror fires
+        // here — but the STATIC thumbnail is fine, so we must NOT blacklist it (which
+        // used to turn a perfectly good tile into a placeholder just for hovering it).
+        // Restore the original thumbnail and let the animation loop continue.
+        if (img.dataset.animating === '1') {
+            if (img.dataset.originalSrc) img.src = img.dataset.originalSrc;
+            return;
+        }
         // Try alt thumbnail URL before giving up (comp.png vs thumbnail.png)
         if (img.dataset.srcAlt && !img.dataset.altTried) {
             img.dataset.altTried = '1';
@@ -2709,6 +2988,7 @@
             var previewCount = parseInt(item.dataset.previewCount) || 0;
             var duration = parseFloat(item.dataset.duration) || 0;
             var signingInProgress = false;
+            var hovering = false;   // true only while the pointer is over this card
             var cachedFrameUrls = null;
 
             // Pre-parse local preview frame URLs if available
@@ -2721,6 +3001,7 @@
 
             if (thumbnailContainer && (cachedFrameUrls || (previewCount > 0 && storagePath))) {
                 item.addEventListener('mouseenter', function() {
+                    hovering = true;
                     if (cachedFrameUrls) {
                         // Already have URLs — start immediately
                         startPreviewAnimation(thumbnailContainer, cachedFrameUrls, uniqueId, duration);
@@ -2743,7 +3024,12 @@
                                         break;
                                     }
                                 }
-                                startPreviewAnimation(thumbnailContainer, urls, uniqueId, duration);
+                                // Only animate if the pointer is STILL over the card.
+                                // The sign round-trip can resolve after mouseleave; without
+                                // this guard it would start an orphan animation that never
+                                // gets a mouseleave to stop it, leaving img.dataset.animating
+                                // stuck at '1' and swallowing later real thumbnail errors.
+                                if (hovering) startPreviewAnimation(thumbnailContainer, urls, uniqueId, duration);
                             } else {
                                 item.classList.remove('has-preview');
                                 item.classList.add('preview-missing');
@@ -2755,6 +3041,7 @@
                     }
                 });
                 item.addEventListener('mouseleave', function() {
+                    hovering = false;
                     stopPreviewAnimation(thumbnailContainer, uniqueId);
                 });
             }
@@ -2892,6 +3179,14 @@
                 analyticsDateRange = '30d';
             }
 
+            // Reset the grid filters on any nav switch so a filter set in one view
+            // (e.g. "Submitted by: X" on All, or an editor filter in Favorites) can
+            // never silently hide rows in a different view whose chip is not shown.
+            if (navItem.dataset.category !== activeCategory) {
+                submitterFilter = 'all';
+                favEditorFilter = 'all';
+            }
+
             activeCategory = navItem.dataset.category;
 
             // Update visual active state for all nav items
@@ -2908,13 +3203,12 @@
                 renderAnalyticsDashboard();
                 return;
             }
-            if (activeCategory.indexOf('__submissions_') === 0) {
-                var statusFilter = activeCategory.replace('__submissions_', '');
-                renderSubmissionsGrid(statusFilter);
-                return;
-            }
-            if (activeCategory === '__review_pending') {
-                renderSubmissionsGrid('pending_review');
+            // My Submissions (Pending/Approved) nav was removed: submissions
+            // auto-publish to the library on Add, so there is no pending/approved
+            // distinction to browse. The renderer is left in place (dead code) only
+            // as a defensive guard; it is no longer reachable from the sidebar.
+            if (activeCategory === '__sync') {
+                renderSyncDashboard();
                 return;
             }
 
@@ -3117,11 +3411,32 @@
             newCatGroup.style.display = addSignedIn ? '' : 'none';
         }
 
-        // Update confirm button to match role: admin = "Add Comp", everyone else = "Submit for Review"
+        // Auto-approve: everyone adds straight to the library (no review step).
         var isAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
-        confirmAddBtn.textContent = isAdmin ? 'Add Comp' : 'Submit for Review';
+        confirmAddBtn.textContent = 'Add Comp';
 
         addCompModal.style.display = 'flex';
+    }
+
+    // Promise wrapper around the read-only host footprint estimate. Resolves the parsed
+    // {bytes, footageMissing} or null (missing/failed/no-host), with an 8s safety timeout
+    // so a stuck host bridge can never hang the submit. safeEvalScript always invokes its
+    // callback, so in normal operation this resolves promptly.
+    function _estimateStashFootprint() {
+        return new Promise(function(resolve) {
+            var settled = false;
+            function done(v) { if (!settled) { settled = true; resolve(v); } }
+            // 15s (was 8s): the estimate is slowest precisely on the large/network-footage
+            // bundles most dangerous to collect, and a null result skips the oversize gate.
+            // A longer budget makes the gate actually fire on those instead of failing open.
+            setTimeout(function() { done(null); }, 15000);
+            try {
+                safeEvalScript('estimateStashFootprint()', function(estRaw) {
+                    try { done(JSON.parse(estRaw)); }
+                    catch (e) { done(null); }
+                });
+            } catch (e) { done(null); }
+        });
     }
 
     function executeAddComp() {
@@ -3146,37 +3461,56 @@
         addCompModal.style.display = 'none';
         setStashInProgress(true, 'stash');
         showSpinner();
-        // Honest expectation: the export runs synchronously inside AE's host
-        // thread, so AE itself (not this panel) may be unresponsive for a moment
-        // on heavier comps. Tell the user so a brief freeze doesn't read as a crash.
-        showToast('Exporting from After Effects. AE may pause briefly...');
+        showToast('Checking composition...');
 
-        // Read-only pre-flight: ask the host for the bundle footage size and refine the
-        // warning with the honest number BEFORE the synchronous export freeze. The host
-        // serializes this quick read ahead of the stash below, so the refined toast lands
-        // first. Non-blocking: the stash proceeds regardless, and the post-export size
-        // gates still enforce the real limits, so a wrong/absent estimate never blocks a
-        // valid upload (it just falls back to the generic message).
-        safeEvalScript('estimateStashFootprint()', function(estRaw) {
-            try {
-                var est = JSON.parse(estRaw);
-                if (est && typeof est.bytes === 'number') {
-                    var gb = est.bytes / (1024 * 1024 * 1024);
-                    var msg = '';
-                    if (est.bytes > MAX_UPLOAD_TOTAL_BYTES) {
-                        msg = 'Heads up: this bundles about ' + gb.toFixed(1) + ' GB, over the ' + formatBytesShort(MAX_UPLOAD_TOTAL_BYTES) + ' limit. After Effects will pause while it collects files; if the upload is rejected, upload it manually via the offline library.';
-                    } else if (gb >= 1.5) {
-                        msg = 'Heads up: this bundles about ' + gb.toFixed(1) + ' GB of footage. After Effects will pause for up to a minute while it copies. Do not force-quit.';
-                    }
-                    if (est.footageMissing && est.footageMissing > 0) {
-                        msg = (msg ? msg + ' ' : '') + est.footageMissing + ' source file(s) are offline, so the bundle may be incomplete.';
-                    }
-                    if (msg) showToast(msg);
-                }
-            } catch (e) { /* no estimate: keep the generic message */ }
-        });
-
+        // Correlates the pre-export crash breadcrumb (submit_start) with its outcome
+        // (submit_end). A submit_start with no matching submit_end for this trace = an AE
+        // crash during the synchronous export that killed the JS context before any error
+        // could be logged (the actual "AE just crashes when I submit" class).
+        var submitTraceId = 'sub_' + Date.now() + '_' + Math.floor(Math.random() * 1e6);
         var safeCategory = escapeForExtendScript(categoryName);
+
+        // Pre-flight footage estimate, now BLOCKING for the over-limit case. Collecting a
+        // multi-GB bundle runs synchronously on AE's UI thread (reduceProject + footage
+        // copy) and can make AE unresponsive or crash; if it is ALSO over the upload limit
+        // it can never be published, so we stop BEFORE the risky export and point to the
+        // offline path. A missing/failed estimate resolves null and never blocks a valid
+        // upload (the post-export gates still enforce the real limits).
+        _estimateStashFootprint().then(function(est) {
+            var estBytes = (est && typeof est.bytes === 'number') ? est.bytes : null;
+            var footageMissing = (est && typeof est.footageMissing === 'number') ? est.footageMissing : 0;
+
+            if (estBytes !== null && estBytes > MAX_UPLOAD_TOTAL_BYTES) {
+                var gbOver = estBytes / (1024 * 1024 * 1024);
+                showToast('This composition bundles about ' + gbOver.toFixed(1) + ' GB of footage, over the ' + formatBytesShort(MAX_UPLOAD_TOTAL_BYTES) + ' limit. It cannot be submitted, and collecting it may make After Effects unresponsive. Reduce or relink the footage, or add it via the offline library.', true);
+                if (window.blitzkriegAnalytics && window.blitzkriegAnalytics.trackSubmitEnd) {
+                    window.blitzkriegAnalytics.trackSubmitEnd(submitTraceId, categoryName, 'blocked_oversize', estBytes + ' bytes');
+                }
+                setStashInProgress(false);
+                hideSpinner();
+                return;
+            }
+
+            // Non-blocking heads-up for large-but-allowed bundles / offline footage.
+            var preMsg = '';
+            if (estBytes === null) {
+                // The estimate timed out or failed, so the oversize gate above could not
+                // run (it fails open). Warn clearly that the size is unverified and the
+                // collect may pause AE, rather than proceeding silently into a possible
+                // multi-GB synchronous collect freeze.
+                preMsg = 'Could not verify this composition\'s footage size. If it is large, After Effects may pause or briefly stop responding while it collects. Do not force-quit; if it has a lot of heavy footage, consider the offline library instead.';
+            } else if ((estBytes / (1024 * 1024 * 1024)) >= 1.5) {
+                preMsg = 'Heads up: this bundles about ' + (estBytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB of footage. After Effects will pause for up to a minute while it copies. Do not force-quit.';
+            }
+            if (footageMissing > 0) {
+                preMsg = (preMsg ? preMsg + ' ' : '') + footageMissing + ' source file(s) are offline, so the bundle may be incomplete.';
+            }
+            showToast(preMsg || 'Exporting from After Effects. AE may pause briefly...');
+
+            // Crash breadcrumb — persisted BEFORE the synchronous export.
+            if (window.blitzkriegAnalytics && window.blitzkriegAnalytics.trackSubmitStart) {
+                window.blitzkriegAnalytics.trackSubmitStart(submitTraceId, categoryName, estBytes, footageMissing);
+            }
 
         safeEvalScript('stashSelectedCompToTemp("' + safeCategory + '")', function(result) {
             (async function() {
@@ -3216,8 +3550,58 @@
                         if (folderErr) {
                             throw new Error('Invalid folder name from stash: ' + folderErr);
                         }
-                        var pendingBasePath = 'pending/' + userId + '/' + files.folderName;
                         var sb = window.blitzkriegSupabase;
+
+                        // Re-verify the user id BEFORE the record + upload. The token is
+                        // freshest here (no long upload has happened yet), so an
+                        // insert-first row is guaranteed to carry the live JWT id that
+                        // RLS uses to let the submitter see and withdraw it. (This also
+                        // subsumes the old post-upload re-verify: with the insert done
+                        // up front, a token rotation during upload can no longer orphan
+                        // the row.)
+                        var liveUserResult = await sb.auth.getUser();
+                        var liveUser = liveUserResult && liveUserResult.data && liveUserResult.data.user;
+                        if (!liveUser || liveUser.id !== userId) {
+                            throw new Error('Auth session changed. Please log in again and resubmit.');
+                        }
+                        userId = liveUser.id;
+                        var pendingBasePath = 'pending/' + userId + '/' + files.folderName;
+
+                        // Derive the display name for the submission record.
+                        var submissionName = (files.metadata && (files.metadata.displayName || files.metadata.name)) || files.folderName;
+                        if (submissionName && /^[#@]/.test(submissionName)) submissionName = submissionName.replace(/^[#@]+/, '').trim();
+                        if (submissionName && /^\d+$/.test(submissionName.trim()) && files.metadata && files.metadata.displayName) {
+                            // If the metadata displayName is just a number, derive from folder name instead
+                            submissionName = files.folderName.replace(/[_-]\d{10,}/g, '').replace(/[_-]+$/, '').replace(/_\d{1,3}$/, '').replace(/[_-]/g, ' ').trim() || submissionName;
+                        }
+                        if (submissionName && submissionName.length > 255) submissionName = submissionName.substring(0, 255);
+
+                        // INSERT-FIRST (data-loss fix, complaint 3). Create the pending
+                        // submission row BEFORE uploading any bytes. If AE crashes or the
+                        // network drops mid-upload, the editor still SEES this submission
+                        // under Submissions > Pending (partial, withdraw-able) instead of
+                        // an invisible orphaned partial in storage with no record anywhere
+                        // (the exact "I uploaded a comp but it's not showing, no crash"
+                        // failure). Completeness is the storage metadata.json written LAST;
+                        // approval re-verifies it so a crashed partial cannot be published.
+                        var submissionId = null;
+                        var rowMeta = files.metadata || {};
+                        if (teamMember && teamMember.full_name && !rowMeta.submitterName) {
+                            rowMeta.submitterName = teamMember.full_name;
+                        }
+                        rowMeta.bundleAssetCount = files.bundleFiles ? files.bundleFiles.length : 0;
+                        showToast('Saving submission...');
+                        var insertResult = await sb.from('blitzkrieg_template_submissions').insert({
+                            user_id: userId,
+                            team_member_id: teamMember ? teamMember.id : null,
+                            template_name: submissionName,
+                            category: categoryName,
+                            storage_path: pendingBasePath,
+                            status: 'pending',
+                            metadata: rowMeta,
+                        }).select('id').single();
+                        if (insertResult.error) throw new Error('Submission record failed: ' + insertResult.error.message);
+                        submissionId = insertResult.data && insertResult.data.id;
 
                         // Upload AEP to pending path
                         showToast('Uploading composition file...');
@@ -3270,10 +3654,15 @@
                             await uploadBundleFilesLimited(pendingBasePath, files.bundleFiles);
                         }
 
-                        // Upload metadata
+                        // Upload metadata LAST — its presence in storage is the
+                        // "upload complete" signal that approval checks (a crashed
+                        // partial has no metadata.json). Error-checked so a failed
+                        // metadata write throws — the insert-first row then stays
+                        // visible as an incomplete pending item to retry/withdraw,
+                        // instead of a metadata-less folder that reads as "Untitled".
                         if (files.metadata) {
                             showToast('Uploading metadata...');
-                            files.metadata.bundleAssetCount = files.bundleFiles ? files.bundleFiles.length : 0;
+                            files.metadata.bundleAssetCount = rowMeta.bundleAssetCount;
                             // Record thumbnail truth at write time (only if the
                             // comp.png upload above actually succeeded) so the
                             // library reader never mislabels this as "missing
@@ -3284,58 +3673,40 @@
                             // reader never renders this as a "needs repair" tile.
                             files.metadata.hasAep = true;
                             var metaBlob = new Blob([JSON.stringify(files.metadata)], { type: 'application/json' });
-                            await sb.storage.from('blitzkrieg')
+                            var metaUpload = await sb.storage.from('blitzkrieg')
                                 .upload(pendingBasePath + '/metadata.json', metaBlob, {
                                     contentType: 'application/json',
                                     upsert: true,
                                 });
+                            if (metaUpload.error) throw new Error('Metadata upload failed: ' + metaUpload.error.message);
                         }
-
-                        // Re-verify the user id between upload and insert. Long
-                        // upload sessions can cross a Supabase token rotation;
-                        // an .insert() with a stale user_id orphans the
-                        // submission record (RLS rejects future updates by
-                        // the actual logged-in user).
-                        // Use the LIVE JWT via sb.auth.getUser() — the cached
-                        // window.blitzkriegAuth.getUser() may not reflect a
-                        // rotation that happened during upload, so the cached
-                        // check would pass while .insert() actually carries a
-                        // different access_token in its Authorization header.
-                        var liveUserResult = await sb.auth.getUser();
-                        var liveUser = liveUserResult && liveUserResult.data && liveUserResult.data.user;
-                        if (!liveUser || liveUser.id !== userId) {
-                            throw new Error('Auth session changed during upload. Please log in again and resubmit.');
-                        }
-                        // Pin to the live JWT id so insert() carries it.
-                        userId = liveUser.id;
-
-                        // Create submission record
-                        showToast('Saving submission...');
-                        var submissionName = (files.metadata && (files.metadata.displayName || files.metadata.name)) || files.folderName;
-                        // Sanitize: strip #/@ prefix, trim bare numbers
-                        if (submissionName && /^[#@]/.test(submissionName)) submissionName = submissionName.replace(/^[#@]+/, '').trim();
-                        if (submissionName && /^\d+$/.test(submissionName.trim()) && files.metadata && files.metadata.displayName) {
-                            // If the metadata displayName is just a number, derive from folder name instead
-                            submissionName = files.folderName.replace(/[_-]\d{10,}/g, '').replace(/[_-]+$/, '').replace(/_\d{1,3}$/, '').replace(/[_-]/g, ' ').trim() || submissionName;
-                        }
-                        if (submissionName && submissionName.length > 255) submissionName = submissionName.substring(0, 255);
-                        var insertResult = await sb.from('blitzkrieg_template_submissions').insert({
-                            user_id: userId,
-                            team_member_id: teamMember ? teamMember.id : null,
-                            template_name: submissionName,
-                            category: categoryName,
-                            storage_path: pendingBasePath,
-                            status: 'pending',
-                            metadata: files.metadata || {},
-                        });
-                        if (insertResult.error) throw new Error('Submission record failed: ' + insertResult.error.message);
 
                         safeEvalScript('cleanupTempStash("' + escapeForExtendScript(tempPath) + '")', function(cuRes) {
                             if (cuRes && cuRes.indexOf('ERROR') === 0) {
                                 debugLog('Temp stash cleanup failed: ' + cuRes, 'warn');
                             }
                         });
-                        showToast('Template submitted for review!');
+
+                        // AUTO-APPROVE (review queue removed): publish straight to the
+                        // live library. The edge fn moves the pending bundle into the
+                        // category and flips status to approved. One retry on a transient
+                        // storage-move failure; the pending row + bundle stay intact if it
+                        // still fails, so nothing is lost.
+                        showToast('Adding to the library...');
+                        var publishOk = false, publishErr = '';
+                        for (var _pubTry = 0; _pubTry < 2 && !publishOk; _pubTry++) {
+                            var pubRes = await sb.functions.invoke('blitzkrieg-approve-submission', { body: { submissionId: submissionId } });
+                            var pubData = pubRes && pubRes.data;
+                            if (!pubRes.error && pubData && pubData.ok) { publishOk = true; break; }
+                            publishErr = (pubData && pubData.error) || (pubRes.error && pubRes.error.message) || 'publish did not complete';
+                            debugLog('Auto-publish attempt ' + (_pubTry + 1) + ' failed: ' + publishErr, 'warn');
+                        }
+
+                        // Close the crash breadcrumb: a submit_start with this matching
+                        // submit_end proves the synchronous export did NOT crash AE.
+                        if (window.blitzkriegAnalytics && window.blitzkriegAnalytics.trackSubmitEnd) {
+                            window.blitzkriegAnalytics.trackSubmitEnd(submitTraceId, categoryName, publishOk ? 'success' : 'failed', publishOk ? null : publishErr);
+                        }
                         if (window.blitzkriegAnalytics && window.blitzkriegAnalytics.trackStash) {
                             var totalBytes = 0;
                             try {
@@ -3356,21 +3727,45 @@
                         hideSpinner();
                         loadSubmissionCounts();
 
-                        // Navigate to the review queue so admin can immediately review
-                        var submitIsAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
-                        if (submitIsAdmin) {
-                            activeCategory = '__review_pending';
+                        if (publishOk) {
+                            showToast('Added to the library!');
+                            window.cloudLibrary.invalidateCache();
+                            // Show it in its live category immediately.
+                            activeCategory = categoryName;
+                            updateNavActiveState();
+                            loadLibrary();
                         } else {
-                            activeCategory = '__submissions_pending';
+                            // Rare: the storage move did not finish. The pending row + its
+                            // bundle are intact server-side, so the work is NOT lost; the
+                            // user just re-runs Add on the comp. Leave them on the target
+                            // category (valid nav highlight) rather than a removed view.
+                            showToast('Saved, but adding to the library did not finish. Please try Add again.', true);
+                            window.cloudLibrary.invalidateCache();
+                            activeCategory = categoryName;
+                            updateNavActiveState();
+                            loadLibrary();
                         }
-                        updateNavActiveState();
-                        renderSubmissionsGrid(submitIsAdmin ? 'pending_review' : 'pending');
                     }
                 } catch (err) {
                     debugLog('Upload error: ' + err.message, 'error');
-                    showToast('Failed to submit template: ' + err.message, true);
+                    // Breadcrumb: this outcome distinguishes a caught upload failure
+                    // (submit_end 'failed') from an AE crash during export (submit_start
+                    // with NO submit_end for this trace).
+                    if (window.blitzkriegAnalytics && window.blitzkriegAnalytics.trackSubmitEnd) {
+                        window.blitzkriegAnalytics.trackSubmitEnd(submitTraceId, categoryName, 'failed', err && err.message);
+                    }
                     setStashInProgress(false);
                     hideSpinner();
+                    // With insert-first, a submission row was (usually) already created
+                    // BEFORE the failing upload, so the editor's work is NOT silently
+                    // lost server-side. There is no pending view to browse anymore
+                    // (submissions auto-publish), so just tell them to try Add again;
+                    // re-running Add re-attempts the publish from the intact bundle.
+                    var failMsg = 'Add failed: ' + err.message;
+                    if (typeof submissionId === 'string' && submissionId) {
+                        failMsg += ' - your work is saved. Please try Add again.';
+                    }
+                    showToast(failMsg, true);
                     // Clean up the temp stash dir we created — without this, every
                     // failed upload leaks a full comp bundle (AEP + frames + metadata)
                     // in /tmp permanently. The try/catch in cleanupTempStash guards
@@ -3382,6 +3777,7 @@
                     }
                 }
             })();
+        });
         });
     }
 
@@ -3503,10 +3899,15 @@
                 try {
                     blob = f.blob || await readFileAsBlobAsync(f.localPath, f.contentType || contentTypeForLocalPath(f.relativePath));
                 } catch (readErr) {
-                    // A single unreadable source is skipped (same as the old collect
-                    // step did) rather than failing the whole upload.
+                    // A source that cannot be read must NOT be silently dropped: that
+                    // publishes a bundle whose .aep still references it, which surfaces
+                    // later as an un-relinkable "source file could not be found" on every
+                    // import (the 10.mp4 symptom). Record it as a failure so the submit
+                    // stops loudly naming the offending file instead of shipping a
+                    // half-broken template.
                     if (isLarge) largeSlotBusy = false;
-                    debugLog('Bundle asset read skipped (' + f.relativePath + '): ' + (readErr && readErr.message || readErr), 'warn');
+                    failures.push({ path: f.relativePath, error: (readErr && readErr.message) || String(readErr) });
+                    debugLog('Bundle asset read failed (' + f.relativePath + '): ' + (readErr && readErr.message || readErr), 'error');
                     continue;
                 }
                 try {
@@ -3820,10 +4221,7 @@
      * Update Favorites and Recent counts in sidebar
      */
     function updateQuickAccessCounts() {
-        var favCountEl = document.getElementById('favorites-count');
-        if (favCountEl) {
-            favCountEl.textContent = favoriteComps.length;
-        }
+        _updateFavoritesCount();
         var recentCountEl = document.getElementById('recent-count');
         if (recentCountEl) {
             recentCountEl.textContent = recentComps.length;
@@ -3846,34 +4244,73 @@
      * Toggle favorite status for a comp
      * @param {string} uniqueId - The comp's unique ID
      */
+    /** Look up a loaded comp by its uniqueId. */
+    function _compById(uniqueId) {
+        for (var i = 0; i < allComps.length; i++) {
+            if (allComps[i].uniqueId === uniqueId) return allComps[i];
+        }
+        return null;
+    }
+
+    /** Current user's auth id (or ''). */
+    function _myUserId() {
+        try { return window.blitzkriegAuth.getUser().id; } catch (e) { return ''; }
+    }
+
     function toggleFavorite(uniqueId) {
-        var index = favoriteComps.indexOf(uniqueId);
-        var nowFavorited = false;
-        if (index === -1) {
-            favoriteComps.push(uniqueId);
-            nowFavorited = true;
-            showToast('Added to favorites');
-            // Track favorite add
-            if (window.blitzkriegAnalytics) {
-                var favComp = null;
-                for (var fi = 0; fi < allComps.length; fi++) {
-                    if (allComps[fi].uniqueId === uniqueId) { favComp = allComps[fi]; break; }
-                }
-                if (favComp) {
-                    window.blitzkriegAnalytics.trackFavorite(favComp.name, favComp.category, favComp.storagePath);
-                }
-            }
+        var comp = _compById(uniqueId);
+        if (!comp || !comp.storagePath) return;
+        var sp = comp.storagePath;
+        var nowFavorited = !myFavoritePaths[sp];
+        var myId = _myUserId();
+
+        // Snapshot ALL three collections the optimistic update mutates, so a server
+        // failure rolls back completely. Reverting only myFavoritePaths left the star
+        // lit (favoriteComps still held it) and left the Favorites grid/count wrong.
+        var _prevMyPaths = {};
+        var _mpk = Object.keys(myFavoritePaths);
+        for (var _i = 0; _i < _mpk.length; _i++) _prevMyPaths[_mpk[_i]] = myFavoritePaths[_mpk[_i]];
+        var _prevFavComps = favoriteComps.slice();
+        var _prevTeamFavs = teamFavorites.slice();
+
+        // Optimistic local update (star flips instantly; server call reconciles).
+        if (nowFavorited) {
+            myFavoritePaths[sp] = true;
+            if (favoriteComps.indexOf(uniqueId) === -1) favoriteComps.push(uniqueId);
+            teamFavorites = teamFavorites.filter(function (f) { return !(f.storagePath === sp && f.userId === myId); });
+            teamFavorites.push({ storagePath: sp, userId: myId, teamMemberId: (window.blitzkriegAuth && window.blitzkriegAuth.getTeamMember && window.blitzkriegAuth.getTeamMember() ? window.blitzkriegAuth.getTeamMember().id : null), memberName: 'You' });
+            if (window.blitzkriegAnalytics) window.blitzkriegAnalytics.trackFavorite(comp.name, comp.category, sp);
         } else {
-            favoriteComps.splice(index, 1);
-            showToast('Removed from favorites');
+            delete myFavoritePaths[sp];
+            var li = favoriteComps.indexOf(uniqueId);
+            if (li !== -1) favoriteComps.splice(li, 1);
+            teamFavorites = teamFavorites.filter(function (f) { return !(f.storagePath === sp && f.userId === myId); });
         }
         saveFavoritesAndRecent();
-        // Targeted DOM update — flipping a star icon does NOT need a full grid
-        // re-render. The previous renderUI() rebuilt the entire 248-card innerHTML
-        // and re-bound every event listener for a single class change. Just toggle
-        // the class on the relevant card. If we're currently viewing the Favorites
-        // virtual category, the unfavorited card needs to disappear, so fall back
-        // to a re-render in that one case.
+
+        // Persist to the shared table.
+        var tmId = (window.blitzkriegAuth && window.blitzkriegAuth.getTeamMember && window.blitzkriegAuth.getTeamMember()) ? window.blitzkriegAuth.getTeamMember().id : null;
+        if (window.cloudLibrary) {
+            var p = nowFavorited
+                ? window.cloudLibrary.addFavorite(sp, comp.name, comp.category, tmId)
+                : window.cloudLibrary.removeFavorite(sp);
+            p.then(null, function (err) {
+                // Roll back the optimistic change on a hard server failure — restore
+                // ALL three collections and re-render unconditionally so the star,
+                // the Favorites grid, and the count all return to the true state.
+                debugLog('Favorite sync failed: ' + (err && err.message || err), 'warn');
+                showToast('Could not save favorite to the team library. Check your connection.', true);
+                myFavoritePaths = _prevMyPaths;
+                favoriteComps = _prevFavComps;
+                teamFavorites = _prevTeamFavs;
+                saveFavoritesAndRecent();
+                _updateFavoritesCount();
+                renderUI();
+            });
+        }
+
+        _updateFavoritesCount();
+        // Targeted star flip unless we're in the Favorites view (card must vanish there).
         if (activeCategory === 'Favorites') {
             renderUI();
         } else {
@@ -3881,26 +4318,207 @@
             if (card) {
                 if (nowFavorited) card.classList.add('is-favorite');
                 else card.classList.remove('is-favorite');
-                // Also update any star icon's visual state via class on the button
                 var starBtn = card.querySelector('.favorite-btn');
                 if (starBtn) {
                     if (nowFavorited) starBtn.classList.add('favorited');
                     else starBtn.classList.remove('favorited');
                 }
             } else {
-                // Card not in current view — fall back to re-render to be safe
                 renderUI();
             }
         }
     }
 
-    /**
-     * Check if a comp is favorited
-     * @param {string} uniqueId - The comp's unique ID
-     * @returns {boolean}
-     */
+    /** Star state for a comp = the logged-in user has favorited it. */
+    function isFavoriteComp(comp) {
+        if (!comp) return false;
+        if (comp.storagePath && myFavoritePaths[comp.storagePath]) return true;
+        return favoriteComps.indexOf(comp.uniqueId) !== -1; // legacy local fallback
+    }
+
+    /** Legacy shim — some call sites pass a uniqueId. */
     function isFavorite(uniqueId) {
-        return favoriteComps.indexOf(uniqueId) !== -1;
+        var c = _compById(uniqueId);
+        return c ? isFavoriteComp(c) : (favoriteComps.indexOf(uniqueId) !== -1);
+    }
+
+    /** Storage paths shown in the Favorites view, honoring the editor filter. */
+    function _favPathsForFilter() {
+        var set = {};
+        for (var i = 0; i < teamFavorites.length; i++) {
+            var f = teamFavorites[i];
+            if (favEditorFilter === 'all' || f.userId === favEditorFilter) set[f.storagePath] = true;
+        }
+        return set;
+    }
+
+    function _isInFavoritesView(comp) {
+        if (!comp || !comp.storagePath) return false;
+        if (_favPathsForFilter()[comp.storagePath]) return true;
+        // Include legacy local-only favorites (favorited before server sync existed,
+        // or added while offline) in the "everyone" and "my own" filters so they never
+        // silently disappear once the team list loads. A specific-editor filter shows
+        // only that editor's server favorites.
+        var myId = _myUserId();
+        if (favEditorFilter === 'all' || favEditorFilter === myId) {
+            return favoriteComps.indexOf(comp.uniqueId) !== -1;
+        }
+        return false;
+    }
+
+    /** The viewer's OWN distinct favorited templates (storagePath set), unioning
+     *  server favorites (myFavoritePaths) with any legacy local-only favorites
+     *  (favoriteComps, keyed by uniqueId -> mapped to storagePath). Deduped so a
+     *  template favorited both ways counts once. */
+    function _myFavoriteSet() {
+        var set = {};
+        var k = Object.keys(myFavoritePaths);
+        for (var i = 0; i < k.length; i++) set[k[i]] = true;
+        for (var j = 0; j < favoriteComps.length; j++) {
+            var c = _compById(favoriteComps[j]);
+            if (c && c.storagePath) set[c.storagePath] = true;
+            else set['uid:' + favoriteComps[j]] = true; // unresolved legacy id
+        }
+        return set;
+    }
+
+    /** Sidebar Favorites count = the viewer's own favorites (not the whole team's,
+     *  and consistent with the star). The Favorites view can still filter by editor
+     *  without the persistent badge jumping around. */
+    function _updateFavoritesCount() {
+        var el = document.getElementById('favorites-count');
+        if (!el) return;
+        el.textContent = Object.keys(_myFavoriteSet()).length;
+    }
+
+    /** Load the team's shared favorites + approved-template submitters from the server. */
+    function _loadTeamFavorites() {
+        if (!window.cloudLibrary || !window.cloudLibrary.getTeamFavorites) return;
+        var myId = _myUserId();
+        window.cloudLibrary.getTeamFavorites().then(function (rows) {
+            teamFavorites = rows || [];
+            myFavoritePaths = {};
+            for (var i = 0; i < teamFavorites.length; i++) {
+                if (teamFavorites[i].userId === myId) myFavoritePaths[teamFavorites[i].storagePath] = true;
+            }
+            _updateFavoritesCount();
+            if (activeCategory === 'Favorites') renderUI();
+        }, function () { /* offline — keep local fallback */ });
+
+        window.cloudLibrary.getTemplateSubmitters().then(function (rows) {
+            templateSubmitters = {};
+            for (var j = 0; j < (rows || []).length; j++) {
+                if (rows[j].storagePath) templateSubmitters[rows[j].storagePath] = rows[j].submitterName;
+            }
+        }, function () { /* non-fatal */ });
+    }
+
+    /** Distinct editors who have favorited anything: [{userId, name}]. */
+    function _distinctFavEditors() {
+        var seen = {}, out = [], myId = _myUserId();
+        for (var i = 0; i < teamFavorites.length; i++) {
+            var f = teamFavorites[i];
+            if (seen[f.userId]) continue;
+            seen[f.userId] = true;
+            out.push({ userId: f.userId, name: f.userId === myId ? 'You' : (f.memberName || 'Someone') });
+        }
+        return out;
+    }
+
+    /** Distinct submitter names across approved templates. */
+    function _distinctSubmitters() {
+        var seen = {}, out = [];
+        var keys = Object.keys(templateSubmitters);
+        for (var i = 0; i < keys.length; i++) {
+            var n = templateSubmitters[keys[i]];
+            if (n && !seen[n]) { seen[n] = true; out.push(n); }
+        }
+        out.sort();
+        return out;
+    }
+
+    /**
+     * Render (or hide) the filter bar above the template grid: an editor filter in
+     * the Favorites view, and a "Submitted by" filter wherever submitter data exists.
+     * A sibling of the grid (not a grid child) so it survives the empty-grid path.
+     */
+    function _renderGridFilterBar() {
+        var bar = document.getElementById('grid-filter-bar');
+        var isFav = activeCategory === 'Favorites';
+        var submitters = _distinctSubmitters();
+        var showSubmitter = submitters.length > 0 && !isFav && activeCategory !== 'Recent' && activeCategory.indexOf('__') !== 0;
+        var editors = isFav ? _distinctFavEditors() : [];
+        var showEditor = isFav && editors.length >= 1; // show who favorited, even a single editor
+
+        if (!showEditor && !showSubmitter) { if (bar) bar.style.display = 'none'; return; }
+
+        if (!bar) {
+            bar = document.createElement('div');
+            bar.id = 'grid-filter-bar';
+            bar.className = 'grid-filter-bar';
+            stashGrid.parentElement.insertBefore(bar, stashGrid);
+        }
+        bar.style.display = '';
+
+        var html = '';
+        if (showEditor) {
+            html += '<div class="gfb-group"><span class="gfb-label">Favorites by</span>';
+            html += '<button class="gfb-chip' + (favEditorFilter === 'all' ? ' active' : '') + '" data-kind="editor" data-val="all">Everyone</button>';
+            for (var e = 0; e < editors.length; e++) {
+                html += '<button class="gfb-chip' + (favEditorFilter === editors[e].userId ? ' active' : '') +
+                    '" data-kind="editor" data-val="' + escapeHTML(editors[e].userId) + '">' + escapeHTML(editors[e].name) + '</button>';
+            }
+            html += '</div>';
+        }
+        if (showSubmitter) {
+            html += '<div class="gfb-group"><span class="gfb-label">Submitted by</span>';
+            html += '<button class="gfb-chip' + (submitterFilter === 'all' ? ' active' : '') + '" data-kind="submitter" data-val="all">All</button>';
+            for (var s = 0; s < submitters.length; s++) {
+                html += '<button class="gfb-chip' + (submitterFilter === submitters[s] ? ' active' : '') +
+                    '" data-kind="submitter" data-val="' + escapeHTML(submitters[s]) + '">' + escapeHTML(submitters[s]) + '</button>';
+            }
+            html += '</div>';
+        }
+        bar.innerHTML = html;
+
+        var chips = bar.querySelectorAll('.gfb-chip');
+        for (var c = 0; c < chips.length; c++) {
+            chips[c].addEventListener('click', function () {
+                var kind = this.getAttribute('data-kind');
+                var val = this.getAttribute('data-val');
+                if (kind === 'editor') favEditorFilter = val;
+                else submitterFilter = val;
+                _updateFavoritesCount();
+                renderCompsGrid();
+            });
+        }
+    }
+
+    /**
+     * Contextual chrome gate. The search box, sort + grid-size controls, the
+     * submitted-by/favorites filter bar, the admin generate bar and the bulk-action
+     * bar belong ONLY to the template grid views (All, Favorites, Recent, real
+     * categories). The virtual views (Sync and Analytics, Analytics, Submissions)
+     * are reached by calling their renderers directly, bypassing renderCompsGrid,
+     * so without this the previous view's chrome stays painted over them. Call with
+     * false at the top of every virtual renderer, true on the template path.
+     */
+    function _setTemplateChromeVisible(show) {
+        var d = show ? '' : 'none';
+        var s = document.querySelector('.search-box'); if (s) s.style.display = d;
+        var so = document.querySelector('.sort-controls'); if (so) so.style.display = d;
+        var gs = document.querySelector('.grid-size-controls'); if (gs) gs.style.display = d;
+        // The bulk-action bar is shown by its .active class (CSS display:flex). We
+        // must NOT leave an inline display:none on it, or that inline style would
+        // permanently override the class and the bar could never reappear when bulk
+        // mode re-activates. So set inline none only while hidden, and CLEAR it on
+        // show so the class regains control (visible iff .active is present).
+        var bb = document.getElementById('bulk-action-bar');
+        if (bb) bb.style.display = show ? '' : 'none';
+        if (!show) {
+            var fb = document.getElementById('grid-filter-bar'); if (fb) fb.style.display = 'none';
+            var ab = document.getElementById('admin-generate-bar'); if (ab) ab.style.display = 'none';
+        }
     }
 
     /**
@@ -3940,12 +4558,25 @@
      * (alert styling) instead of a plain success, so a partially-broken import is
      * never presented as fully clean.
      */
-    function _showImportResultToast(result, successMsg) {
+    function _showImportResultToast(result, successMsg, storagePath) {
         var res = result || '';
         var m = /\[BLITZ_MISSING:(\d+)\]\s*/.exec(res);
         if (m && parseInt(m[1], 10) > 0) {
             var warn = res.substring(m.index + m[0].length).replace(/^Warning:\s*/i, '').trim();
-            showToast(successMsg + (warn ? '  ' + warn : ''), true);
+            // The .aep references footage that is not in the bundle (and, per the storage
+            // audit, not in the cloud either) — the template was stashed incomplete.
+            // Flag it broken so the Sync view surfaces it as "needs re-stash" and full
+            // sync stops trying to "complete" a bundle that can never be complete.
+            if (storagePath && window.localSync && window.localSync.markBroken) {
+                window.localSync.markBroken(storagePath, (warn || (m[1] + ' source file(s) missing')));
+                _updateSyncNavCount();
+            }
+            // Calm, non-alarming note (NOT the red error style). The comp imported
+            // fine; one bundled footage file is missing because the template was
+            // stashed incomplete. The actionable "needs re-stash" detail now lives
+            // only on the Sync and Analytics chip (markBroken above), so imports do
+            // not nag with a red toast every time.
+            showToast(successMsg + ' Some bundled footage is missing; this template is flagged for re-stash in Sync and Analytics.');
         } else {
             showToast(successMsg);
         }
@@ -3955,16 +4586,35 @@
      * Import from a local AEP file — no download needed.
      * Shared by local-mirror fast path and sync-then-import flows.
      */
+    // Interactive imports call importComp synchronously on the AE host thread. If
+    // the host wedges (e.g. a native modal we cannot suppress) the evalScript
+    // callback never fires, which used to leave the spinner + stashInProgress stuck
+    // until a full panel reload. This ceiling un-bricks the panel and tells the user
+    // to dismiss the dialog. It cannot abort the in-flight host call (no such
+    // primitive), so we do NOT auto-retry — that would just queue behind the wedge.
+    var IMPORT_EVAL_TIMEOUT_MS = 180000; // 3 min
+
     function _doImportLocalAep(aepPath, uniqueId, _trackComp, storagePath) {
         showSpinner();
         setStashInProgress(true, 'import');
         var safePath = escapeForExtendScript(aepPath);
         var safeDisplayName = _trackComp ? escapeForExtendScript(_trackComp.name) : '';
+        var _settled = false;
+        var _timer = setTimeout(function() {
+            if (_settled) return;
+            _settled = true;
+            setStashInProgress(false);
+            hideSpinner();
+            showToast('Import is taking too long. If After Effects is showing a dialog, dismiss it in AE, then try again.', true);
+        }, IMPORT_EVAL_TIMEOUT_MS);
         safeEvalScript('importComp("' + safePath + '","' + safeDisplayName + '")', function(result) {
+            if (_settled) return;
+            _settled = true;
+            clearTimeout(_timer);
             setStashInProgress(false);
             hideSpinner();
             if (result && result.indexOf('Success') === 0) {
-                _showImportResultToast(result, 'Imported from local library!');
+                _showImportResultToast(result, 'Imported from local library!', storagePath);
                 if (uniqueId) addToRecent(uniqueId);
                 if (window.blitzkriegAnalytics && _trackComp) {
                     window.blitzkriegAnalytics.trackImport(_trackComp.name, _trackComp.category, storagePath);
@@ -3985,6 +4635,57 @@
                     showToast('Import failed: ' + (result || 'Unknown error'), true);
                 }
             }
+        });
+    }
+
+    /**
+     * Cloud import that lands in the PERSISTENT local mirror (not a temp dir).
+     * Downloads the import bundle (AEP + footage) straight into the library mirror
+     * folder, marks the template complete, then imports from there via the safe
+     * local path. Footage stays on disk (no cleanup, no native "missing files"
+     * modal), the next import of this template is instant, and the synced counter
+     * reflects it. Falls back to the legacy temp cloud import if the mirror write
+     * fails for any reason, so the user always gets the template.
+     */
+    function _doMirrorImport(storagePath, uniqueId, _trackComp, impVer) {
+        showSpinner();
+        setStashInProgress(true, 'import');
+        showToast('Downloading template...');
+        debugLog('IMPORT: mirror import starting for ' + storagePath);
+        var mirrorDir = null;
+        window.localSync.ensureTemplateMirrorDir(storagePath).then(function(dir) {
+            mirrorDir = dir;
+            return window.cloudLibrary.downloadTemplate(storagePath);
+        }).then(function(downloaded) {
+            debugLog('IMPORT: downloaded ' + downloaded.fileName + ' (' + (downloaded.blob.size / 1024).toFixed(0) + 'KB, assets: ' + ((downloaded.extraFiles && downloaded.extraFiles.length) || 0) + ') -> mirror');
+            return writeDownloadedTemplateBundle(downloaded, mirrorDir);
+        }).then(function(aepDiskPath) {
+            return window.localSync.markTemplateComplete(storagePath, aepDiskPath, impVer).then(function() {
+                // The import bundle excludes comp.png (downloadTemplate skips it), but
+                // marking the template complete makes the grid serve file://.../comp.png
+                // as its thumbnail. Cache the thumbnail into the mirror too so that file
+                // actually exists on disk (and sets thumbComplete). Non-blocking + non-fatal:
+                // if it fails, the grid falls back to the cloud-signed thumbnail.
+                try {
+                    if (window.localSync.syncThumbnail) {
+                        window.localSync.syncThumbnail(storagePath, impVer).then(function() {
+                            _applyLocalAssetCache(allComps);
+                            _updateSyncBadge();
+                        }, function() {});
+                    }
+                } catch (e) {}
+                return aepDiskPath;
+            }, function() { return aepDiskPath; });
+        }).then(function(aepDiskPath) {
+            setStashInProgress(false);
+            _updateSyncBadge();
+            // Import from the persistent mirror — _doImportLocalAep re-arms the
+            // spinner/guard and never deletes the footage it relinks against.
+            _doImportLocalAep(aepDiskPath, uniqueId, _trackComp, storagePath);
+        }, function(err) {
+            setStashInProgress(false);
+            debugLog('IMPORT: mirror import failed (' + (err && err.message || err) + ') - falling back to temp cloud import', 'warn');
+            _doCloudImport(storagePath, uniqueId, _trackComp);
         });
     }
 
@@ -4010,18 +4711,27 @@
                 return new Promise(function(resolve, reject) {
                     var safePath = escapeForExtendScript(aepDiskPath);
                     var safeDisplayName = _trackComp ? escapeForExtendScript(_trackComp.name) : '';
+                    // The imported project references the (Footage)/ files in
+                    // importTempDir by disk path (ImportAsType.PROJECT does NOT embed
+                    // footage). We therefore must NOT delete importTempDir on success —
+                    // doing so popped AE's native "missing files" modal seconds after
+                    // every import. The stale-temp reaper on panel load sweeps old
+                    // blitzkrieg_import_* dirs instead.
+                    var _settled = false;
+                    var _timer = setTimeout(function() {
+                        if (_settled) return;
+                        _settled = true;
+                        var _e = new Error('Import timed out (After Effects may be showing a dialog)');
+                        _e._wedge = true;
+                        reject(_e);
+                    }, IMPORT_EVAL_TIMEOUT_MS);
                     safeEvalScript('importComp("' + safePath + '","' + safeDisplayName + '")', function(result) {
-                        setTimeout(function() {
-                            safeEvalScript('cleanupTempStash("' + escapeForExtendScript(importTempDir) + '")', function(cleanResult) {
-                                if (cleanResult && cleanResult.indexOf('Error') === 0) {
-                                    debugLog('IMPORT: temp cleanup failed: ' + cleanResult, 'warn');
-                                }
-                            });
-                        }, 5000);
-
+                        if (_settled) return;
+                        _settled = true;
+                        clearTimeout(_timer);
                         if (result && result.indexOf('Success') === 0) {
                             hideSpinner();
-                            _showImportResultToast(result, 'Imported full bundle and opened in timeline!');
+                            _showImportResultToast(result, 'Imported full bundle and opened in timeline!', storagePath);
                             if (uniqueId) addToRecent(uniqueId);
                             if (window.blitzkriegAnalytics && _trackComp) {
                                 window.blitzkriegAnalytics.trackImport(_trackComp.name, _trackComp.category, storagePath);
@@ -4038,11 +4748,18 @@
             });
         }).then(function() {
             setStashInProgress(false);
-            return true; // import succeeded (lets the caller background-populate the mirror)
+            return true; // import succeeded
         }, function (err) {
             setStashInProgress(false);
             hideSpinner();
             debugLog('IMPORT FAIL: ' + err.message, 'error');
+            if (err && err._wedge) {
+                // Host wedged: do NOT delete the temp bundle (a partial import may
+                // still reference its footage) and do NOT queue more host calls
+                // behind the wedge. The reaper cleans it on the next panel load.
+                showToast('Import is taking too long. If After Effects is showing a dialog, dismiss it in AE, then try again.', true);
+                return false;
+            }
             showToast('Import failed: ' + err.message, true);
             if (importTempDir) {
                 safeEvalScript('cleanupTempStash("' + escapeForExtendScript(importTempDir) + '")', function(cleanResult) {
@@ -4053,25 +4770,6 @@
             }
             return false; // import failed
         });
-    }
-
-    /**
-     * Cache ONE just-imported template to the local mirror in the background so
-     * the NEXT import of it is the instant local fast path. Non-blocking and
-     * non-fatal: if it fails, the template simply stays unmirrored and the next
-     * import re-downloads (same as today). This is NOT an idle whole-library
-     * prefetch (the deliberate manual-only guard forbids that) - it only caches
-     * the single template the user just chose to import.
-     */
-    function _backgroundPopulateMirror(storagePath, impVer) {
-        if (!window.localSync || !window.localSync.getLibraryPath()) return;
-        try {
-            window.localSync.syncTemplate(storagePath, impVer).then(function() {
-                _updateSyncBadge();
-            }, function(err) {
-                debugLog('IMPORT: background mirror populate skipped: ' + (err && err.message || err), 'warn');
-            });
-        } catch (e) { /* never let caching break import */ }
     }
 
     /**
@@ -4112,19 +4810,18 @@
                         _doImportLocalAep(info.aepPath, uniqueId, _trackComp, storagePath);
                         return;
                     }
-                    // Template not synced or stale. Import via the LIGHT cloud path:
-                    // downloadTemplate (inside _doCloudImport) excludes the preview
-                    // frames + thumbnails that the full mirror pulls, so a heavy
-                    // multi-precomp template imports fast instead of waiting on the
-                    // entire-folder mirror download (the "sometimes very slow import"
-                    // cause). _doCloudImport always fetches FRESH from cloud, so the
-                    // stale-mirror case is handled correctly too. Then, in the
-                    // background, populate the mirror so the NEXT import of this same
-                    // template is the instant local path (preserves manual caching).
-                    debugLog('IMPORT: light cloud import (mirror miss/stale) - ' + storagePath);
-                    _doCloudImport(storagePath, uniqueId, _trackComp).then(function(ok) {
-                        if (ok) _backgroundPopulateMirror(storagePath, _impVer);
-                    });
+                    // Template not synced or stale. Download the import bundle (AEP +
+                    // footage; downloadTemplate excludes previews/thumbnails so this is
+                    // fast even for heavy multi-precomp templates) straight into the
+                    // PERSISTENT local mirror, mark it complete, then import from there.
+                    // This (a) keeps footage on disk so AE never pops the native
+                    // "missing files" modal a temp-dir delete used to cause, (b) makes the
+                    // NEXT import of this template the instant local fast-path ("if it's
+                    // already downloaded, use the local one"), and (c) increments the
+                    // synced counter honestly. Always fetches FRESH from cloud, so the
+                    // stale-mirror case re-pulls correctly too.
+                    debugLog('IMPORT: mirror import (miss/stale) - ' + storagePath);
+                    _doMirrorImport(storagePath, uniqueId, _trackComp, _impVer);
                 }).catch(function() {
                     // localSync failed — fall back to cloud download path
                     _doCloudImport(storagePath, uniqueId, _trackComp);
@@ -4156,7 +4853,7 @@
                 return;
             }
             if (result.indexOf('Success') === 0) {
-                _showImportResultToast(result, 'Imported and opened in timeline!');
+                _showImportResultToast(result, 'Imported and opened in timeline!', storagePath);
                 if (uniqueId) {
                     addToRecent(uniqueId);
                 }
@@ -4974,6 +5671,7 @@
         var sb = window.blitzkriegSupabase;
         if (!sb) return;
 
+        _setTemplateChromeVisible(false);
         showSpinner();
         var isAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
         var isReviewMode = (statusFilter === 'pending_review');
@@ -5359,10 +6057,11 @@
         _submissionInFlight[submissionId] = 1;
 
         showSpinner();
-        showToast('Approving submission...');
 
         function _approveDone() { delete _submissionInFlight[submissionId]; }
 
+        function _runApprove() {
+        showToast('Approving submission...');
         sb.functions.invoke('blitzkrieg-approve-submission', {
             body: { submissionId: submissionId }
         }).then(function (res) {
@@ -5399,6 +6098,43 @@
             _approveDone();
             showToast('Approve failed: ' + (err && err.message || err), true);
         });
+        }
+
+        // Completeness guard (data-integrity). A submission whose upload crashed
+        // mid-way can persist as a pending row with an incomplete storage bundle
+        // (missing metadata.json and/or .aep — the insert-first data-loss fix makes
+        // such partials visible). Publishing one would move a broken folder into the
+        // library. Verify the bundle is complete in storage BEFORE the server-side
+        // move. Also gates recovered-orphan rows until their metadata.json is written.
+        (async function() {
+            try {
+                showToast('Verifying submission...');
+                var rowRes = await sb.from('blitzkrieg_template_submissions')
+                    .select('storage_path').eq('id', submissionId).single();
+                var storagePath = rowRes && rowRes.data && rowRes.data.storage_path;
+                if (storagePath) {
+                    var listRes = await sb.storage.from('blitzkrieg').list(storagePath, { limit: 1000 });
+                    var items = (listRes && listRes.data) || [];
+                    var hasMeta = false, hasAep = false;
+                    for (var i = 0; i < items.length; i++) {
+                        var nm = items[i] && items[i].name;
+                        if (nm === 'metadata.json') hasMeta = true;
+                        if (nm && nm.length > 4 && nm.slice(-4).toLowerCase() === '.aep') hasAep = true;
+                    }
+                    if (!hasMeta || !hasAep) {
+                        hideSpinner();
+                        _approveDone();
+                        showToast('This submission is incomplete (its upload was interrupted before finishing). Ask the submitter to re-submit, or reject it. Nothing was published.', true);
+                        return;
+                    }
+                }
+            } catch (verifyErr) {
+                // Verification failed (e.g. network) — do not block. The server-side
+                // edge function performs its own integrity-checked move with rollback.
+                debugLog('approve completeness check failed, proceeding: ' + (verifyErr && verifyErr.message || verifyErr), 'warn');
+            }
+            _runApprove();
+        })();
     }
 
     /**
@@ -5669,7 +6405,7 @@
         var trendHtml = '';
         if (opts.trend && opts.trend.pct !== undefined) {
             var dir = opts.trend.direction || 'neutral';
-            var arrow = dir === 'up' ? '↑' : dir === 'down' ? '↓' : '–';
+            var arrow = dir === 'up' ? '↑' : dir === 'down' ? '↓' : '-';
             var pctStr = Math.abs(opts.trend.pct).toFixed(0) + '%';
             trendHtml = '<div class="stat-trend ' + dir + '">' + arrow + ' ' + pctStr + '</div>';
         }
@@ -5786,6 +6522,274 @@
         return html;
     }
 
+    /* ─────────────────────────── Sync & Analytics view ─────────────────────────── */
+
+    var _syncViewTimer = null;
+    var _syncDashFilter = 'all';
+
+    function _clearSyncViewTimer() {
+        if (_syncViewTimer) { clearInterval(_syncViewTimer); _syncViewTimer = null; }
+    }
+
+    /** True if a template is flagged broken (unrenderable / missing footage) in local-sync state. */
+    function _isTemplateBroken(storagePath) {
+        if (!storagePath || !window.localSync || !window.localSync.getTemplateStatuses) return false;
+        try {
+            var st = window.localSync.getTemplateStatuses([{ storagePath: storagePath, name: storagePath }]);
+            return st.length > 0 && st[0].status === 'broken';
+        } catch (e) { return false; }
+    }
+
+    /** Human ETA from milliseconds. "calculating..." until we have a rate. */
+    function formatEta(ms) {
+        if (!ms || ms <= 0) return 'calculating...';
+        var s = Math.round(ms / 1000);
+        if (s < 60) return s + 's';
+        var m = Math.round(s / 60);
+        if (m < 60) return m + ' min';
+        var h = Math.floor(m / 60);
+        var rem = m % 60;
+        return h + 'h ' + (rem < 10 ? '0' : '') + rem + 'm';
+    }
+
+    /** Total library sync-nav badge = full mirrors complete out of all templates. */
+    function _updateSyncNavCount() {
+        var el = document.getElementById('sync-nav-count');
+        if (!el || !window.localSync || !window.localSync.getFullSyncStatus) return;
+        var paths = [];
+        for (var i = 0; i < allComps.length; i++) if (allComps[i].storagePath) paths.push(allComps[i].storagePath);
+        var s = window.localSync.getFullSyncStatus(paths);
+        el.textContent = s.complete + '/' + s.total;
+    }
+
+    /**
+     * Begin (or resume) the full-library background mirror. Safe to call on every
+     * load — if nothing is pending it resolves immediately; if a run is already live
+     * it just adopts the tick. Petter opted into "download all"; this is the engine.
+     */
+    function _startFullLibrarySync() {
+        if (!window.localSync || !window.localSync.startFullSync) return;
+        if (!window.localSync.getLibraryPath || !window.localSync.getLibraryPath()) return; // no path yet
+        var paths = [];
+        var versionMap = {};
+        for (var i = 0; i < allComps.length; i++) {
+            var sp = allComps[i].storagePath;
+            if (!sp) continue;
+            paths.push(sp);
+            versionMap[sp] = allComps[i].contentVersion || '';
+        }
+        if (!paths.length) return;
+        window.localSync.startFullSync(paths, versionMap, function () {
+            // Live tick: refresh the badge + (if visible) the sync dashboard stats.
+            _updateSyncNavCount();
+            if (activeCategory === '__sync') _syncDashTick();
+        }).then(function (finalStatus) {
+            _updateSyncNavCount();
+            _updateSyncBadge();
+            if (activeCategory === '__sync') { _syncDashTick(); renderSyncDashboard(); }
+            // Re-point freshly-mirrored templates at their disk bundle for instant import.
+            _applyLocalAssetCache(allComps);
+            if (finalStatus && !finalStatus.active && finalStatus.pending === 0) {
+                debugLog('Full library sync finished: ' + finalStatus.complete + ' mirrored, ' + finalStatus.broken + ' broken', 'success');
+            }
+        }, function (err) {
+            debugLog('Full library sync error: ' + (err && err.message || err), 'warn');
+        });
+    }
+
+    /** Status chip HTML for a template row. */
+    function _syncStatusChip(status) {
+        var map = {
+            complete: { c: 'sd-chip-complete', t: 'Synced' },
+            syncing:  { c: 'sd-chip-syncing',  t: 'Syncing' },
+            pending:  { c: 'sd-chip-pending',  t: 'Not synced' },
+            broken:   { c: 'sd-chip-broken',   t: 'Needs re-stash' },
+            failed:   { c: 'sd-chip-failed',   t: 'Failed' }
+        };
+        var m = map[status] || map.pending;
+        return '<span class="sd-chip ' + m.c + '">' + m.t + '</span>';
+    }
+
+    /** Live-update the header stats + progress bar (no full re-render, keeps scroll). */
+    function _syncDashTick() {
+        if (!window.localSync || !window.localSync.getFullSyncStatus) return;
+        var paths = [];
+        for (var i = 0; i < allComps.length; i++) if (allComps[i].storagePath) paths.push(allComps[i].storagePath);
+        var s = window.localSync.getFullSyncStatus(paths);
+
+        var setTxt = function (id, txt) { var e = document.getElementById(id); if (e) e.textContent = txt; };
+        setTxt('sd-synced', s.complete);
+        setTxt('sd-total', s.total);
+        setTxt('sd-broken', s.broken);
+        setTxt('sd-pending', s.pending);
+
+        var pct = s.total > 0 ? Math.round((s.complete / s.total) * 100) : 0;
+        var bar = document.getElementById('sd-bar');
+        if (bar) bar.style.width = pct + '%';
+
+        var etaEl = document.getElementById('sd-eta');
+        if (etaEl) {
+            if (s.running && s.pending > 0) {
+                var rate = s.bytesPerSec > 0 ? ' · ' + formatBytesShort(s.bytesPerSec) + '/s' : '';
+                var sess = s.sessionBytes > 0 ? ' · ' + formatBytesShort(s.sessionBytes) + ' this session' : '';
+                var etaPhrase = s.etaMs > 0 ? ' - about ' + formatEta(s.etaMs) + ' left' : ' - estimating time left';
+                etaEl.textContent = 'Downloading ' + (s.current ? _compNameFromPath(s.current) : '') +
+                    etaPhrase + rate + sess;
+            } else if (s.paused) {
+                etaEl.textContent = 'Paused - ' + s.pending + ' remaining' +
+                    (s.sessionBytes > 0 ? ' · ' + formatBytesShort(s.sessionBytes) + ' downloaded this session' : '');
+            } else if (s.pending === 0) {
+                etaEl.textContent = 'Everything synced' + (s.broken ? ' (' + s.broken + ' need re-stashing)' : '') + '.';
+            } else {
+                etaEl.textContent = s.pending + ' not yet synced.';
+            }
+        }
+
+        // Toggle control buttons to match state.
+        var show = function (id, on) { var e = document.getElementById(id); if (e) e.style.display = on ? '' : 'none'; };
+        show('sd-download-all', !s.running && s.pending > 0 && !s.paused);
+        show('sd-pause', s.running);
+        show('sd-resume', s.paused && s.pending > 0);
+        show('sd-cancel', s.running || s.paused);
+    }
+
+    /** Short display name from a storagePath, preferring the loaded comp's name. */
+    function _compNameFromPath(sp) {
+        for (var i = 0; i < allComps.length; i++) {
+            if (allComps[i].storagePath === sp) return allComps[i].name || sp;
+        }
+        var parts = sp.split('/');
+        return parts[parts.length - 1] || sp;
+    }
+
+    function renderSyncDashboard() {
+        hideSpinner();
+        _setTemplateChromeVisible(false);
+        _clearSyncViewTimer();
+
+        if (!window.localSync || !window.localSync.getTemplateStatuses) {
+            showPlaceholder('Local sync is unavailable.');
+            return;
+        }
+        var hasPath = window.localSync.getLibraryPath && window.localSync.getLibraryPath();
+        var statuses = window.localSync.getTemplateStatuses(allComps);
+
+        // Order: broken first (need attention), then syncing, pending, failed, complete.
+        var rank = { broken: 0, syncing: 1, failed: 2, pending: 3, complete: 4 };
+        statuses.sort(function (a, b) {
+            var ra = rank[a.status], rb = rank[b.status];
+            if (ra !== rb) return ra - rb;
+            return (a.name || '').toLowerCase() < (b.name || '').toLowerCase() ? -1 : 1;
+        });
+
+        var html = '<div class="sync-dashboard">';
+        html += '<div class="sync-dash-header">';
+        html += '<div class="sync-dash-title-row"><h2 class="sync-dash-title">Library Sync</h2></div>';
+
+        if (!hasPath) {
+            html += '<div class="sync-dash-nopath">Set a local library path in the sidebar first, then Blitzkrieg can mirror every template for instant, offline imports.</div>';
+        }
+
+        html += '<div class="sync-dash-stats">';
+        html += '<span class="sd-stat"><strong id="sd-synced">0</strong> of <strong id="sd-total">0</strong> synced</span>';
+        html += '<span class="sd-stat sd-stat-pending"><strong id="sd-pending">0</strong> not synced</span>';
+        html += '<span class="sd-stat sd-stat-broken"><strong id="sd-broken">0</strong> need re-stash</span>';
+        html += '</div>';
+
+        html += '<div class="sync-dash-progress"><div id="sd-bar" class="sync-dash-bar"></div></div>';
+        html += '<div id="sd-eta" class="sync-dash-eta">&nbsp;</div>';
+
+        html += '<div class="sync-dash-actions">';
+        html += '<button id="sd-download-all" class="button-primary" style="display:none;">Download everything for offline</button>';
+        html += '<button id="sd-pause" class="button-secondary" style="display:none;">Pause</button>';
+        html += '<button id="sd-resume" class="button-primary" style="display:none;">Resume</button>';
+        html += '<button id="sd-cancel" class="button-secondary" style="display:none;">Stop</button>';
+        html += '</div>';
+        html += '</div>'; // header
+
+        // Filters
+        var filters = [
+            { f: 'all', label: 'All' },
+            { f: 'pending', label: 'Not synced' },
+            { f: 'complete', label: 'Synced' },
+            { f: 'broken', label: 'Needs re-stash' },
+            { f: 'failed', label: 'Failed' }
+        ];
+        html += '<div class="sync-dash-filters">';
+        for (var fi = 0; fi < filters.length; fi++) {
+            html += '<button class="sd-filter' + (_syncDashFilter === filters[fi].f ? ' active' : '') +
+                '" data-f="' + filters[fi].f + '">' + filters[fi].label + '</button>';
+        }
+        html += '</div>';
+
+        // List
+        html += '<div id="sd-list" class="sync-dash-list">';
+        var shown = 0;
+        for (var i = 0; i < statuses.length; i++) {
+            var st = statuses[i];
+            if (_syncDashFilter !== 'all' && st.status !== _syncDashFilter) continue;
+            shown++;
+            html += '<div class="sd-row sd-row-' + st.status + '">';
+            html += '<div class="sd-row-main">';
+            html += '<span class="sd-row-name">' + escapeHTML(st.name) + '</span>';
+            html += '<span class="sd-row-cat">' + escapeHTML(st.category) + '</span>';
+            html += '</div>';
+            html += '<div class="sd-row-meta">';
+            if (st.bytes) html += '<span class="sd-row-size">' + formatBytesShort(st.bytes) + '</span>';
+            if (st.status === 'broken' && st.reason) {
+                html += '<span class="sd-row-reason" title="' + escapeHTML(st.reason) + '">missing footage</span>';
+            }
+            html += _syncStatusChip(st.status);
+            html += '</div>';
+            html += '</div>';
+        }
+        if (shown === 0) html += '<div class="sd-empty">No templates in this filter.</div>';
+        html += '</div>'; // list
+        html += '</div>'; // dashboard
+
+        stashGrid.innerHTML = html;
+
+        // Wire filter buttons
+        var filterBtns = stashGrid.querySelectorAll('.sd-filter');
+        for (var b = 0; b < filterBtns.length; b++) {
+            filterBtns[b].addEventListener('click', function () {
+                _syncDashFilter = this.getAttribute('data-f');
+                renderSyncDashboard();
+            });
+        }
+
+        // Wire control buttons
+        var dl = document.getElementById('sd-download-all');
+        if (dl) dl.addEventListener('click', function () {
+            if (!hasPath) { showToast('Set a library path first', true); return; }
+            _startFullLibrarySync();
+            _syncDashTick();
+        });
+        var pauseB = document.getElementById('sd-pause');
+        if (pauseB) pauseB.addEventListener('click', function () {
+            window.localSync.pauseFullSync();
+            _syncDashTick();
+        });
+        var resumeB = document.getElementById('sd-resume');
+        if (resumeB) resumeB.addEventListener('click', function () {
+            window.localSync.resumeFullSync();
+            _startFullLibrarySync();
+            _syncDashTick();
+        });
+        var cancelB = document.getElementById('sd-cancel');
+        if (cancelB) cancelB.addEventListener('click', function () {
+            window.localSync.cancelFullSync();
+            _syncDashTick();
+        });
+
+        _syncDashTick();
+        // Live refresh while the view is open.
+        _syncViewTimer = setInterval(function () {
+            if (activeCategory !== '__sync') { _clearSyncViewTimer(); return; }
+            _syncDashTick();
+        }, 1500);
+    }
+
     /**
      * Render the analytics dashboard shell + delegate to sub-view
      */
@@ -5797,6 +6801,7 @@
 
         // Dismiss any stuck spinners/modals from previous operations
         hideSpinner();
+        _setTemplateChromeVisible(false);
         var stuckModal = document.getElementById('submission-detail-modal');
         if (stuckModal) stuckModal.style.display = 'none';
 
@@ -6334,7 +7339,7 @@
     }
 
     function formatDuration(minutes) {
-        if (!minutes || minutes <= 0) return '—';
+        if (!minutes || minutes <= 0) return '-';
         var m = Math.round(Number(minutes));
         if (m < 60) return m + 'm';
         var hrs = Math.floor(m / 60);
@@ -6393,7 +7398,7 @@
                 if (dayData.import_count > 0) titleParts.push(dayData.import_count + ' imports');
                 if (dayData.session_count > 0) titleParts.push(dayData.session_count + ' sessions');
                 if (dayData.first_event_hour !== null && dayData.last_event_hour !== null) {
-                    titleParts.push(formatHourAmPm(dayData.first_event_hour) + ' — ' + formatHourAmPm(dayData.last_event_hour));
+                    titleParts.push(formatHourAmPm(dayData.first_event_hour) + ' to ' + formatHourAmPm(dayData.last_event_hour));
                 }
             } else {
                 titleParts.push(dateStr + ': no activity');
@@ -6741,7 +7746,7 @@
                 for (var h2 = 0; h2 < 24; h2++) {
                     var count = grid[d + '-' + h2] || 0;
                     var opacity = count === 0 ? 0.05 : Math.max(0.15, (count / maxCount));
-                    hHtml += '<div class="heatmap-cell" style="opacity:' + opacity.toFixed(2) + '" title="' + dayLabels[d] + ' ' + h2 + ':00 — ' + count + ' events"></div>';
+                    hHtml += '<div class="heatmap-cell" style="opacity:' + opacity.toFixed(2) + '" title="' + dayLabels[d] + ' ' + h2 + ':00 - ' + count + ' events"></div>';
                 }
                 hHtml += '</div>';
             }
@@ -8187,6 +9192,19 @@
     var _genQueue = Promise.resolve();
     var _genQueuePending = 0;
     var GEN_DELAY_MS = 800; // breathing room between generations to prevent AE crashes
+    // Hard ceiling for a single comp's ExtendScript render. Past this we assume AE
+    // crashed/wedged (the bridge callback will never fire) and reject so the serial
+    // queue advances instead of hanging the whole batch forever. Import+render of one
+    // comp is seconds; 5 min is a generous crash detector, not a normal timeout.
+    var PER_COMP_GEN_TIMEOUT_MS = 300000;
+    // Native-crash circuit breaker: after this many CONSECUTIVE ExtendScript
+    // bridge-failure fingerprints ('EvalScript error.' / '' / 'undefined' / render
+    // timeout), abort the whole batch rather than keep importing into a wounded host.
+    var GEN_MAX_CONSECUTIVE_BRIDGE_FAILURES = 2;
+    // Chunked hard reclaim: every N completed items, pause and purge AE caches so the
+    // native allocator can coalesce across a long batch (JS-timer only, never $.sleep).
+    var GEN_CHUNK_SIZE = 8;
+    var GEN_CHUNK_COOLDOWN_MS = 4000;
     function _enqueueGeneration(fn) {
         _genQueuePending++;
         // Wrap fn result so the queue always resolves (never stays rejected).
@@ -8229,7 +9247,7 @@
      * reads rendered files, uploads to Supabase.
      * Queued sequentially to avoid concurrent ExtendScript calls.
      */
-    function generateCloudThumbnail(comp) {
+    function generateCloudThumbnail(comp, thumbnailOnly) {
         if (!comp || !comp.storagePath) return Promise.reject(new Error('No storage path'));
         if (!refreshCepBridgeState()) {
             return Promise.reject(new Error('Requires After Effects'));
@@ -8255,7 +9273,7 @@
 
         // Enqueue to prevent concurrent ExtendScript calls
         return _enqueueGeneration(function() {
-        var tempDir, outputDir;
+        var tempDir, outputDir, relocatedTempDir = null;
         debugLog('GEN START: ' + comp.name + ' (' + comp.storagePath + ')');
 
         return getTempDir().then(function(sysTempDir) {
@@ -8284,16 +9302,36 @@
             debugLog('GEN: AEP downloaded (' + (downloaded.blob.size / 1024).toFixed(0) + 'KB, assets: ' + ((downloaded.extraFiles && downloaded.extraFiles.length) || 0) + '), writing to disk...');
             return writeDownloadedTemplateBundle(downloaded, tempDir).then(function(aepPath) {
                 debugLog('GEN: AEP written, calling generatePreviewsToDisk...');
-                return new Promise(function(resolve, reject) {
+                return new Promise(function(_resolveRaw, _rejectRaw) {
+                    // Per-comp timeout on the ExtendScript render call. If AE crashes
+                    // natively or the ExtendScript engine wedges mid-render, the CEP
+                    // bridge callback NEVER fires, so without this the promise would hang
+                    // forever -> the serial _enqueueGeneration chain never advances and
+                    // the whole session is bricked (Generate button dead, spinner stuck)
+                    // until a full panel reload. Rejecting here settles fn(), so
+                    // _enqueueGeneration decrements pending and moves to the next comp.
+                    // _settled also drops a late callback so we never double-settle.
+                    var _settled = false;
+                    var _genTimer = setTimeout(function() {
+                        if (_settled) return;
+                        _settled = true;
+                        var _toErr = new Error('generatePreviewsToDisk timed out after ' + Math.round(PER_COMP_GEN_TIMEOUT_MS / 1000) + 's (After Effects may have crashed or wedged)');
+                        _toErr._bridgeFailure = true;
+                        _rejectRaw(_toErr);
+                    }, PER_COMP_GEN_TIMEOUT_MS);
+                    function resolve(v) { if (_settled) return; _settled = true; clearTimeout(_genTimer); _resolveRaw(v); }
+                    function reject(e) { if (_settled) return; _settled = true; clearTimeout(_genTimer); _rejectRaw(e); }
                     safeEvalScript(
-                        'generatePreviewsToDisk("' + escapeForExtendScript(aepPath) + '", "' + escapeForExtendScript(outputDir) + '")',
+                        'generatePreviewsToDisk("' + escapeForExtendScript(aepPath) + '", "' + escapeForExtendScript(outputDir) + '", ' + (thumbnailOnly ? 'true' : 'false') + ')',
                         function(result) {
                             debugLog('GEN: ExtendScript result: ' + (result || '').substring(0, 300));
                             // Detect the literal ExtendScript-bridge failure string BEFORE JSON.parse.
                             // safeEvalScript returns "EvalScript error." (and sometimes "undefined" /
                             // empty string) when the JSX host throws outside the function's try block.
                             if (!result || result === 'EvalScript error.' || result === 'undefined') {
-                                reject(new Error('ExtendScript bridge failure: ' + (result || 'empty response') + ' — reload the AE panel and try again.'));
+                                var _bridgeErr = new Error('ExtendScript bridge failure: ' + (result || 'empty response') + ' - reload the AE panel and try again.');
+                                _bridgeErr._bridgeFailure = true;
+                                reject(_bridgeErr);
                                 return;
                             }
                             try {
@@ -8334,6 +9372,8 @@
                                     debugLog('GEN: ' + parsed.frameCount + '/' + parsed.plannedFrameCount + ' frames (rendering bailed early after consecutive failures)', 'warn');
                                 } else if (parsed.tooShort) {
                                     debugLog('GEN: comp too short for preview animation (frameCount=' + parsed.frameCount + ')', 'warn');
+                                } else if (parsed.thumbnailMode) {
+                                    debugLog('GEN: thumbnail generated (preview frames skipped by request)');
                                 } else {
                                     debugLog('GEN: rendered ' + parsed.frameCount + ' frames');
                                 }
@@ -8346,14 +9386,21 @@
                 });
             });
         }).then(function(renderResult) {
+            // ExtendScript may relocate the output folder to $TMPDIR when the AE
+            // render engine can't open files for writing in the original base
+            // (AE 2026 hardened runtime). Honor the reported location for read-back
+            // and remember the relocated root so cleanup wipes it too.
+            if (renderResult && renderResult.relocatedTempDir) relocatedTempDir = renderResult.relocatedTempDir;
+            var effectiveOutputDir = (renderResult && renderResult.outputDir) ? renderResult.outputDir : outputDir;
             // If generation was skipped (e.g. missing footage), clean up and return early
             if (renderResult.skipped) {
                 debugLog('GEN: skipped upload (no rendered files)');
                 _cleanupTempDir(tempDir);
+                if (relocatedTempDir) _cleanupTempDir(relocatedTempDir);
                 return Promise.resolve({ skipped: true, reason: renderResult.skipReason });
             }
             debugLog('GEN: reading rendered files and uploading...');
-            var thumbPath = outputDir + '/comp.png';
+            var thumbPath = effectiveOutputDir + '/comp.png';
             return readFileAsBlobAsync(thumbPath, 'image/png').then(function(thumbBlobRaw) {
                 // EFF-1: store a downscaled thumbnail so the grid is fast by default
                 // and the backfill never has to re-shrink this comp.
@@ -8378,7 +9425,7 @@
                 for (var i = 0; i < frameCount; i++) {
                     (function(srcIdx) {
                         frameChain = frameChain.then(function() {
-                            var framePath = outputDir + '/preview/frame_' + srcIdx + '.png';
+                            var framePath = effectiveOutputDir + '/preview/frame_' + srcIdx + '.png';
                             return readFileAsBlobAsync(framePath, 'image/png').then(function(frameBlobRaw) {
                                 // EFF-1: born-small preview frames (parity with the
                                 // thumbnail + the backfill tool's --previews pass).
@@ -8456,12 +9503,14 @@
         }).then(function(result) {
             // Success: clean up temp dir and purge AE caches
             _cleanupTempDir(tempDir);
+            if (relocatedTempDir) _cleanupTempDir(relocatedTempDir);
             _reportGen(true);
             return result;
         }, function(err) {
             // Failure: log, clean up, re-throw so caller can count it
             debugLog('GEN FAIL [' + comp.name + ']: ' + err.message, 'error');
             _cleanupTempDir(tempDir);
+            if (relocatedTempDir) _cleanupTempDir(relocatedTempDir);
             _reportGen(false, err);
             throw err;
         });
@@ -8550,18 +9599,32 @@
                 // Force regenerate all cloud templates
                 compsToProcess = allComps.filter(function(c) { return !!c.storagePath; });
             } else {
-                // Templates missing thumbnails, blacklisted, or missing preview frames.
+                // Default "Generate Missing" targets templates missing a static
+                // THUMBNAIL only (comp.png). It renders thumbnail-only (1 frame) and
+                // deliberately does NOT batch-render the optional 12-72 preview frames:
+                // doing so for 100+ comps renders thousands of frames synchronously on
+                // AE's UI thread and freezes the app (Petter's "it just freezes"). Preview
+                // frames are optional hover eye-candy, generated at stash time or via the
+                // explicit "Force regenerate ALL" admin action. Keying on the thumbnail
+                // (not previewFrameCount) also lets the batch CONVERGE — a missing-footage
+                // comp that already has a thumbnail is not re-picked every run.
                 // NOTE: thumbUrl is NOT a reliable signal — Supabase createSignedUrls
-                // generates signed URLs even for non-existent files. Use thumbnailVerified
-                // (metadata-based) instead.
+                // generates signed URLs even for non-existent files. Use thumbnailVerified.
                 compsToProcess = allComps.filter(function(c) {
                     if (!c.storagePath) return false;
+                    // A template already flagged broken (unrenderable source: missing
+                    // footage / corrupt .aep) will fail forever — never re-enqueue it in
+                    // the default run, so "Generate Missing" CONVERGES instead of showing
+                    // the same "N failed" every time. "Force regenerate ALL" still tries it.
+                    if (_isTemplateBroken(c.storagePath)) return false;
                     if (!c.thumbnailVerified) return true;
                     if (thumbBlacklist[c.storagePath]) return true;
-                    if (!c.previewFrameCount) return true;
                     return false;
                 });
             }
+            // Default run = thumbnail-only (fast, never freezes). "Force regenerate
+            // ALL" still renders full preview animations for every template.
+            var thumbnailOnlyMode = !forceAll;
         } catch (setupErr) {
             generateAllMissingThumbnails._running = false;
             debugLog('generateAllMissingThumbnails setup failed: ' + (setupErr && setupErr.message || setupErr), 'error');
@@ -8586,11 +9649,65 @@
         try { localStorage.setItem('blitzkrieg_thumb_blacklist', JSON.stringify(thumbBlacklist)); } catch(e) {}
 
         showSpinner();
-        setStashInProgress(true);
+        setStashInProgress(true, 'batch');
         var processed = 0;
         var succeeded = 0;
         var failed = 0;
+        var skipped = 0; // rendered nothing usable (missing footage / memory limit) — NOT a real thumbnail
         var total = compsToProcess.length;
+        var consecutiveBridgeFailures = 0;
+        var _finished = false;
+
+        // Heartbeat watchdog: un-bricks the UI if the batch stalls with NO per-item
+        // progress for a long window (a hang the per-comp render timeout did not catch,
+        // e.g. a stuck download, or a native AE crash that killed the bridge). Re-armed
+        // on every processNext step; cleared by _finishBatch.
+        var _batchHeartbeat = null;
+        var BATCH_STALL_MS = PER_COMP_GEN_TIMEOUT_MS + 120000; // one comp's ceiling + slack
+        function _armHeartbeat() {
+            if (_batchHeartbeat) clearTimeout(_batchHeartbeat);
+            _batchHeartbeat = setTimeout(function() {
+                if (_finished) return;
+                debugLog('Generate batch stalled (no progress for ' + Math.round(BATCH_STALL_MS / 1000) + 's) - force-finishing so the UI is not bricked', 'error');
+                _finishBatch('Generation stalled and was stopped (' + succeeded + ' done, ' + failed + ' failed). If After Effects is showing a dialog, dismiss it in AE, then click Generate to resume.', true);
+            }, BATCH_STALL_MS);
+        }
+
+        // Single terminal-cleanup path, callable from the done branch, the circuit
+        // breaker, the heartbeat, and the Cancel hook — so a crash/hang can NEVER leave
+        // _running=true (dead button) or the spinner stuck until a full panel reload.
+        function _finishBatch(msg, hostWedged) {
+            if (_finished) return;
+            _finished = true;
+            if (_batchHeartbeat) { clearTimeout(_batchHeartbeat); _batchHeartbeat = null; }
+            setStashInProgress(false);
+            generateAllMissingThumbnails._running = false;
+            generateAllMissingThumbnails._cancel = null;
+            hideSpinner();
+            var bar = document.getElementById('generate-progress-bar');
+            var text = document.getElementById('generate-progress-text');
+            if (bar) bar.style.width = '100%';
+            if (text) text.textContent = msg;
+            // Style the toast as an error/warning when anything failed or the host wedged,
+            // so a mostly-failed run doesn't read as a clean success.
+            showToast(msg, !!hostWedged || failed > 0);
+            if (hostWedged) {
+                // AE is likely blocked on a native dialog. Do NOT queue more host calls
+                // behind it (invalidateCache/loadLibrary would just pile up behind the
+                // modal). The user reloads the grid after dismissing the dialog.
+                return;
+            }
+            // Invalidate cache and reload to show new thumbnails.
+            window.cloudLibrary.invalidateCache();
+            loadLibrary();
+        }
+
+        // Operator escape hatch — stop a runaway/crashy batch without reloading the
+        // panel. Exposed on the fn + a window global (a Cancel button can call either).
+        generateAllMissingThumbnails._cancel = function() {
+            if (_finished) return;
+            _finishBatch('Generation cancelled (' + succeeded + ' done, ' + failed + ' failed).');
+        };
 
         // Update progress bar
         function updateProgress() {
@@ -8602,39 +9719,81 @@
             var bar = document.getElementById('generate-progress-bar');
             var text = document.getElementById('generate-progress-text');
             if (bar) bar.style.width = pct + '%';
-            if (text) text.textContent = processed + '/' + total + ' (' + succeeded + ' done, ' + failed + ' failed)';
+            if (text) text.textContent = processed + '/' + total + ' (' + succeeded + ' done'
+                + (skipped ? ', ' + skipped + ' skipped' : '') + (failed ? ', ' + failed + ' failed' : '') + ')';
             showToast('Generating ' + currentItem + '/' + total + ': ' + (compsToProcess[processed] ? compsToProcess[processed].name : ''));
         }
 
+        // Advance after each item. Tracks CONSECUTIVE ExtendScript bridge failures and
+        // trips the circuit breaker so one AE crash does not cascade into 100 more
+        // doomed imports on a wounded host. Every GEN_CHUNK_SIZE items it cools down and
+        // purges AE caches so the native allocator can coalesce across a long batch.
+        function _advance(wasBridgeFailure) {
+            if (_finished) return;
+            processed++;
+            if (wasBridgeFailure) {
+                consecutiveBridgeFailures++;
+                if (consecutiveBridgeFailures >= GEN_MAX_CONSECUTIVE_BRIDGE_FAILURES) {
+                    debugLog('Generate batch aborted after ' + consecutiveBridgeFailures + ' consecutive After Effects failures (host appears unstable)', 'error');
+                    _finishBatch('After Effects became unstable; batch paused after ' + succeeded + ' done. Reopen After Effects and click Generate again to finish the rest.', true);
+                    return;
+                }
+            } else {
+                consecutiveBridgeFailures = 0;
+            }
+            if (processed < total && processed % GEN_CHUNK_SIZE === 0) {
+                debugLog('GEN: chunk boundary (' + processed + '/' + total + ') - purging AE caches + ' + Math.round(GEN_CHUNK_COOLDOWN_MS / 1000) + 's cooldown', 'info');
+                try {
+                    safeEvalScript('(function(){try{app.purge(PurgeTarget.ALL_CACHES);}catch(e){}return "ok";})()', function(){});
+                } catch (e) {}
+                setTimeout(processNext, GEN_CHUNK_COOLDOWN_MS);
+            } else {
+                processNext();
+            }
+        }
+
         function processNext() {
+            if (_finished) return;
             if (processed >= total) {
-                setStashInProgress(false);
-                generateAllMissingThumbnails._running = false;
-                hideSpinner();
-                var bar = document.getElementById('generate-progress-bar');
-                var text = document.getElementById('generate-progress-text');
-                if (bar) bar.style.width = '100%';
-                if (text) text.textContent = 'Done! ' + succeeded + ' generated, ' + failed + ' failed.';
-                var thumbNoun = succeeded === 1 ? 'thumbnail' : 'thumbnails';
-                showToast('Generation complete: ' + succeeded + ' ' + thumbNoun + ', ' + failed + ' failed.');
-                // Invalidate cache and reload to show new thumbnails + previews
-                window.cloudLibrary.invalidateCache();
-                loadLibrary();
+                _finishBatch('Generation complete: ' + succeeded + ' generated'
+                    + (skipped ? ', ' + skipped + ' skipped (unrenderable)' : '')
+                    + (failed ? ', ' + failed + ' failed' : '') + '.');
                 return;
             }
 
+            // Re-arm the stash guard + heartbeat PER COMP so a healthy multi-minute
+            // batch never trips the guard mid-run, and a stall is always caught.
+            setStashInProgress(true, 'batch');
+            _armHeartbeat();
             updateProgress();
             var comp = compsToProcess[processed];
 
-            generateCloudThumbnail(comp).then(function() {
-                succeeded++;
-                processed++;
-                processNext();
-            }).catch(function(err) {
-                debugLog('Generation failed for ' + comp.name + ': ' + err.message, 'error');
-                failed++;
-                processed++;
-                processNext();
+            generateCloudThumbnail(comp, thumbnailOnlyMode).then(function(res) {
+                if (res && res.skipped) {
+                    // Rendered nothing usable (missing footage / memory limit). Count it
+                    // honestly as skipped, not "generated" — the thumbnail is still absent.
+                    skipped++;
+                } else {
+                    succeeded++;
+                }
+                _advance(false);
+            }, function(err) {
+                debugLog('Generation failed for ' + comp.name + ': ' + (err && err.message || err), 'error');
+                if (err && err._bridgeFailure) {
+                    // Transient CEP/host bridge failure — a real failure, may recover.
+                    failed++;
+                    _advance(true);
+                } else {
+                    // A per-comp render failure that is NOT a bridge issue means the
+                    // template's source is unrenderable (missing footage / corrupt .aep).
+                    // Flag it broken (so it shows as "needs re-stash" in the Sync view and
+                    // is excluded from future runs) and count it as skipped, not failed.
+                    if (comp.storagePath && window.localSync && window.localSync.markBroken) {
+                        window.localSync.markBroken(comp.storagePath, 'thumbnail render failed (unrenderable source)');
+                    }
+                    skipped++;
+                    _advance(false);
+                }
             });
         }
 
@@ -8643,11 +9802,27 @@
 
     // Expose for dropdown menu and admin toolbar
     window.__blitzkriegGenerateThumbnails = generateAllMissingThumbnails;
+    // Cancel hook for a Generate batch (Cancel button / console escape).
+    window.__blitzkriegCancelGeneration = function() {
+        if (generateAllMissingThumbnails._cancel) generateAllMissingThumbnails._cancel();
+    };
 
     /* --------- Auth-gated initialization --------- */
     // The auth module (auth.js) handles login/access and calls onBlitzkriegAuthReady when access is granted
     window.onBlitzkriegAuthReady = function () {
         masterInit();
+        // Reap stale import/generation temp bundles left by previous sessions. Cloud
+        // imports intentionally leave their footage bundle on disk (the imported project
+        // references it by path, so deleting it pops AE's "missing files" modal), so this
+        // load-time sweep reclaims them once they are old enough (>6h) that nothing
+        // references them. Non-blocking, best-effort.
+        try {
+            if (window.__adobe_cep__) {
+                safeEvalScript('blitzReapStaleTempDirs(21600000)', function(r) {
+                    if (r && String(r).indexOf('OK') === 0) debugLog('TEMP REAP: ' + r, 'info');
+                });
+            }
+        } catch (e) {}
         // Auto OTA: install on detection + recheck every 30 min (non-blocking)
         startUpdateChecker();
         // Track session start
