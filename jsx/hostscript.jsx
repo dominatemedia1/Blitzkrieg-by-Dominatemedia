@@ -553,6 +553,42 @@ function computePreviewFrameCount(compDuration, totalFrames) {
 }
 
 /**
+ * Wait for a PNG written by saveFrameToPng to actually appear on disk.
+ *
+ * ROOT CAUSE (AE 2026 / 26.x macOS, verified live 2026-07-08): saveFrameToPng
+ * flushes the file ASYNCHRONOUSLY via the MediaCore writer. The call returns
+ * BEFORE the bytes hit disk (measured ~50ms later), so an immediate File.exists
+ * check reads `false` even though the render succeeded. Every synchronous
+ * `if (file.exists)` guard after saveFrameToPng therefore mis-reported success
+ * as failure, collapsing the whole cloud generate batch to "0 done" and driving
+ * a spurious retry/relocation storm. This helper polls (bounded) until the file
+ * is present AND non-empty, so callers see the true result.
+ *
+ * Uses $.sleep in SHORT steps and returns the instant the file appears — on the
+ * common success path this adds only ~50ms per frame, not a fixed delay. It only
+ * spends the full budget when a render genuinely produced nothing.
+ *
+ * @param {File} f - the target file
+ * @param {number} maxMs - max time to wait (default 4000)
+ * @returns {boolean} true if the file exists with length > 0 within the budget
+ */
+function _waitForFileFlush(f, maxMs) {
+    if (!f) return false;
+    if (maxMs === undefined || maxMs === null) maxMs = 4000;
+    var step = 25;
+    var waited = 0;
+    while (waited <= maxMs) {
+        var probe = new File(f.fsName);
+        if (probe.exists && probe.length > 0) return true;
+        if (waited === maxMs) break;
+        $.sleep(step);
+        waited += step;
+    }
+    var last = new File(f.fsName);
+    return last.exists && last.length > 0;
+}
+
+/**
  * Creates a Folder object from an fsName path, with fallback.
  * First tries the normalized (URI-encoded) path, then falls back to the raw path.
  * This ensures folders are found even if normalizeFsPath produces an unexpected result.
@@ -1052,6 +1088,30 @@ function getStashedComps(libraryPath) {
  * STASH FUNCTION - Saves the selected composition to the library
  * This version prioritizes reliability over the "invisible" approach
  */
+// Resolve the composition the user wants to act on so "Add Comp" is forgiving:
+// prefer a single comp SELECTED in the Project panel; if several items are
+// selected but exactly one is a comp, use that; otherwise fall back to the comp
+// currently OPEN in the viewer (activeItem). Returns the CompItem or null. This
+// is the single source of truth shared by the modal gate (getActiveCompInfo),
+// the size estimate, and the stash, so all three agree on WHICH comp is saved.
+function resolveTargetComp() {
+    try {
+        if (!app.project) return null;
+        var sel = app.project.selection;
+        if (sel && sel.length === 1 && sel[0] instanceof CompItem) return sel[0];
+        if (sel && sel.length > 1) {
+            var found = null, count = 0;
+            for (var i = 0; i < sel.length; i++) {
+                if (sel[i] instanceof CompItem) { found = sel[i]; count++; }
+            }
+            if (count === 1) return found;
+        }
+        var active = app.project.activeItem;
+        if (active && active instanceof CompItem) return active;
+    } catch (e) {}
+    return null;
+}
+
 function stashSelectedComp(libraryPath, categoryName) {
     // Validate inputs
     if (!isValidPath(libraryPath)) {
@@ -1073,12 +1133,10 @@ function stashSelectedComp(libraryPath, categoryName) {
         originalProjectFile = app.project.file;
         projectWasDirty = app.project.dirty;
 
-        var selectedItems = app.project.selection;
-        if (selectedItems.length !== 1 || !(selectedItems[0] instanceof CompItem)) {
-            return "Error: Please select exactly one composition in the Project Panel.";
+        var compToSave = resolveTargetComp();
+        if (!compToSave) {
+            return "Error: Open a composition, or select one in the Project panel, then click Add Comp.";
         }
-
-        var compToSave = selectedItems[0];
         var compToSaveName = compToSave.name;
         // Sanitize for filesystem: keep [a-z0-9], collapse runs, trim underscores.
         // Fall back to "comp" if the name is all non-ASCII (emoji/CJK) so we don't end
@@ -1119,6 +1177,9 @@ function stashSelectedComp(libraryPath, categoryName) {
             // Save main thumbnail (middle frame)
             var frameTime = compToSave.workAreaStart + (compToSave.workAreaDuration / 2);
             compToSave.saveFrameToPng(frameTime, thumbFile);
+            // AE 2026 flushes the PNG asynchronously — wait for it to land before
+            // metadata is written and the folder is uploaded (see _waitForFileFlush).
+            _waitForFileFlush(thumbFile, 5000);
 
             // Generate preview frames for animation preview
             // Only generate if comp has duration (not a still)
@@ -1143,7 +1204,8 @@ function stashSelectedComp(libraryPath, categoryName) {
 
                         var previewFile = new File(buildPath(previewFolder, "frame_" + pf + ".png"));
                         compToSave.saveFrameToPng(previewTime, previewFile);
-                        previewFrameCount++;
+                        // AE 2026 async flush — only count the frame once it lands.
+                        if (_waitForFileFlush(previewFile, 3000)) previewFrameCount++;
                     } catch (previewErr) {
                         // Detect AE memory-allocation OOM (Motion Tile with large
                         // Output Width/Height is the common cause). Break out — no
@@ -1739,6 +1801,44 @@ function importComp(aepPath, displayName) {
 
         app.beginUndoGroup("Blitzkrieg Import");
 
+        // Snapshot the project's existing top-level item IDs BEFORE importing.
+        // CRITICAL (AE 2026 + missing-effect projects): when the imported .aep
+        // references an effect the editor does not have installed (e.g. a
+        // third-party plugin like "Deep Glow"), AE 2026's importFile() THROWS
+        // "Object is invalid" — yet it STILL adds the import folder + comps to the
+        // project (the comp is fully usable, just with that one effect disabled).
+        // Trusting importFile()'s return/throw alone made us report "Import
+        // returned no items" for a comp that actually imported fine. So after the
+        // call we diff the project against this snapshot and adopt whatever new
+        // top-level item appeared, regardless of whether importFile threw.
+        var _preImportIds = {};
+        try {
+            for (var _pi = 1; _pi <= app.project.numItems; _pi++) {
+                var _pit = app.project.item(_pi);
+                if (_pit && _pit.parentFolder === app.project.rootFolder) _preImportIds[_pit.id] = true;
+            }
+        } catch (preErr) {}
+
+        // Adopt whatever NEW top-level item(s) landed in the project vs the
+        // snapshot. Prefers the newly-added folder (project-import container),
+        // else the first new item. Returns null when nothing new appeared.
+        function _adoptNewlyImported() {
+            try {
+                var newItems = [];
+                for (var ni = 1; ni <= app.project.numItems; ni++) {
+                    var nit = app.project.item(ni);
+                    if (nit && nit.parentFolder === app.project.rootFolder && !_preImportIds[nit.id]) {
+                        newItems.push(nit);
+                    }
+                }
+                for (var fi2 = 0; fi2 < newItems.length; fi2++) {
+                    if (newItems[fi2] instanceof FolderItem) return newItems[fi2];
+                }
+                if (newItems.length > 0) return newItems[0];
+            } catch (scanErr) {}
+            return null;
+        }
+
         // Suppress "missing file" dialogs during import. On AE 2024+ this MAY
         // cause importFile to throw "Object is invalid" — if so, we catch it and
         // retry without suppression (dialog appears but import works).
@@ -1750,10 +1850,20 @@ function importComp(aepPath, displayName) {
         importOptions.importAs = ImportAsType.PROJECT;
 
         var importedItem = null;
+        var _importErrMsg = "";
+        // Attempt 1 (suppressed).
         try {
             importedItem = app.project.importFile(importOptions);
         } catch (impErr) {
-            // AE 2024+ can throw with suppression active — retry without it
+            _importErrMsg = (impErr && impErr.toString) ? impErr.toString() : String(impErr);
+        }
+
+        // If attempt 1 threw but the items still landed (missing-effect case),
+        // adopt them and DO NOT retry — retrying would import a second copy.
+        if (!importedItem) importedItem = _adoptNewlyImported();
+
+        // Only retry unsuppressed if attempt 1 produced literally nothing new.
+        if (!importedItem) {
             if (_importDialogsSuppressed) {
                 try { app.endSuppressDialogs(false); } catch (ed) {}
                 _importDialogsSuppressed = false;
@@ -1762,7 +1872,10 @@ function importComp(aepPath, displayName) {
                 var retryOpts = new ImportOptions(fileToImport);
                 retryOpts.importAs = ImportAsType.PROJECT;
                 importedItem = app.project.importFile(retryOpts);
-            } catch (impErr2) { /* both attempts failed */ }
+            } catch (impErr2) {
+                _importErrMsg = (impErr2 && impErr2.toString) ? impErr2.toString() : String(impErr2);
+            }
+            if (!importedItem) importedItem = _adoptNewlyImported();
         }
 
         if (_importDialogsSuppressed) {
@@ -1772,6 +1885,9 @@ function importComp(aepPath, displayName) {
 
         if (!importedItem) {
             app.endUndoGroup();
+            // Surface the real importFile exception so a genuine failure is
+            // diagnosable instead of the opaque "returned no items".
+            if (_importErrMsg) return "Error: Import failed (" + _importErrMsg + ").";
             return "Error: Import returned no items.";
         }
 
@@ -1855,7 +1971,22 @@ function importComp(aepPath, displayName) {
         // FootageItem at its collected copy. This is the canonical relink the
         // importer previously lacked — without it, missing footage was simply
         // deleted, producing the "missing element/source files" symptom.
-        var _relinkStats = { relinked: 0, missing: 0, missingNames: [], survivingMissing: 0, survivingNames: [] };
+        var _relinkStats = { relinked: 0, missing: 0, missingNames: [], survivingMissing: 0, survivingNames: [], survivingImages: 0, survivingImageNames: [] };
+        // A still image (png/jpg/etc.) going missing is almost always a decorative
+        // asset that does not break the composition — per Petter, "missing footage is
+        // usually just images, nothing important." So we classify surviving-missing
+        // footage: images get a gentle, non-actionable note; only non-image sources
+        // (video/audio/sequences) raise the "needs re-stash" warning.
+        var _isImageBasename = function (nm) {
+            if (!nm) return false;
+            var lower = String(nm).toLowerCase();
+            var dot = lower.lastIndexOf('.');
+            if (dot < 0) return false;
+            var ext = lower.substring(dot + 1);
+            return ext === 'png' || ext === 'jpg' || ext === 'jpeg' || ext === 'gif' ||
+                   ext === 'tif' || ext === 'tiff' || ext === 'bmp' || ext === 'psd' ||
+                   ext === 'webp' || ext === 'heic';
+        };
         if (importedItem instanceof FolderItem) {
             var _footageIndex = {};   // lowercased basename -> File
             var _indexBuilt = false;
@@ -2047,9 +2178,15 @@ function importComp(aepPath, displayName) {
                         } catch (e) {}
                     }
                     if (sMiss) {
-                        _relinkStats.survivingMissing++;
-                        if (_relinkStats.survivingNames.length < 30) {
-                            try { _relinkStats.survivingNames.push(String(sItem.name || '')); } catch (e) {}
+                        var _nm = '';
+                        try { _nm = String(sItem.name || ''); } catch (e) { _nm = ''; }
+                        if (_isImageBasename(_nm)) {
+                            // Decorative image — count separately, do NOT flag re-stash.
+                            _relinkStats.survivingImages++;
+                            if (_relinkStats.survivingImageNames.length < 30) _relinkStats.survivingImageNames.push(_nm);
+                        } else {
+                            _relinkStats.survivingMissing++;
+                            if (_relinkStats.survivingNames.length < 30) _relinkStats.survivingNames.push(_nm);
                         }
                     }
                 }
@@ -2133,6 +2270,17 @@ function importComp(aepPath, displayName) {
                 _relinkStats.survivingMissing + " source file" + (_relinkStats.survivingMissing === 1 ? "" : "s") +
                 " could not be relinked" + (_shown ? " (" + _shown + ")" : "") +
                 ". Open the comp and relink, or re-stash the template.";
+        }
+        // Images are treated as non-critical: report them as a soft note (no
+        // [BLITZ_MISSING] marker, so the panel does NOT flag the template for
+        // re-stash) so the composition still imports and uses cleanly.
+        if (_relinkStats.survivingImages > 0) {
+            var _imgShown = _relinkStats.survivingImageNames.slice(0, 5).join(", ");
+            if (_relinkStats.survivingImages > 5) _imgShown += ", ...";
+            _resultMsg += " [BLITZ_IMG_MISSING:" + _relinkStats.survivingImages + "] Note: " +
+                _relinkStats.survivingImages + " image" + (_relinkStats.survivingImages === 1 ? "" : "s") +
+                " not found" + (_imgShown ? " (" + _imgShown + ")" : "") +
+                ". These are usually decorative and safe to ignore.";
         }
         return _resultMsg;
 
@@ -2595,7 +2743,8 @@ function generatePreviewFrames(aepPath) {
 
                     var previewFile = new File(buildPath(previewFolder, "frame_" + pf + ".png"));
                     mainComp.saveFrameToPng(previewTime, previewFile);
-                    previewFrameCount++;
+                    // AE 2026 async flush — only count the frame once it lands.
+                    if (_waitForFileFlush(previewFile, 3000)) previewFrameCount++;
                 } catch (previewErr) {
                     $.writeln("Blitzkrieg: Warning - Could not generate preview frame " + pf + ": " + previewErr.toString());
                 }
@@ -2606,6 +2755,9 @@ function generatePreviewFrames(aepPath) {
                 var thumbFile = new File(buildPath(compFolder, "comp.png"));
                 var thumbTime = mainComp.workAreaStart + (mainComp.workAreaDuration / 2);
                 mainComp.saveFrameToPng(thumbTime, thumbFile);
+                // AE 2026 async flush — ensure the PNG lands before we remove the
+                // imported project / restore the user's project below.
+                _waitForFileFlush(thumbFile, 5000);
             } catch (thumbErr) {
                 $.writeln("Blitzkrieg: Warning - Could not regenerate thumbnail: " + thumbErr.toString());
             }
@@ -2946,8 +3098,10 @@ function stashSelectedCompToTemp(categoryName) {
 function estimateStashFootprint() {
     try {
         if (!app.project) return JSON.stringify({ error: 'no project' });
-        var sel = app.project.selection;
-        if (sel.length !== 1 || !(sel[0] instanceof CompItem)) {
+        // Estimate the SAME comp the stash will export (selected-or-active) so the
+        // pre-flight size warning matches the actual bundle.
+        var targetComp = resolveTargetComp();
+        if (!targetComp) {
             return JSON.stringify({ error: 'no single comp selected' });
         }
         var seenComp = {};
@@ -2984,7 +3138,7 @@ function estimateStashFootprint() {
             }
         }
 
-        walkComp(sel[0]);
+        walkComp(targetComp);
         return JSON.stringify({ bytes: totalBytes, footageMissing: missing });
     } catch (e) {
         return JSON.stringify({ error: e.toString() });
@@ -3534,7 +3688,9 @@ function generatePreviewsToDisk(aepPath, outputDir, thumbnailOnly) {
         for (var tt = 0; tt < thumbTimes.length; tt++) {
             try {
                 mainComp.saveFrameToPng(thumbTimes[tt], thumbFile);
-                if (thumbFile.exists) break;
+                // AE 2026 flushes the PNG asynchronously — poll instead of an
+                // immediate .exists check (see _waitForFileFlush).
+                if (_waitForFileFlush(thumbFile, 5000)) break;
             } catch (thumbErr) {
                 // Look for AE's memory-allocation diagnostic string. The exact text
                 // has varied across versions but always contains "memory allocation"
@@ -3561,7 +3717,7 @@ function generatePreviewsToDisk(aepPath, outputDir, thumbnailOnly) {
             }
         }
 
-        if (!thumbFile.exists) {
+        if (!_waitForFileFlush(thumbFile, 2000)) {
             _cleanup();
             if (aepFile && aepFile.exists) { try { aepFile.remove(); } catch(e) {} }
             if (thumbMemoryError) {
@@ -3651,7 +3807,8 @@ function generatePreviewsToDisk(aepPath, outputDir, thumbnailOnly) {
                     var previewTime = compWorkAreaStart + (progress * compDuration);
                     var frameFile = new File(previewFolder.fsName + '/frame_' + pf + '.png');
                     mainComp.saveFrameToPng(previewTime, frameFile);
-                    if (frameFile.exists) {
+                    // AE 2026 async flush — poll instead of an immediate .exists check.
+                    if (_waitForFileFlush(frameFile, 3000)) {
                         previewFrameCount++;
                         consecutiveFailures = 0;
                     } else {
@@ -4024,7 +4181,10 @@ function deleteUpdateDir(dirPath) {
  */
 function getActiveCompInfo() {
     try {
-        var comp = app.project.activeItem;
+        // Same resolution as the stash: a comp selected in the Project panel OR
+        // the one open in the viewer. So the modal opens in both cases and never
+        // opens for a target the stash would then reject.
+        var comp = resolveTargetComp();
         if (!comp || !(comp instanceof CompItem)) return 'null';
 
         return JSON.stringify({

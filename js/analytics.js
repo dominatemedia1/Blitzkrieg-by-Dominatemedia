@@ -1,12 +1,29 @@
 // js/analytics.js
-// Fire-and-forget usage event tracking for Blitzkrieg plugin
+// Usage event tracking for Blitzkrieg plugin.
+//
+// Durability model (mirrors js/telemetry.js): every insert that fails for any
+// reason (no client, network error, non-2xx, auth expiry) is persisted to a
+// localStorage queue and retried on the next session start and on a periodic
+// timer. Without this, the old fire-and-forget inserts silently dropped on any
+// transient failure and every metric undercounted. session_end is sent via a
+// SYNCHRONOUS XHR because CEP reaps in-flight async requests during
+// beforeunload, which previously broke every session-duration metric.
 (function () {
     'use strict';
 
     var sb = window.blitzkriegSupabase;
     var TABLE = 'blitzkrieg_usage_events';
+    var ERROR_TABLE = 'blitzkrieg_error_logs';
+    var SUPABASE_URL = 'https://kwrmdxptrrvlqxdcasho.supabase.co';
+    var SUPABASE_ANON_KEY = 'sb_publishable_wMNJ93D7lys_gVC6HZ3oDQ_sUiabT4E';
+    var AUTH_STORAGE_KEY = 'sb-kwrmdxptrrvlqxdcasho-auth-token';
+    var QUEUE_KEY = 'blitzkrieg_analytics_queue';
+    var MAX_QUEUE = 100;
+    var FLUSH_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
+
     var viewedComps = {}; // Deduplication map: uniqueId -> true (per session)
     var _cachedGeo = null; // Cache geolocation to avoid redundant API calls
+    var _flushTimer = null;
 
     function getTeamMemberId() {
         if (window.blitzkriegAuth && window.blitzkriegAuth.getTeamMember()) {
@@ -22,13 +39,111 @@
         return null;
     }
 
+    // Synchronous read of the cached access token from localStorage (same key
+    // the Supabase SDK writes). Needed for the sync-XHR session_end path.
+    function getAuthToken() {
+        try {
+            var raw = localStorage.getItem(AUTH_STORAGE_KEY);
+            if (raw) {
+                var parsed = JSON.parse(raw);
+                return parsed.access_token || null;
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    // ---- Durable queue ----
+
+    function _loadQueue() {
+        try {
+            var raw = localStorage.getItem(QUEUE_KEY);
+            if (!raw) return [];
+            var parsed = JSON.parse(raw);
+            return Array.isArray(parsed) ? parsed : [];
+        } catch (e) { return []; }
+    }
+
+    function _saveQueue(q) {
+        try {
+            if (q.length > MAX_QUEUE) q = q.slice(-MAX_QUEUE);
+            localStorage.setItem(QUEUE_KEY, JSON.stringify(q));
+        } catch (e) {}
+    }
+
+    // Persist a failed insert so a later flush can retry it. Entry shape:
+    // { t: tableName, r: row }.
+    function _queue(table, row) {
+        var q = _loadQueue();
+        q.push({ t: table, r: row });
+        _saveQueue(q);
+    }
+
+    // Re-entry guard: two concurrent flushes (timer firing mid-flush) would
+    // each re-insert the same rows and race the final save, double-shipping
+    // every queued event.
+    var _flushing = false;
+    function _flushQueue() {
+        if (_flushing || !sb) return;
+        var q = _loadQueue();
+        if (q.length === 0) return;
+        _flushing = true;
+
+        var remaining = [];
+        var index = 0;
+
+        function sendNext() {
+            if (index >= q.length) {
+                if (remaining.length > 0) {
+                    _saveQueue(remaining);
+                } else {
+                    try { localStorage.removeItem(QUEUE_KEY); } catch (e) {}
+                }
+                _flushing = false;
+                return;
+            }
+            var item = q[index++];
+            if (!item || !item.t || !item.r) { sendNext(); return; }
+            try {
+                sb.from(item.t).insert(item.r).then(function (res) {
+                    if (res && res.error) remaining.push(item);
+                    sendNext();
+                }, function () {
+                    remaining.push(item);
+                    sendNext();
+                });
+            } catch (e) {
+                remaining.push(item);
+                sendNext();
+            }
+        }
+        sendNext();
+    }
+
+    // Attempt an async insert; on ANY failure, persist to the durable queue so
+    // it retries later instead of being silently lost.
+    function _insert(table, row) {
+        if (!sb) { _queue(table, row); return; }
+        try {
+            sb.from(table).insert(row).then(function (res) {
+                if (res && res.error) {
+                    console.warn('Blitzkrieg analytics insert error:', res.error.message);
+                    _queue(table, row);
+                }
+            }, function (err) {
+                console.warn('Blitzkrieg analytics insert failed:', err);
+                _queue(table, row);
+            });
+        } catch (e) {
+            _queue(table, row);
+        }
+    }
+
     /**
-     * Fire-and-forget insert into blitzkrieg_usage_events.
-     * Never blocks the UI; errors are console-logged only.
+     * Track a usage event. Durable: queues on failure, never blocks the UI.
      */
     function track(eventType, data) {
         var userId = getUserId();
-        if (!userId || !sb) return;
+        if (!userId) return;
 
         var row = {
             user_id: userId,
@@ -41,13 +156,7 @@
             metadata: data.metadata || {},
         };
 
-        sb.from(TABLE).insert(row).then(function (res) {
-            if (res.error) {
-                console.warn('Blitzkrieg analytics insert error:', res.error.message);
-            }
-        }).catch(function (err) {
-            console.warn('Blitzkrieg analytics error:', err);
-        });
+        _insert(TABLE, row);
     }
 
     function fetchGeoData(callback) {
@@ -94,12 +203,12 @@
     var _errorDedup = {}; // message -> last reported timestamp
 
     /**
-     * Fire-and-forget insert into blitzkrieg_error_logs.
+     * Durable insert into blitzkrieg_error_logs.
      * Throttled: max 50/session, dedup same message within 10s.
      */
     function reportError(message, level, context) {
         var userId = getUserId();
-        if (!userId || !sb) return;
+        if (!userId) return;
         if (_errorCount >= MAX_ERRORS_PER_SESSION) return;
 
         level = (level === 'warn' || level === 'error') ? level : 'error';
@@ -128,9 +237,7 @@
             url: window.location.href || null
         };
 
-        sb.from('blitzkrieg_error_logs').insert(row).then(function(res) {
-            if (res.error) console.warn('Blitzkrieg error report failed:', res.error.message);
-        }).catch(function() {});
+        _insert(ERROR_TABLE, row);
     }
 
     // ---- Access Change Tracking ----
@@ -179,19 +286,65 @@
         track('search', { searchQuery: query.trim() });
     }
 
+    // Dedup consecutive browses of the SAME category so re-clicking an already
+    // active category (or a re-render firing the handler) does not inflate the
+    // category_browse count. Only a genuine change in active category counts.
+    var _lastBrowsedCategory = null;
     function trackCategoryBrowse(category) {
+        if (category === _lastBrowsedCategory) return;
+        _lastBrowsedCategory = category;
         track('category_browse', { templateCategory: category });
     }
 
     function trackSessionStart() {
         viewedComps = {};
+        // Flush anything stranded from a previous session before we start adding
+        // new events this session.
+        _flushQueue();
+        if (_flushTimer) clearInterval(_flushTimer);
+        _flushTimer = setInterval(_flushQueue, FLUSH_INTERVAL_MS);
         fetchGeoData(function(geo) {
             track('session_start', { metadata: geo });
         });
     }
 
+    // session_end MUST be synchronous: CEP kills in-flight async requests during
+    // beforeunload, so an async insert here never lands and session durations
+    // could never be computed. Mirrors telemetry.endSession's sync-XHR close.
     function trackSessionEnd() {
-        track('session_end', {});
+        if (_flushTimer) { clearInterval(_flushTimer); _flushTimer = null; }
+
+        var userId = getUserId();
+        if (!userId) return;
+
+        var row = {
+            user_id: userId,
+            team_member_id: getTeamMemberId(),
+            event_type: 'session_end',
+            template_name: null,
+            template_category: null,
+            template_storage_path: null,
+            search_query: null,
+            metadata: {}
+        };
+
+        var token = getAuthToken();
+        if (!token) { _queue(TABLE, row); return; }
+
+        try {
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', SUPABASE_URL + '/rest/v1/' + TABLE, false); // synchronous
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            xhr.setRequestHeader('apikey', SUPABASE_ANON_KEY);
+            xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+            xhr.setRequestHeader('Prefer', 'return=minimal');
+            xhr.send(JSON.stringify(row));
+            if (xhr.status < 200 || xhr.status >= 300) {
+                _queue(TABLE, row); // next session's flush will retry
+            }
+        } catch (e) {
+            _queue(TABLE, row);
+        }
     }
 
     // ---- Bulk ops, stash, generate ----

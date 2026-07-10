@@ -505,6 +505,16 @@
     }
 
     function uploadManifest(metadataResults, archives) {
+        // The shared manifest is admin-writable (storage RLS). A non-admin's
+        // background refresh would otherwise attempt the upload and log an
+        // "row violates row-level security policy" warning on every refresh.
+        // Only admins publish it; non-admins keep their own local cache and
+        // skip cleanly. Fail-open if admin status can't be determined.
+        try {
+            if (window.blitzkriegAuth && typeof window.blitzkriegAuth.isAdmin === 'function' && !window.blitzkriegAuth.isAdmin()) {
+                return;
+            }
+        } catch (e) {}
         // Fire-and-forget — don't block the caller. Failures are logged.
         try {
             // CRITICAL: filter out null-metadata entries before persisting. A
@@ -762,6 +772,7 @@
     // names are pure timestamps wiped the metadata cache on every load (633 wipes
     // in 21 days), forcing a full 378-file rescan each time = a major slowdown.
     var _garbageCacheClearedThisSession = false;
+    var _permanentBadNamesWarnedThisSession = false;
 
     /**
      * Build comp objects from metadata results.
@@ -774,6 +785,7 @@
         // Build comp objects
         var allComps = [];
         var staleCacheCount = 0;
+        var badNameFolders = []; // collected so we log the set ONCE, not per entry
         metadataResults.forEach(function (mr) {
             if (!mr.metadata) return;
             var meta = mr.metadata;
@@ -810,7 +822,11 @@
                 if (finalHasTs || finalIsNum || finalIsHash || finalShort) {
                     displayName = 'Untitled';
                     staleCacheCount++;
-                    _log('buildCompsFromMetadata: all sources bad for ' + mr.folderName + ' — using Untitled', 'warn');
+                    // Collect, do NOT log per-entry: a single permanently-bad
+                    // template otherwise re-logged a warn on EVERY library load
+                    // (135 rows from one folder observed). The once-per-session
+                    // summary below reports the full set instead.
+                    badNameFolders.push(mr.folderName);
                 }
             }
 
@@ -895,12 +911,17 @@
         // artifact), a fresh pull produces the same garbage, so clearing every
         // load just loops a full rescan forever. One clear recovers a real stale
         // cache; the per-session guard prevents the rescan loop.
+        var _badList = badNameFolders.slice(0, 10).join(', ') + (badNameFolders.length > 10 ? ', +' + (badNameFolders.length - 10) + ' more' : '');
         if (staleCacheCount > 0 && !_garbageCacheClearedThisSession) {
             _garbageCacheClearedThisSession = true;
-            _log('buildCompsFromMetadata: ' + staleCacheCount + ' entries had garbage names - clearing stale cache once this session', 'warn');
+            _log('buildCompsFromMetadata: ' + staleCacheCount + ' entries had garbage names [' + _badList + '] - clearing stale cache once this session', 'warn');
             clearLocalCache();
-        } else if (staleCacheCount > 0) {
-            _log('buildCompsFromMetadata: ' + staleCacheCount + ' entries still have garbage names (permanent bad data); cache NOT re-cleared - fix the source names', 'warn');
+        } else if (staleCacheCount > 0 && !_permanentBadNamesWarnedThisSession) {
+            // Guard so a permanently-bad folder (real garbage in storage, not a
+            // stale-cache artifact) is reported ONCE per session instead of on
+            // every library load. Rename the listed folders to clear this.
+            _permanentBadNamesWarnedThisSession = true;
+            _log('buildCompsFromMetadata: ' + staleCacheCount + ' entries still have garbage names (permanent bad data); cache NOT re-cleared - fix the source names: [' + _badList + ']', 'warn');
         }
 
         return allComps;
@@ -1699,10 +1720,20 @@
     // the sync worker's existing fail-and-continue path (classify as retryable,
     // advance the queue) actually fires — a stalled fetch never rejects on its
     // own. Abort the underlying request when possible so the dead socket is
-    // released rather than left dangling. 3 min is generous for large footage yet
-    // still bounds a true hang; a genuinely slow-but-progressing file that trips
-    // it is classified 'failed' (retryable), not 'broken', so it retries next run.
-    var DOWNLOAD_TIMEOUT_MS = 180000;
+    // released rather than left dangling. 90s bounds a true hang while still
+    // forgiving a genuinely large-but-progressing footage file; a hung/phantom
+    // Storage object (e.g. a footage file with no size metadata whose download
+    // never yields bytes) trips it and, in the sync's skip-failures mode, is
+    // skipped so one bad file never blocks the whole template from mirroring.
+    // (Was 180s: a single phantom object stalled full-sync ~9 min per template.)
+    var DOWNLOAD_TIMEOUT_MS = 90000;
+    // Local-mirror footage size cap. A mirror exists for instant .aep import; a file
+    // larger than this is heavy raw source (e.g. a 1.74GB "Raw Cam.mp4") that, buffered
+    // whole in the CEP Chromium heap, hangs the download so the template never converges.
+    // Files over the cap that are NOT import-essential (.aep/thumbnail/preview) are
+    // skipped from the mirror. 300MB comfortably keeps short footage loops while excluding
+    // pathological multi-GB raw source. The comp still imports from its .aep.
+    var MIRROR_MAX_FOOTAGE_BYTES = 300 * 1024 * 1024;
     function _downloadWithTimeout(path) {
         var controller = null;
         try { if (typeof AbortController === 'function') controller = new AbortController(); } catch (e) { controller = null; }
@@ -1724,7 +1755,17 @@
         return Promise.race([dlPromise, timeoutPromise]);
     }
 
-    async function downloadStorageFiles(paths, basePath, concurrency, onFileDone) {
+    // opts.skipFailures (sync mirror path): a single file that errors or hangs is
+    // SKIPPED (recorded, not thrown) so one broken/phantom footage object cannot
+    // block the whole template from mirroring. The caller decides whether the
+    // resulting partial bundle is usable (mirrorTemplate requires the .aep to have
+    // landed). Default (undefined) keeps the strict throw-on-any-failure contract
+    // that essential-file callers (comp.png, deps) depend on.
+    // opts.skipped — when skipFailures, an array the function pushes skipped paths
+    // into so the caller can report/record them.
+    async function downloadStorageFiles(paths, basePath, concurrency, onFileDone, opts) {
+        var skipFailures = !!(opts && opts.skipFailures);
+        var skippedOut = opts && opts.skipped ? opts.skipped : null;
         var results = new Array(paths.length);
         var next = 0;
         var limit = concurrency || 6;
@@ -1732,9 +1773,20 @@
             while (next < paths.length) {
                 var idx = next++;
                 var path = paths[idx];
-                var res = await _downloadWithTimeout(path);
-                if (res.error || !res.data) {
-                    throw new Error('Failed to download bundle file ' + path + ': ' + (res.error && res.error.message || 'unknown'));
+                var res = null;
+                try {
+                    res = await _downloadWithTimeout(path);
+                    if (res.error || !res.data) {
+                        throw new Error((res.error && res.error.message) || 'no data');
+                    }
+                } catch (dlErr) {
+                    if (skipFailures) {
+                        // One bad footage object must not fail the whole template.
+                        if (skippedOut) skippedOut.push(path);
+                        _log('mirror: skipped unrecoverable file ' + path + ' (' + (dlErr && dlErr.message || dlErr) + ')', 'warn');
+                        continue;
+                    }
+                    throw new Error('Failed to download bundle file ' + path + ': ' + (dlErr && dlErr.message || 'unknown'));
                 }
                 results[idx] = {
                     path: path,
@@ -1756,6 +1808,13 @@
         var workerCount = Math.min(limit, paths.length);
         for (var i = 0; i < workerCount; i++) workers.push(worker());
         await Promise.all(workers);
+        // In skip-failures mode holes (skipped files) are compacted out so the
+        // caller gets a dense array of what actually downloaded.
+        if (skipFailures) {
+            var dense = [];
+            for (var r = 0; r < results.length; r++) if (results[r]) dense.push(results[r]);
+            return dense;
+        }
         return results;
     }
 
@@ -1831,49 +1890,76 @@
     // Download a template bundle for import/generation. The returned extraFiles
     // preserve collected footage/assets next to the AEP so AE can relink them.
     async function downloadTemplate(storagePath) {
-        var allFiles = await collectAllFiles(storagePath);
         var chosenAepPath = null;
+        var aepBlob = null;
         var fastPath = storagePath + '/template.aep';
 
-        for (var af = 0; af < allFiles.length; af++) {
-            if (allFiles[af] === fastPath) {
+        // FAST PATH (documented two-stage contract): almost every template stores
+        // its .aep at the deterministic <storagePath>/template.aep. Download it
+        // DIRECTLY first so a slow or timing-out Storage list() can never block or
+        // fail an import/generate. This is what fixes the "List timed out after
+        // 15000ms" failure on the per-card Preview/Generate action - the .aep no
+        // longer depends on the expensive recursive folder listing.
+        try {
+            var fastResult = await sb.storage.from(BUCKET).download(fastPath);
+            if (!fastResult.error && fastResult.data) {
                 chosenAepPath = fastPath;
-                break;
+                aepBlob = fastResult.data;
             }
+        } catch (fastErr) { /* fall through to listing */ }
+
+        // Collect the rest of the bundle (footage / linked assets). This is the slow
+        // part. When we ALREADY have the .aep from the fast path, treat a list
+        // failure as NON-FATAL: proceed with an AEP-only bundle (AE substitutes
+        // placeholders for any un-fetched footage) instead of hard-failing the whole
+        // operation. A longer 45s list window also absorbs transient backend slowness.
+        var allFiles = [];
+        try {
+            allFiles = await collectAllFiles(storagePath, { _timeoutMs: 45000 });
+        } catch (listErr) {
+            if (!chosenAepPath) throw listErr; // no .aep yet AND cannot list -> real failure
+            _log('downloadTemplate: asset listing failed (' + (listErr && listErr.message || listErr) + '); proceeding with AEP-only bundle for ' + storagePath, 'warn');
+            allFiles = [chosenAepPath];
         }
 
+        // If the fast path missed (legacy templates whose .aep is not at the
+        // deterministic path), locate any .aep in the listed files.
         if (!chosenAepPath) {
-            for (var ap = 0; ap < allFiles.length; ap++) {
-                if (isAepPath(allFiles[ap])) {
-                    chosenAepPath = allFiles[ap];
-                    break;
+            for (var af = 0; af < allFiles.length; af++) {
+                if (allFiles[af] === fastPath) { chosenAepPath = fastPath; break; }
+            }
+            if (!chosenAepPath) {
+                for (var ap = 0; ap < allFiles.length; ap++) {
+                    if (isAepPath(allFiles[ap])) { chosenAepPath = allFiles[ap]; break; }
                 }
             }
-        }
-
-        if (!chosenAepPath) {
-            var filesResult = await sb.storage.from(BUCKET).list(storagePath, { limit: 1000 });
-            if (filesResult.error) {
-                throw new Error('Failed to list template files: ' + filesResult.error.message);
-            }
-            var _files = filesResult.data || [];
-            for (var _fi = 0; _fi < _files.length; _fi++) {
-                var _f = _files[_fi];
-                if (!_f || !_f.name || _f.id === null) continue;
-                if (isAepPath(_f.name)) {
-                    chosenAepPath = storagePath + '/' + _f.name;
-                    break;
+            if (!chosenAepPath) {
+                var filesResult = await sb.storage.from(BUCKET).list(storagePath, { limit: 1000 });
+                if (filesResult.error) {
+                    throw new Error('Failed to list template files: ' + filesResult.error.message);
+                }
+                var _files = filesResult.data || [];
+                for (var _fi = 0; _fi < _files.length; _fi++) {
+                    var _f = _files[_fi];
+                    if (!_f || !_f.name || _f.id === null) continue;
+                    if (isAepPath(_f.name)) {
+                        chosenAepPath = storagePath + '/' + _f.name;
+                        break;
+                    }
                 }
             }
+            if (!chosenAepPath) {
+                throw new Error('No .aep file found in template folder');
+            }
         }
 
-        if (!chosenAepPath) {
-            throw new Error('No .aep file found in template folder');
-        }
-
-        var downloadResult = await sb.storage.from(BUCKET).download(chosenAepPath);
-        if (downloadResult.error || !downloadResult.data) {
-            throw new Error('Failed to download template: ' + (downloadResult.error && downloadResult.error.message || 'unknown'));
+        // Download the .aep if the fast path did not already fetch it.
+        if (!aepBlob) {
+            var downloadResult = await sb.storage.from(BUCKET).download(chosenAepPath);
+            if (downloadResult.error || !downloadResult.data) {
+                throw new Error('Failed to download template: ' + (downloadResult.error && downloadResult.error.message || 'unknown'));
+            }
+            aepBlob = downloadResult.data;
         }
 
         var extraPaths = [];
@@ -1885,8 +1971,13 @@
 
         var extras = [];
         if (extraPaths.length > 0) {
-            extras = await downloadStorageFiles(extraPaths, storagePath, 6);
-            _log('downloadTemplate: downloaded AEP + ' + extras.length + ' bundle asset(s) for ' + storagePath, 'info');
+            try {
+                extras = await downloadStorageFiles(extraPaths, storagePath, 6);
+                _log('downloadTemplate: downloaded AEP + ' + extras.length + ' bundle asset(s) for ' + storagePath, 'info');
+            } catch (exErr) {
+                _log('downloadTemplate: bundle asset download failed (' + (exErr && exErr.message || exErr) + '); proceeding AEP-only for ' + storagePath, 'warn');
+                extras = [];
+            }
         }
 
         // --- Dependency-aware fetch (linked sub-comps / pre-comps) ---
@@ -1895,10 +1986,13 @@
         // lands with missing sources. Pull each declared dependency's importable
         // files into the bundle under (Footage)/_deps/ so the host relink pass can
         // re-point references. Legacy templates without the manifest get [].
-        var depExtras = await fetchDependencyExtras(storagePath);
+        var depExtras = [];
+        try {
+            depExtras = await fetchDependencyExtras(storagePath);
+        } catch (depErr) { depExtras = []; }
 
         return {
-            blob: downloadResult.data,
+            blob: aepBlob,
             fileName: chosenAepPath.split('/').pop(),
             storagePath: chosenAepPath,
             extraFiles: depExtras.length > 0 ? extras.concat(depExtras) : extras
@@ -1910,11 +2004,34 @@
     // import-essential bundle (AEP + footage), this returns every file in
     // the template folder for a complete local mirror. Used by local-sync.js.
     async function mirrorTemplate(storagePath, onFileDone) {
-        var allFiles = await collectAllFiles(storagePath);
+        // 45s list timeout (not the bare 15s default): under full-sync load the
+        // Storage list() for a single template folder routinely runs 10-15s, sitting
+        // right at the 15s cliff. A list timeout here throws, the template is marked
+        // failed, and full-sync churns re-attempting healthy templates forever without
+        // `complete` ever climbing. The generous timeout matches downloadTemplate.
+        // Skip oversized raw footage (see collectAllFiles): a local mirror is for instant
+        // .aep import, and a multi-GB source video buffered whole in the CEP heap hangs
+        // the download so the template never converges (e.g. a 1.74GB "Raw Cam.mp4"). The
+        // .aep + thumbnail + preview are always kept, so the comp still imports.
+        var skippedLarge = [];
+        var allFiles = await collectAllFiles(storagePath, { _timeoutMs: 45000, _skipLargerThan: MIRROR_MAX_FOOTAGE_BYTES, _skippedLarge: skippedLarge });
+        if (skippedLarge.length > 0) {
+            var _mb = 0; for (var _sl = 0; _sl < skippedLarge.length; _sl++) { _mb += skippedLarge[_sl].size; }
+            _log('mirrorTemplate: ' + storagePath + ' skipped ' + skippedLarge.length + ' oversized footage file(s) (~'
+                + Math.round(_mb / (1024 * 1024)) + 'MB) — comp imports from its .aep; heavy raw source not mirrored', 'warn');
+        }
         if (allFiles.length === 0) {
             throw new Error('No files found in template folder: ' + storagePath);
         }
-        var downloaded = await downloadStorageFiles(allFiles, storagePath, 6, onFileDone);
+        // Skip-failures mode: a single broken/phantom footage object (e.g. a raw
+        // .mp4 with no size metadata whose download never yields bytes) is skipped
+        // rather than failing the entire template. Per Petter, missing footage is
+        // usually non-critical (heavy raw footage / decorative images) and the comp
+        // still imports from its .aep. Without this one bad file churned full-sync
+        // forever (marked the whole healthy template "failed"). We REQUIRE the .aep
+        // below, so a template is only ever completed when it is genuinely importable.
+        var skippedFiles = [];
+        var downloaded = await downloadStorageFiles(allFiles, storagePath, 6, onFileDone, { skipFailures: true, skipped: skippedFiles });
         var aepPath = '';
         var totalSize = 0;
         for (var i = 0; i < downloaded.length; i++) {
@@ -1922,6 +2039,27 @@
             if (!aepPath && isAepPath(downloaded[i].path)) {
                 aepPath = downloaded[i].path;
             }
+        }
+        // The .aep is the one file a local import cannot work without. If it did not
+        // land (network, or a genuinely broken .aep object), this is a real source
+        // problem — throw so the template is marked broken/re-stash, not completed.
+        // A template folder legitimately without an .aep (thumbnail-only placeholder)
+        // has none listed, so aepPath stays '' only when a real .aep failed to pull.
+        var expectedAep = false;
+        for (var ae = 0; ae < allFiles.length; ae++) { if (isAepPath(allFiles[ae])) { expectedAep = true; break; } }
+        if (expectedAep && !aepPath) {
+            throw new Error('Template .aep could not be downloaded (source problem): ' + storagePath);
+        }
+        // A folder with NO .aep at all (only metadata.json / a stray thumbnail) can
+        // never be imported from the local mirror — there is nothing to open. This is
+        // a TERMINAL empty template, not a re-stash and not pending: it must drop out
+        // of the syncable universe so the run can reach 100% of what CAN sync instead
+        // of parking forever on "1 not synced". Distinct message → classified 'empty'.
+        if (!expectedAep) {
+            throw new Error('Empty template folder (no importable .aep): ' + storagePath);
+        }
+        if (skippedFiles.length > 0) {
+            _log('mirrorTemplate: ' + storagePath + ' completed with ' + skippedFiles.length + ' footage file(s) skipped (unrecoverable in storage)', 'warn');
         }
         // Mirror declared dependencies too (split linked-comp / pre-comp folders)
         // so a synced template relinks them durably from the persistent local
@@ -1941,7 +2079,8 @@
             files: downloaded,
             aepBlob: null,
             fileCount: downloaded.length,
-            sizeBytes: totalSize
+            sizeBytes: totalSize,
+            skippedCount: skippedFiles.length
         };
     }
 
@@ -2162,16 +2301,52 @@
      * Subfolders are recursed in PARALLEL (Promise.all) instead of sequential await,
      * which is the dominant cost when processing categories with many comp folders.
      */
-    async function collectAllFiles(folderPath) {
-        var items = await listAllPaginated(folderPath, { sortBy: { column: 'name', order: 'asc' } });
+    // Is this file essential to a LOCAL MIRROR (import from disk)? The .aep is the one
+    // file an import cannot work without; comp.png / metadata.json / preview frames are
+    // small and drive the tile + hover. These are NEVER skipped by the size cap. Heavy
+    // raw footage under (Footage)/ is decorative/source the comp still imports without.
+    function _isMirrorEssential(relOrPath) {
+        var lower = String(relOrPath).toLowerCase();
+        if (isAepPath(lower)) return true;
+        var base = lower.split('/').pop();
+        if (base === 'comp.png' || base === 'thumbnail.png' || base === 'metadata.json') return true;
+        if (lower.indexOf('/preview/') !== -1) return true;
+        return false;
+    }
+
+    async function collectAllFiles(folderPath, opts) {
+        var listOpts = { sortBy: { column: 'name', order: 'asc' } };
+        // Callers (e.g. downloadTemplate) can pass a longer per-page list timeout so
+        // a slow Storage list() on a big footage bundle does not fail at the default
+        // 15s. Forwarded to listAllPaginated -> _listWithTimeout.
+        if (opts && opts._timeoutMs) listOpts._timeoutMs = opts._timeoutMs;
+        var cap = opts && opts._skipLargerThan ? opts._skipLargerThan : 0;
+        var items = await listAllPaginated(folderPath, listOpts);
         var filePaths = [];
         var subfolderPromises = [];
         for (var i = 0; i < items.length; i++) {
+            // Skip Supabase's `.emptyFolderPlaceholder` marker: it is a phantom 0-byte
+            // object that a folder listing reports but that download() hangs on (the
+            // real object is often gone once the folder has content), timing out after
+            // 180s and marking a perfectly-healthy template "failed" so full-sync churns
+            // and never converges. It is never real template content — never download it.
+            if (items[i].name === '.emptyFolderPlaceholder') continue;
             if (items[i].id === null) {
-                // Subfolder — kick off parallel recursion
-                subfolderPromises.push(collectAllFiles(folderPath + '/' + items[i].name));
+                // Subfolder — kick off parallel recursion (propagate the timeout)
+                subfolderPromises.push(collectAllFiles(folderPath + '/' + items[i].name, opts));
             } else {
-                filePaths.push(folderPath + '/' + items[i].name);
+                var full = folderPath + '/' + items[i].name;
+                // SIZE CAP: a local mirror exists for instant .aep import; a multi-GB raw
+                // source video buffered whole in the CEP heap hangs/OOMs the download and
+                // the template never converges. Skip oversized NON-ESSENTIAL files (heavy
+                // footage), never the .aep/thumbnail/preview. The comp still imports from
+                // its .aep; genuinely-needed footage surfaces as a re-stash note at import.
+                if (cap > 0 && items[i].metadata && typeof items[i].metadata.size === 'number'
+                    && items[i].metadata.size > cap && !_isMirrorEssential(full)) {
+                    if (opts._skippedLarge) opts._skippedLarge.push({ path: full, size: items[i].metadata.size });
+                    continue;
+                }
+                filePaths.push(full);
             }
         }
         if (subfolderPromises.length > 0) {
@@ -2201,6 +2376,10 @@
         var trustworthy = true;
         var subPromises = [];
         for (var i = 0; i < items.length; i++) {
+            // Ignore the empty-folder placeholder (see collectAllFiles): it is not real
+            // content and its 0-byte size would wrongly flip `trustworthy` off, forcing
+            // an otherwise-packable template to sync strictly serially.
+            if (items[i].name === '.emptyFolderPlaceholder') continue;
             if (items[i].id === null) {
                 subPromises.push(getTemplateSize(storagePath + '/' + items[i].name));
             } else if (items[i].metadata && typeof items[i].metadata.size === 'number' && items[i].metadata.size > 0) {
@@ -2382,6 +2561,46 @@
             throw new Error('Failed to update metadata: ' + uploadResult.error.message);
         }
         invalidateCacheForPath(storagePath);
+    }
+
+    // Set a template's category tags (multi-category). The FIRST entry is the primary
+    // (home for display); the full array is what the grid/sidebar filter on so a
+    // template can appear under several categories at once. This is metadata-only — the
+    // physical storage folder never moves, so nothing re-mirrors. Additive + reversible:
+    // it only writes the `categories` array onto the existing metadata.json.
+    async function setTemplateCategories(storagePath, categories) {
+        if (!storagePath) throw new Error('storagePath required');
+        if (!categories || !categories.length) throw new Error('at least one category required');
+        // Normalize: trim, drop blanks, de-dupe preserving order (primary stays first).
+        var clean = [];
+        for (var i = 0; i < categories.length; i++) {
+            var c = String(categories[i] || '').trim();
+            if (c && clean.indexOf(c) === -1) clean.push(c);
+        }
+        if (!clean.length) throw new Error('at least one non-empty category required');
+
+        var metadataPath = storagePath + '/metadata.json';
+        var metaDownload = await sb.storage.from(BUCKET).download(metadataPath);
+        // A download error is NOT "no metadata" — Storage returns an error object for
+        // transient 5xx/timeout/network blips too, and treating those as missing would
+        // rebuild metadata from {} and clobber the entire file (displayName, dimensions,
+        // thumbnail-verified state, dependency relink manifest) on upsert. Every template
+        // this function edits already HAS a metadata.json (it is rendered from one), so a
+        // read failure means "try again later", never "recreate". Mirror renameTemplate:
+        // throw on the read error; only recreate on a genuinely corrupt (unparseable) file.
+        if (metaDownload.error) {
+            throw new Error('Failed to read metadata: ' + metaDownload.error.message);
+        }
+        var metadata;
+        try { metadata = JSON.parse(await metaDownload.data.text()); }
+        catch (e) { _log('setTemplateCategories: metadata parse failed for ' + metadataPath + ', recreating', 'warn'); metadata = {}; }
+        metadata.categories = clean;
+
+        var metaBlob = new Blob([JSON.stringify(metadata)], { type: 'application/json' });
+        var up = await sb.storage.from(BUCKET).upload(metadataPath, metaBlob, { contentType: 'application/json', upsert: true });
+        if (up.error) throw new Error('Failed to write categories: ' + up.error.message);
+        invalidateCacheForPath(storagePath);
+        return clean;
     }
 
     // Rename a category (handles nested subfolders like preview/).
@@ -2700,6 +2919,7 @@
         recoverTemplate: recoverTemplate,
         purgeTrash: purgeTrash,
         renameTemplate: renameTemplate,
+        setTemplateCategories: setTemplateCategories,
         renameCategory: renameCategory,
         deleteCategory: deleteCategory,
         moveTemplate: moveTemplate,

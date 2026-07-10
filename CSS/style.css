@@ -287,7 +287,7 @@ body {
     font-weight: 500;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: var(--text-faint);
+    color: var(--text-muted);
 }
 
 .nav-item {
@@ -348,7 +348,8 @@ body {
 
 .nav-count {
     font-size: 11px;
-    color: var(--text-faint);
+    /* Was --text-faint (#52525B): too dim on the sidebar bg to read the count. */
+    color: var(--text-muted);
     min-width: 20px;
     text-align: right;
 }
@@ -380,7 +381,7 @@ body {
     align-items: center;
     gap: var(--sp-2);
     padding: var(--sp-2) var(--sp-3);
-    color: var(--text-faint);
+    color: var(--text-muted);
     text-decoration: none;
     font-size: 11px;
     border-radius: var(--radius-md);
@@ -389,7 +390,7 @@ body {
 }
 
 .sidebar-footer-link:hover {
-    color: var(--text-muted);
+    color: var(--text-secondary);
     background-color: var(--bg-card-hover);
 }
 
@@ -738,7 +739,7 @@ body {
     background-color: var(--bg-card);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-lg);
-    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    box-shadow: 0 8px 24px -6px rgba(0, 0, 0, 0.6);
     opacity: 0;
     visibility: hidden;
     transform: translateY(-4px);
@@ -776,9 +777,8 @@ body {
 }
 
 .dropdown-item.is-disabled {
-    color: var(--text-faint);
+    color: var(--text-muted);
     cursor: not-allowed;
-    opacity: 0.58;
 }
 
 .dropdown-item.is-disabled:hover {
@@ -955,7 +955,7 @@ body {
     justify-content: center;
     width: 100%;
     height: 100%;
-    color: var(--text-faint);
+    color: var(--text-muted);
     font-size: 12px;
     background: var(--bg-card);
 }
@@ -1100,11 +1100,52 @@ body {
 
 .item-category {
     font-size: 11px;
-    color: var(--text-faint);
+    color: var(--text-muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
+/* Multi-category hint: a template tagged in more than one category shows "+N".
+   Bright-on-dark accent so it reads on the near-black card (never dim-on-dark). */
+.item-category-more {
+    margin-left: 4px;
+    padding: 0 5px;
+    border-radius: 999px;
+    font-size: 9px;
+    font-weight: 600;
+    color: var(--accent-green-text);
+    background: var(--accent-green-subtle);
+}
+
+/* Multi-category edit modal: scrollable checkbox list, each row with an optional
+   "primary" radio revealed once the row is checked. */
+.edit-cats-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 300px;
+    overflow-y: auto;
+    margin-bottom: var(--sp-3);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    padding: var(--sp-1);
+}
+.edit-cat-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-2);
+    padding: 6px 8px;
+    border-radius: var(--radius-sm);
+}
+.edit-cat-row:hover { background: var(--bg-card-hover); }
+.edit-cat-main { display: flex; align-items: center; gap: 8px; cursor: pointer; flex: 1; min-width: 0; }
+.edit-cat-main input { accent-color: var(--accent-green); flex-shrink: 0; }
+.edit-cat-name { font-size: 13px; color: var(--text-secondary); }
+.edit-cat-prim { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; flex-shrink: 0;
+    font-size: 11px; color: var(--accent-green-text); }
+.edit-cat-prim input { accent-color: var(--accent-green); }
+.edit-cat-prim.hidden { visibility: hidden; }
 
 .item-duration {
     flex-shrink: 0;
@@ -1119,7 +1160,7 @@ body {
     justify-content: center;
     gap: var(--sp-1);
     width: 100%;
-    padding: 10px;
+    padding: var(--sp-3);
     background-color: transparent;
     border: none;
     border-top: 1px solid var(--border-subtle);
@@ -1219,14 +1260,17 @@ body {
     justify-content: center;
     padding: var(--sp-8);
     text-align: center;
-    color: var(--text-faint);
+    /* Was --text-faint (#52525B): too dim to read on the near-black page bg.
+       --text-muted keeps it clearly legible (no dim-on-dark). */
+    color: var(--text-muted);
 }
 
 .empty-state-icon {
     width: 48px;
     height: 48px;
     margin-bottom: var(--sp-4);
-    color: var(--icon-muted);
+    /* Was --icon-muted (#3F3F46): nearly invisible on #09090B. */
+    color: var(--text-muted);
 }
 
 .empty-state-title {
@@ -1241,6 +1285,32 @@ body {
     color: var(--text-muted);
     max-width: 280px;
 }
+
+/* Loading / empty / error states for the Errors + Team analytics panels.
+   Without these they rendered as raw white text jammed top-left; match the
+   centered, padded, muted placeholder pattern used everywhere else. */
+.analytics-loading,
+.analytics-empty {
+    padding: var(--sp-8);
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 13px;
+}
+
+/* Team-tab filter input (find one of 144 members without scrolling). */
+.team-search-input {
+    width: 100%;
+    max-width: 320px;
+    padding: var(--sp-2) var(--sp-3);
+    margin: var(--sp-4) 0 var(--sp-3);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    font-size: 13px;
+}
+.team-search-input::placeholder { color: var(--text-muted); }
+.team-search-input:focus { outline: none; border-color: var(--accent-green); }
 
 /* ========================================
    MODALS
@@ -1292,7 +1362,7 @@ body {
 
 .modal-box p {
     font-size: 13px;
-    color: var(--text-muted);
+    color: var(--text-tertiary);
     line-height: 1.5;
     margin-bottom: var(--sp-5);
 }
@@ -1301,6 +1371,42 @@ body {
     display: flex;
     gap: var(--sp-3);
     justify-content: flex-end;
+}
+
+/* All modal action buttons share ONE height/shape so primary and secondary
+   never mismatch (the primary is 48px tall by default for full-width auth
+   forms; inside a modal it must sit level with the 36px secondary/danger). */
+.modal-buttons .button-primary,
+.modal-buttons .button-secondary,
+.modal-buttons .button-danger {
+    height: 40px;
+    width: auto;
+    min-width: 104px;
+    margin-bottom: 0;
+    padding: 0 var(--sp-5);
+    font-size: 13px;
+}
+
+/* Add-to-Library favorite toggle row */
+.add-fav-row {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    margin-bottom: var(--sp-4);
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: 13px;
+    user-select: none;
+}
+.add-fav-row input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--accent-green);
+    cursor: pointer;
+    margin: 0;
+}
+.add-fav-row:hover {
+    color: var(--text-primary);
 }
 
 /* Form Elements */
@@ -1388,14 +1494,14 @@ body {
 .delete-category-options {
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    margin: 12px 0;
+    gap: var(--sp-2);
+    margin: var(--sp-3) 0;
 }
 
 .radio-option {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--sp-2);
     cursor: pointer;
     font-size: 13px;
     color: var(--text-secondary);
@@ -1422,7 +1528,7 @@ body {
     padding: 8px 12px;
     background: var(--bg-card);
     border: 1px solid var(--accent-green-text);
-    border-radius: 8px;
+    border-radius: var(--radius-lg);
     margin-bottom: 12px;
 }
 
@@ -1441,7 +1547,7 @@ body {
     height: 28px;
     padding: 0 10px;
     font-size: 12px;
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     border: 1px solid var(--border-subtle);
     background: var(--bg-input);
     color: var(--text-secondary);
@@ -1546,7 +1652,7 @@ body {
     color: var(--text-primary);
     font-size: 13px;
     font-weight: 500;
-    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    box-shadow: 0 8px 24px -6px rgba(0, 0, 0, 0.6);
     opacity: 0;
     pointer-events: none;
     transition: all var(--transition-normal);
@@ -1821,7 +1927,7 @@ header { display: contents; }
 }
 
 .action-btn.favorite-btn {
-    color: var(--text-faint);
+    color: var(--text-tertiary);
 }
 
 .action-btn.favorite-btn:hover {
@@ -1869,7 +1975,10 @@ header { display: contents; }
    ANIMATIONS
    ======================================== */
 
-.stash-item {
+/* Entrance animation runs ONLY on a fresh view (the JS adds .grid-animate-in
+   on category/view changes, not on search-keystroke re-renders) so typing to
+   filter stays flicker-free. */
+.grid-animate-in .stash-item {
     animation: fadeIn 0.2s ease forwards;
 }
 
@@ -1878,14 +1987,14 @@ header { display: contents; }
     to { opacity: 1; }
 }
 
-.stash-item:nth-child(1) { animation-delay: 0.02s; }
-.stash-item:nth-child(2) { animation-delay: 0.04s; }
-.stash-item:nth-child(3) { animation-delay: 0.06s; }
-.stash-item:nth-child(4) { animation-delay: 0.08s; }
-.stash-item:nth-child(5) { animation-delay: 0.10s; }
-.stash-item:nth-child(6) { animation-delay: 0.12s; }
-.stash-item:nth-child(7) { animation-delay: 0.14s; }
-.stash-item:nth-child(8) { animation-delay: 0.16s; }
+.grid-animate-in .stash-item:nth-child(1) { animation-delay: 0.02s; }
+.grid-animate-in .stash-item:nth-child(2) { animation-delay: 0.04s; }
+.grid-animate-in .stash-item:nth-child(3) { animation-delay: 0.06s; }
+.grid-animate-in .stash-item:nth-child(4) { animation-delay: 0.08s; }
+.grid-animate-in .stash-item:nth-child(5) { animation-delay: 0.10s; }
+.grid-animate-in .stash-item:nth-child(6) { animation-delay: 0.12s; }
+.grid-animate-in .stash-item:nth-child(7) { animation-delay: 0.14s; }
+.grid-animate-in .stash-item:nth-child(8) { animation-delay: 0.16s; }
 
 @keyframes importPulse {
     0% { box-shadow: 0 0 0 0 rgba(74, 222, 128, 0.3); }
@@ -2011,7 +2120,7 @@ button:focus-visible {
 }
 
 #debug-log-content .log-entry { margin-bottom: 2px; }
-#debug-log-content .log-info { color: #8bc8f0; }
+#debug-log-content .log-info { color: #c4b5fd; }
 #debug-log-content .log-warn { color: var(--warning); }
 #debug-log-content .log-error { color: var(--error); }
 #debug-log-content .log-success { color: var(--success); }
@@ -2847,14 +2956,14 @@ body.debug-panel-open #app {
     font-size: 14px;
     font-weight: 600;
     color: var(--text-primary);
-    margin-bottom: var(--sp-4);
+    margin-bottom: var(--sp-3);
 }
 
 .css-bar-chart {
     display: flex;
     align-items: flex-end;
     gap: 3px;
-    height: 180px;
+    height: 130px;
     padding: 0 2px;
     border-bottom: 1px solid var(--border-subtle);
 }
@@ -3113,8 +3222,8 @@ body.debug-panel-open #app {
 }
 
 .event-icon.view {
-    background: rgba(96, 165, 250, 0.12);
-    color: #60A5FA;
+    background: rgba(113, 113, 122, 0.14);
+    color: var(--text-tertiary);
 }
 
 .event-icon.favorite {
@@ -3392,14 +3501,14 @@ body.debug-panel-open #app {
     color: var(--text-muted);
 }
 
-/* Multi-series bar chart: sessions bar */
+/* Multi-series bar chart: sessions bar (neutral grey second series, no blue) */
 .chart-bar.sessions {
-    background: rgba(96, 165, 250, 0.5);
+    background: rgba(113, 113, 122, 0.55);
     border-radius: 3px 3px 0 0;
 }
 
 .chart-legend-dot.sessions {
-    background: rgba(96, 165, 250, 0.6);
+    background: rgba(113, 113, 122, 0.7);
 }
 
 /* Category breakdown chart */
@@ -3645,6 +3754,13 @@ body.debug-panel-open #app {
     min-width: 0;
 }
 
+/* Keep both columns' first heading on the same baseline (the right column's
+   first .analytics-table-section otherwise sits var(--sp-3) lower than the
+   left column's chart). */
+.analytics-col > .analytics-table-section:first-child {
+    margin-top: 0;
+}
+
 /* ========================================
    EDITOR LEADERBOARD
    ======================================== */
@@ -3676,9 +3792,9 @@ body.debug-panel-open #app {
     text-align: center;
 }
 
-.leaderboard-rank.top-1 { color: #FACC15; }
-.leaderboard-rank.top-2 { color: #D4D4D8; }
-.leaderboard-rank.top-3 { color: #D97706; }
+.leaderboard-rank.top-1 { color: var(--warning); }
+.leaderboard-rank.top-2 { color: var(--text-secondary); }
+.leaderboard-rank.top-3 { color: #F59E0B; }
 
 .leaderboard-avatar {
     flex: 0 0 28px;
@@ -3717,6 +3833,88 @@ body.debug-panel-open #app {
     font-size: 14px;
     font-weight: 700;
     color: var(--accent-green-text);
+}
+
+/* ========================================
+   TOP TEMPLATES (overview, full width)
+   ======================================== */
+.top-templates-section {
+    margin-top: var(--sp-4);
+}
+
+.top-templates-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.top-template-row {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    padding: var(--sp-2) var(--sp-3);
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    transition: background var(--transition-fast);
+}
+
+.top-template-row:hover {
+    background: var(--bg-elevated);
+}
+
+.top-template-rank {
+    flex: 0 0 22px;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text-faint);
+    text-align: center;
+}
+
+.top-template-rank.top-1 { color: var(--warning); }
+.top-template-rank.top-2 { color: var(--text-secondary); }
+.top-template-rank.top-3 { color: #F59E0B; }
+
+.top-template-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.top-template-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.top-template-meta {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.top-template-stats {
+    flex: 0 0 auto;
+    display: flex;
+    gap: var(--sp-4);
+    align-items: baseline;
+}
+
+.top-template-stats .tt-stat {
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+.top-template-stats .tt-val {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text-secondary);
+}
+
+@media (max-width: 640px) {
+    .top-template-stats { gap: var(--sp-2); }
+    .top-template-stats .tt-stat:nth-child(3) { display: none; }
 }
 
 /* ========================================
@@ -3830,6 +4028,15 @@ body.debug-panel-open #app {
     color: var(--accent-green-text);
 }
 
+.command-center-subtitle {
+    font-size: 12px;
+    color: var(--text-muted);
+    font-weight: 500;
+    margin-left: var(--sp-2);
+    padding-left: var(--sp-2);
+    border-left: 1px solid var(--border-default);
+}
+
 .command-center-timestamp {
     font-size: 11px;
     color: var(--text-muted);
@@ -3841,7 +4048,7 @@ body.debug-panel-open #app {
     background: var(--bg-card);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-lg);
-    padding: var(--sp-4) var(--sp-3) var(--sp-3);
+    padding: var(--sp-3) var(--sp-3) var(--sp-2);
     margin-bottom: var(--sp-3);
     overflow: hidden;
 }
@@ -3876,7 +4083,7 @@ body.debug-panel-open #app {
 .command-map-svg {
     width: 100%;
     height: auto;
-    max-height: 180px;
+    max-height: 120px;
     display: block;
 }
 
@@ -3887,8 +4094,8 @@ body.debug-panel-open #app {
 }
 
 .map-continents path {
-    fill: rgba(34, 197, 94, 0.06);
-    stroke: rgba(34, 197, 94, 0.18);
+    fill: rgba(34, 197, 94, 0.10);
+    stroke: rgba(34, 197, 94, 0.28);
     stroke-width: 0.4;
     stroke-linejoin: round;
 }
@@ -3925,7 +4132,7 @@ body.debug-panel-open #app {
     text-align: center;
     padding: var(--sp-2) 0 0;
     font-size: 11px;
-    color: var(--text-faint);
+    color: var(--text-muted);
     letter-spacing: 0.02em;
 }
 
@@ -4015,6 +4222,16 @@ body.debug-panel-open #app {
     }
 }
 
+/* Team + Errors tabs wrap exactly 3 compact stat cards in this row; without a
+   rule the block-level cards stacked vertically full-width. Mirrors the 6-col
+   summary layout. */
+.analytics-summary-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--sp-2);
+    margin-bottom: var(--sp-4);
+}
+
 .analytics-stat-card-compact {
     background: var(--bg-card);
     border: 1px solid var(--border-subtle);
@@ -4094,7 +4311,7 @@ body.debug-panel-open #app {
 
 .compact-trend.up { color: var(--success); }
 .compact-trend.down { color: var(--error); }
-.compact-trend.neutral { color: var(--text-faint); }
+.compact-trend.neutral { color: var(--text-muted); }
 
 /* --------- Toggle Switch (Team Management) --------- */
 .blitz-toggle {
@@ -4256,7 +4473,9 @@ body.debug-panel-open #app {
 }
 
 .sync-badge-partial .sync-badge-icon {
-    color: var(--accent-green-text);
+    /* Partial sync is NOT done — a green check here reads as "complete" and misleads.
+       Use the warning color so partial clearly means in-progress/incomplete. */
+    color: var(--warning);
 }
 
 .sync-badge-none .sync-badge-icon {
@@ -4389,6 +4608,7 @@ body.debug-panel-open #app {
 .sd-stat { font-size: 13px; color: var(--text-tertiary); }
 .sd-stat strong { color: var(--text-primary); font-weight: 600; }
 .sd-stat-pending strong { color: var(--warning); }
+.sd-stat-failed strong { color: var(--warning); }
 .sd-stat-broken strong { color: var(--error); }
 .sync-dash-progress {
     height: 8px; background: var(--bg-elevated); border-radius: 999px;
@@ -4433,12 +4653,26 @@ body.debug-panel-open #app {
 .sd-row-meta { display: flex; align-items: center; gap: var(--sp-2); flex-shrink: 0; }
 .sd-row-size { font-size: 11px; color: var(--text-muted); }
 .sd-row-reason { font-size: 11px; color: var(--error); }
+/* Calm advisory note (empty / re-stash-to-fix-footage): muted, never red. Light-on-dark. */
+.sd-row-note { font-size: 11px; color: var(--text-muted); font-style: italic; }
+.sd-stat-empty strong { color: var(--text-tertiary); }
 .sd-chip { font-size: 11px; font-weight: 600; padding: 2px 10px; border-radius: 999px; white-space: nowrap; }
 .sd-chip-complete { background: rgba(74,222,128,0.12); color: var(--accent-green-text); }
 .sd-chip-syncing  { background: rgba(250,204,21,0.14); color: var(--warning); }
 .sd-chip-pending  { background: var(--bg-elevated); color: var(--text-tertiary); }
 .sd-chip-broken   { background: rgba(248,113,113,0.14); color: var(--error); }
 .sd-chip-failed   { background: rgba(250,204,21,0.14); color: var(--warning); }
+/* Terminal empty: muted grey, NOT red — it is not an actionable error. Light-on-dark. */
+.sd-chip-empty    { background: var(--bg-elevated); color: var(--text-muted); }
+/* In-flight shimmer so the progress bar never looks frozen while a large template
+   downloads (its width holds until that template completes and the count ticks up). */
+.sync-dash-bar.sd-bar-active {
+    background-image: linear-gradient(90deg,
+        var(--accent-green) 0%, var(--accent-green-text) 50%, var(--accent-green) 100%);
+    background-size: 200% 100%;
+    animation: sd-bar-shimmer 1.4s linear infinite;
+}
+@keyframes sd-bar-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 .sd-empty { color: var(--text-muted); font-size: 13px; padding: var(--sp-4); text-align: center; }
 
 /* ─────────────── Grid filter bar (favorites-by-editor + submitted-by) ─────────────── */

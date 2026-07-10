@@ -78,11 +78,86 @@
 
     /** Load the full sync state from localStorage. */
     function _loadState() {
+        var state;
         try {
-            return JSON.parse(localStorage.getItem(STATE_KEY) || 'null') || { templates: {} };
+            state = JSON.parse(localStorage.getItem(STATE_KEY) || 'null') || { templates: {} };
         } catch (e) {
             return { templates: {} };
         }
+        // One-time repair: earlier builds wrote thumbnail-render failures into the
+        // SYNC state via markBroken(), so ~20 fully-mirrored templates wore a false
+        // "Needs re-stash" chip even though every byte was on disk. Clear those
+        // legacy flags exactly once. A thumbnail failure is now tracked in a separate
+        // cosmetic key (blitzkrieg_thumb_failed) and never touches sync state.
+        if (!state.migratedThumbBroken) {
+            state = _migrateLegacyBrokenFlags(state);
+        }
+        return state;
+    }
+
+    /**
+     * Clear legacy thumbnail-render broken flags. Only touches entries that are (a)
+     * marked broken, (b) carry NO brokenKind (the old markBroken never set one), AND
+     * (c) whose reason names a thumbnail render failure. A thumbnail render failure is
+     * ALWAYS cosmetic — it never indicates a sync problem — so we clear it regardless
+     * of the complete flag (the old thumbnail-gen path fired markBroken WITHOUT setting
+     * the full-mirror complete flag, so most such entries are complete:false and a
+     * complete-only gate would leave them falsely "Needs re-stash"). The thumbnail
+     * reason string ("thumbnail render failed" / "unrenderable source") cannot collide
+     * with the import-relink footage reason ("N source file(s) missing"), so genuine
+     * footage breaks are preserved untouched. Returns the (mutated) state, persists once.
+     */
+    function _migrateLegacyBrokenFlags(state) {
+        try {
+            var tpls = state.templates || {};
+            var keys = Object.keys(tpls);
+            for (var i = 0; i < keys.length; i++) {
+                var t = tpls[keys[i]];
+                if (!t || !t.broken || t.brokenKind) continue;
+                var reason = String(t.broken).toLowerCase();
+                var isThumbReason = reason.indexOf('thumbnail render failed') !== -1
+                    || reason.indexOf('unrenderable source') !== -1;
+                if (isThumbReason) {
+                    delete t.broken;
+                    delete t.brokenTs;
+                }
+            }
+            state.migratedThumbBroken = true;
+            localStorage.setItem(STATE_KEY, JSON.stringify(state));
+        } catch (e) {
+            state.migratedThumbBroken = true; // never loop on a corrupt entry
+        }
+        return state;
+    }
+
+    /**
+     * Shared classifier for a single template's sync-state entry. The ONE place that
+     * decides what a stored entry means, so the badge, the dashboard list, and the
+     * summary counts can never drift apart. Pure — takes the entry and a precomputed
+     * stale flag (content changed in cloud since mirror).
+     *   status ∈ 'complete' | 'broken' | 'failed' | 'empty' | 'pending'
+     *   advisory ∈ '' | 'restash'  (a complete mirror that still references missing
+     *             footage — it imports fine from its downloaded .aep meanwhile)
+     */
+    function _classifyEntry(t, stale) {
+        if (!t) return { status: 'pending', advisory: '' };
+        var kind = t.brokenKind || '';
+        if (t.complete && !stale) {
+            // A complete mirror dominates every non-source break. A genuine source
+            // (missing-footage) break earns a muted advisory, and even then the comp
+            // still imports from its .aep so it stays counted complete. Legacy footage
+            // breaks carry no brokenKind (kind === ''); by the time this runs, the load
+            // migration has already stripped legacy THUMBNAIL breaks, so a remaining
+            // kindless break on a complete mirror is a real footage break → advise too.
+            if (t.broken && (kind === 'source' || kind === '')) return { status: 'complete', advisory: 'restash' };
+            return { status: 'complete', advisory: '' };
+        }
+        if (t.broken) {
+            if (kind === 'empty') return { status: 'empty', advisory: '' };      // terminal: no content in cloud
+            if (kind === 'transient') return { status: 'failed', advisory: '' }; // retryable network give-up
+            return { status: 'broken', advisory: '' };                           // 'source' or legacy undefined
+        }
+        return { status: 'pending', advisory: '' };
     }
 
     /** Save the sync state to localStorage. */
@@ -245,6 +320,23 @@
             if (!path) return Promise.resolve({ error: 'no path' });
             var safe = path.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
             return _callExtendScript('blitzGetDiskFree("' + safe + '")');
+        },
+
+        /**
+         * Verify the configured library ROOT still exists on disk. Detects the
+         * "I moved / unplugged the library" case so the UI can prompt a re-pick
+         * instead of silently re-downloading everything into a vanished path.
+         * @returns {Promise<{configured:boolean, exists:boolean, path:string}>}
+         */
+        checkLibraryRoot: function () {
+            var lib = _getLibraryPath();
+            if (!lib) return Promise.resolve({ configured: false, exists: false, path: '' });
+            var safe = lib.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+            return _callExtendScript('blitzLocalExists("' + safe + '")').then(function (r) {
+                return { configured: true, exists: !!(r && r.exists), path: lib };
+            }, function () {
+                return { configured: true, exists: false, path: lib };
+            });
         },
 
         /**
@@ -650,7 +742,8 @@
             var thumbSynced = 0; // thumbnail cached locally (the automatic default)
             for (var i = 0; i < keys.length; i++) {
                 var t = templates[keys[i]];
-                if (t.complete) synced++;
+                // Same classifier as the badge + dashboard so the three never drift.
+                if (_classifyEntry(t, false).status === 'complete') synced++;
                 if (t.complete || t.thumbComplete) thumbSynced++;
             }
             return {
@@ -676,12 +769,23 @@
          */
         _classifySyncError: function (err) {
             var msg = (err && err.message ? err.message : String(err || '')).toLowerCase();
-            if (msg.indexOf('no files found') !== -1
-                || msg.indexOf('no .aep') !== -1
-                || msg.indexOf('not found') !== -1
-                || msg.indexOf('object not found') !== -1) {
+            // TERMINAL EMPTY: the folder has no importable .aep at all — nothing will
+            // ever download, so it leaves the syncable universe (not counted broken,
+            // not retried, not pending).
+            if (msg.indexOf('empty template folder') !== -1
+                || msg.indexOf('no files found') !== -1
+                || msg.indexOf('no .aep') !== -1) {
+                return 'empty';
+            }
+            // SOURCE PROBLEM: an .aep is expected but could not be pulled (or the
+            // object is genuinely missing) — a real re-stash.
+            if (msg.indexOf('source problem') !== -1
+                || msg.indexOf('could not be downloaded') !== -1
+                || msg.indexOf('object not found') !== -1
+                || msg.indexOf('not found') !== -1) {
                 return 'broken';
             }
+            // Everything else (timeouts, transient network) is a retryable failure.
             return 'failed';
         },
 
@@ -904,9 +1008,18 @@
                         // run and full-sync never reaches "done". After MAX_SYNC_FAILS
                         // consecutive failures, promote to broken so _pendingFor skips
                         // it and the run converges; a "Regenerate/retry" clears it.
-                        if (kind === 'broken') {
-                            // Unrenderable source (no .aep / missing footage): permanent
-                            // until re-stashed. Not retried by _pendingFor.
+                        if (kind === 'empty') {
+                            // TERMINAL empty: no importable .aep exists in the cloud
+                            // folder. Never retried, never counted as a re-stash — it
+                            // simply leaves the syncable universe so the run can finish.
+                            entry.broken = (err && err.message) ? err.message : 'empty template';
+                            entry.brokenKind = 'empty';
+                            entry.brokenTs = Date.now();
+                            entry.failCount = 0;
+                            st3.templates[sp] = entry;
+                        } else if (kind === 'broken') {
+                            // Unrenderable source (missing .aep object / missing footage):
+                            // permanent until re-stashed. Not retried by _pendingFor.
                             entry.broken = (err && err.message) ? err.message : 'unavailable';
                             entry.brokenKind = 'source';
                             entry.brokenTs = Date.now();
@@ -1010,7 +1123,7 @@
          * done/total are computed from persisted state so they are correct even
          * after a reload (before startFullSync re-arms the runtime).
          */
-        getFullSyncStatus: function (allPaths) {
+        getFullSyncStatus: function (allPaths, versionMap) {
             var state = _loadState();
             var fs = state.fullSync || {};
             var tpls = state.templates || {};
@@ -1019,13 +1132,30 @@
             var targets = allPaths && allPaths.length ? allPaths
                 : (_fsRun && _fsRun.targets && _fsRun.targets.length ? _fsRun.targets : Object.keys(tpls));
             var total = targets.length;
-            var complete = 0, broken = 0, pending = 0, failed = 0;
+            var complete = 0, broken = 0, pending = 0, failed = 0, empty = 0, restash = 0;
             for (var i = 0; i < targets.length; i++) {
                 var t = tpls[targets[i]];
-                if (t && t.complete) complete++;
-                else if (t && t.broken) broken++;
-                else { pending++; if (fs.failures && fs.failures[targets[i]]) failed++; }
+                // VERSION-AWARE: a mirror whose cloud content changed since download is
+                // NOT counted complete (matches getLocalDirsIfComplete / the sidebar
+                // badge). Reject only on a KNOWN mismatch. Without a versionMap this
+                // degrades to the legacy "any complete mirror" count.
+                var wantVer = versionMap ? versionMap[targets[i]] : null;
+                var stale = !!(t && t.complete && wantVer && t.contentVersion && t.contentVersion !== wantVer);
+                var c = _classifyEntry(t, stale);
+                if (c.status === 'complete') { complete++; if (c.advisory === 'restash') restash++; }
+                else if (c.status === 'empty') empty++;   // terminal: genuinely no content in cloud
+                else if (c.status === 'failed') failed++; // retryable transient give-up
+                else if (c.status === 'broken') broken++; // genuine re-stash needed
+                else { // pending
+                    if (fs.failures && fs.failures[targets[i]]) failed++;
+                    else pending++;
+                }
             }
+            // Syncable universe excludes terminally-empty folders (no .aep will ever
+            // download) so "done" can reach 100% of what CAN sync. Everything that
+            // remains not-yet-complete after removing empties is real work.
+            var syncable = total - empty;
+            var done = complete >= syncable;
             // "running" = the loop is actively downloading (alive AND not paused).
             var running = !!(_fsRun && _fsRun.running) && !fs.paused;
             var etaMs = 0, bytesPerSec = 0, doneThisRun = 0;
@@ -1063,10 +1193,15 @@
                 cancelled: !!fs.cancelled,
                 running: running,
                 total: total,
+                syncable: syncable,
+                done: done,
                 complete: complete,
                 broken: broken,
                 failed: failed,
-                pending: pending - failed < 0 ? 0 : pending,
+                empty: empty,
+                unsyncable: empty,
+                needsRestash: restash,
+                pending: pending < 0 ? 0 : pending,
                 current: _fsRun ? _fsRun.current : '',
                 etaMs: etaMs,
                 bytesPerSec: bytesPerSec,
@@ -1092,36 +1227,52 @@
                 var sp = comps[i].storagePath;
                 if (!sp) continue;
                 var t = tpls[sp];
-                var status = 'pending';
+                // Single source of truth: the shared classifier decides complete /
+                // broken / failed / empty / pending exactly as the badge and summary
+                // counts do, so no two surfaces can ever disagree.
+                var c = _classifyEntry(t, false);
+                var status = c.status;
+                var advisory = c.advisory;
                 var reason = '';
-                // Broken wins over complete: a template can be mirrored (complete .aep)
-                // yet still reference footage that is missing from storage — that is the
-                // actionable "needs re-stash" state and must surface in the list, not be
-                // masked by the fact that its .aep downloaded.
-                if (t && t.broken) { status = 'broken'; reason = t.broken; }
-                else if (t && t.complete) status = 'complete';
-                else if (sp === current) status = 'syncing';
-                else if (fs.failures && fs.failures[sp]) { status = 'failed'; reason = fs.failures[sp]; }
+                if (status === 'broken' || status === 'failed' || status === 'empty') {
+                    reason = t && t.broken ? t.broken : '';
+                } else if (status === 'pending') {
+                    // Not yet mirrored: distinguish the item currently downloading and
+                    // any run-level give-up that has not been written to a broken flag.
+                    if (sp === current) status = 'syncing';
+                    else if (fs.failures && fs.failures[sp]) { status = 'failed'; reason = fs.failures[sp]; }
+                }
                 out.push({
                     storagePath: sp,
                     name: comps[i].name || sp,
                     category: comps[i].category || '',
                     status: status,
+                    advisory: advisory, // 'restash' = complete but footage missing (muted note, not red)
                     bytes: t && t.bytes ? t.bytes : 0,
                     thumb: !!(t && (t.complete || t.thumbComplete)),
-                    reason: reason
+                    reason: reason,
+                    brokenKind: t && t.brokenKind ? t.brokenKind : ''
                 });
             }
             return out;
         },
 
-        /** Mark a template broken (e.g. import-time relink failure surfaced missing footage). */
-        markBroken: function (storagePath, reason) {
+        /**
+         * Mark a template broken (e.g. import-time relink failure surfaced missing
+         * footage). The kind drives classification everywhere:
+         *   'source'    — genuine re-stash needed (missing .aep / footage). DEFAULT.
+         *   'transient' — retryable network give-up (shows "Retry", not "Re-stash").
+         *   'empty'     — terminal: the cloud folder has no downloadable content.
+         * NEVER call this for a thumbnail-render failure — that is cosmetic and tracked
+         * separately (main.js _markThumbFailed); it must not touch sync state.
+         */
+        markBroken: function (storagePath, reason, kind) {
             if (!storagePath) return;
             var state = _loadState();
             if (!state.templates) state.templates = {};
             var t = state.templates[storagePath] || {};
             t.broken = reason || 'needs re-stash';
+            t.brokenKind = kind || 'source';
             t.brokenTs = Date.now();
             state.templates[storagePath] = t;
             _saveState(state);
@@ -1135,6 +1286,60 @@
                 delete state.templates[storagePath].brokenTs;
                 _saveState(state);
             }
+        },
+
+        /**
+         * Clear every TRANSIENT give-up (network timeouts that exhausted retries) so an
+         * explicit user Resume/Sync retries them NOW instead of waiting out the 30-min
+         * cooldown. Genuine source/footage-missing breaks (brokenKind !== 'transient')
+         * are left intact — those really do need a re-stash. Returns the count cleared.
+         */
+        retryTransient: function () {
+            var state = _loadState();
+            var tpls = state.templates || {};
+            var cleared = 0;
+            var keys = Object.keys(tpls);
+            for (var i = 0; i < keys.length; i++) {
+                var t = tpls[keys[i]];
+                if (t && t.broken && t.brokenKind === 'transient') {
+                    delete t.broken;
+                    delete t.brokenTs;
+                    delete t.brokenKind;
+                    t.failCount = 0;
+                    cleared++;
+                }
+            }
+            // Also drop the run-level transient failure records so _pendingFor requeues.
+            if (state.fullSync && state.fullSync.failures) state.fullSync.failures = {};
+            if (cleared || (state.fullSync && state.fullSync.failures)) _saveState(state);
+            return cleared;
+        },
+
+        /**
+         * Clear EVERY retryable broken flag (transient give-ups + source/undefined
+         * re-stash markers) so an explicit user Sync/Resume re-attempts them all now.
+         * TERMINAL 'empty' folders are left intact — no .aep will ever exist, retrying
+         * only churns. Wire this ONLY to an explicit user Sync/Resume click, never to
+         * an automatic tick. Returns the count cleared.
+         */
+        retryBroken: function () {
+            var state = _loadState();
+            var tpls = state.templates || {};
+            var cleared = 0;
+            var keys = Object.keys(tpls);
+            for (var i = 0; i < keys.length; i++) {
+                var t = tpls[keys[i]];
+                if (t && t.broken && t.brokenKind !== 'empty') {
+                    delete t.broken;
+                    delete t.brokenTs;
+                    delete t.brokenKind;
+                    t.failCount = 0;
+                    cleared++;
+                }
+            }
+            if (state.fullSync && state.fullSync.failures) state.fullSync.failures = {};
+            if (cleared || (state.fullSync && state.fullSync.failures)) _saveState(state);
+            return cleared;
         },
 
         /**

@@ -3,7 +3,7 @@
     'use strict';
 
     var csInterface = new CSInterface();
-    var BLITZKRIEG_LOCAL_VERSION = '1.3.18';
+    var BLITZKRIEG_LOCAL_VERSION = '1.3.19';
     // Expose to other modules (cloud-library.js getDiagnostics, console probes)
     // so users can copy-paste a version string when reporting bugs.
     window.BLITZKRIEG_LOCAL_VERSION = BLITZKRIEG_LOCAL_VERSION;
@@ -264,6 +264,9 @@
     var newCategoryInput = document.getElementById('new-category-input');
     var confirmAddBtn = document.getElementById('confirm-add-btn');
     var cancelAddBtn = document.getElementById('cancel-add-btn');
+    // AE comp name captured when the Add-to-Library modal opens; the fallback
+    // Title if the user clears the field (the visible "Adding X" subtitle is gone).
+    var _addCompActiveName = '';
 
     var renameModal = document.getElementById('rename-comp-modal');
     var compToRenameCurrentName = document.getElementById('comp-to-rename-current-name');
@@ -365,8 +368,16 @@
         var seen = {};
         var out = [];
         for (var cci = 0; cci < allComps.length; cci++) {
-            var c = allComps[cci].category;
-            if (c && !seen[c]) { seen[c] = 1; out.push(c); }
+            // Multi-category: a template contributes EVERY category it is tagged with
+            // (categories[]), not just its physical home folder, so a category that
+            // exists only as a tag still gets a sidebar entry. Falls back to the single
+            // home category for any comp without a categories array.
+            var cc = allComps[cci];
+            var list = (cc.categories && cc.categories.length) ? cc.categories : (cc.category ? [cc.category] : []);
+            for (var li = 0; li < list.length; li++) {
+                var c = list[li];
+                if (c && !seen[c]) { seen[c] = 1; out.push(c); }
+            }
         }
         out.sort();
         _cachedCategoryList = out;
@@ -639,6 +650,16 @@
      * @param {Array} comps - Array of composition objects
      * @returns {Array} - Sorted array
      */
+    // Parse-and-cache the trailing timestamp from uniqueId ONCE per comp. The date
+    // comparators run O(n log n) times per render; without the cache each comparison
+    // re-split the string, so every search keystroke re-parsed the whole library.
+    function _compSortTime(c) {
+        if (c._sortTime == null) {
+            c._sortTime = parseInt((c.uniqueId || '').split('_').pop()) || 0;
+        }
+        return c._sortTime;
+    }
+
     function sortComps(comps) {
         var sorted = comps.slice(); // Create a copy
 
@@ -651,18 +672,10 @@
                 break;
             case 'date-desc':
                 // Use uniqueId which contains timestamp
-                sorted.sort(function(a, b) {
-                    var timeA = parseInt(a.uniqueId.split('_').pop()) || 0;
-                    var timeB = parseInt(b.uniqueId.split('_').pop()) || 0;
-                    return timeB - timeA;
-                });
+                sorted.sort(function(a, b) { return _compSortTime(b) - _compSortTime(a); });
                 break;
             case 'date-asc':
-                sorted.sort(function(a, b) {
-                    var timeA = parseInt(a.uniqueId.split('_').pop()) || 0;
-                    var timeB = parseInt(b.uniqueId.split('_').pop()) || 0;
-                    return timeA - timeB;
-                });
+                sorted.sort(function(a, b) { return _compSortTime(a) - _compSortTime(b); });
                 break;
             case 'preview-desc':
                 sorted.sort(function(a, b) {
@@ -772,12 +785,23 @@
         var browseBtn = document.getElementById('sync-path-browse');
         var saveBtn = document.getElementById('sync-path-save');
         var revealBtn = document.getElementById('sync-path-reveal');
+        var changeBtn = document.getElementById('sync-path-change');
+        var setActions = document.getElementById('sync-path-set-actions');
+        var editor = document.getElementById('sync-path-editor');
         var forceBtn = document.getElementById('sync-force-all');
         var resolvedEl = document.getElementById('sync-path-resolved');
         var capacityEl = document.getElementById('sync-path-capacity');
         var statusEl = document.getElementById('sync-path-status');
 
         if (!badge || !settings) return;
+
+        // Toggle between the compact "folder is set" view (Reveal + Change, no raw
+        // path field) and the editor (input + Browse + Save). Only ONE is ever
+        // visible, killing the "two fields, which do I use?" confusion Petter hit.
+        var _showPathEditor = function (editing) {
+            if (editor) editor.style.display = editing ? '' : 'none';
+            if (setActions) setActions.style.display = editing ? 'none' : '';
+        };
 
         // Inline status line inside the settings panel (NOT a toast, per house rule).
         // level: 'info' | 'warn' | 'error'.
@@ -834,23 +858,40 @@
                 settings.style.display = 'block';
                 if (pathInput) { pathInput.value = currentPath; pathInput.title = currentPath; }
                 _renderPathInfo(currentPath);
+                _showPathEditor(false);
                 _updateSyncBadge();
-                // Show default path suggestion if not set
-                window.localSync.getDefaultPath().then(function(defPath) {
-                    if (!pathInput.value && defPath) {
-                        pathInput.placeholder = defPath;
-                    }
-                }).catch(function() {});
+                // Move-detection: if the configured folder no longer exists (drive
+                // unplugged, library moved in Finder), do NOT silently re-download
+                // into a vanished path — surface it and drop into the editor so the
+                // user can re-point at the new location.
+                if (window.localSync.checkLibraryRoot) {
+                    window.localSync.checkLibraryRoot().then(function (r) {
+                        if (r && r.configured && !r.exists) {
+                            _setPathStatus('Your library folder is not where it used to be. If you moved it or unplugged a drive, point Blitzkrieg at the new location.', 'warn');
+                            _showPathEditor(true);
+                        }
+                    }, function () {});
+                }
             } else {
                 badge.style.display = 'flex';
                 badge.className = 'sync-badge sync-badge-none';
-                badge.title = 'Set a local library path to enable fast imports';
-                badge.innerHTML = '<svg class="sync-badge-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><span>Set library path</span>';
+                badge.title = 'Set a local library folder to enable fast imports';
+                badge.innerHTML = '<svg class="sync-badge-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><span>Set library folder</span>';
                 settings.style.display = 'block';
+                _showPathEditor(true);
                 // Show default path suggestion
                 window.localSync.getDefaultPath().then(function(defPath) {
                     if (defPath && pathInput) pathInput.placeholder = defPath;
                 }).catch(function() {});
+            }
+
+            // "Change" — reveal the editor to re-point at a different folder.
+            if (changeBtn) {
+                changeBtn.addEventListener('click', function () {
+                    _showPathEditor(true);
+                    _setPathStatus('', 'info');
+                    if (pathInput) { try { pathInput.focus(); } catch (e) {} }
+                });
             }
 
             // Badge click opens the ONE sync surface: the Sync and Analytics
@@ -884,6 +925,7 @@
                         window.localSync.setLibraryPath(path).then(function(savedPath) {
                             if (pathInput) { pathInput.value = savedPath; pathInput.title = savedPath; }
                             _renderPathInfo(savedPath);
+                            _showPathEditor(false);
                             _setPathStatus('Library folder set. New downloads go here.', 'info');
                             _updateSyncBadge();
                         }, function(err) {
@@ -1226,32 +1268,9 @@
             }
         }
 
-        // Bind invite button
-        var inviteBtn = document.getElementById('invite-blitzkrieg-btn');
-        if (inviteBtn) {
-            inviteBtn.addEventListener('click', function() {
-                var inviteUrl = 'https://portal.dominatemedia.io/apply/blitzkrieg';
-                // Add UTM params with referrer's name
-                var tmRef = window.blitzkriegAuth ? window.blitzkriegAuth.getTeamMember() : null;
-                if (tmRef && tmRef.full_name) {
-                    var refName = tmRef.full_name.trim().toLowerCase().replace(/\s+/g, '-');
-                    inviteUrl += '?utm_source=blitzkrieg&utm_medium=referral&utm_campaign=invite-a-friend&utm_content=' + encodeURIComponent(refName);
-                }
-                try {
-                    // The sync try/catch only catches synchronous throws. The
-                    // .writeText() promise rejection (permission denied, etc.)
-                    // needs its own .catch or it becomes an unhandled rejection.
-                    navigator.clipboard.writeText(inviteUrl).then(function() {
-                        showToast('Invite link copied to clipboard!');
-                    }, function() {
-                        showToast('Invite link: ' + inviteUrl);
-                    });
-                } catch (e) {
-                    // Fallback for CEP environments without clipboard API
-                    showToast('Invite link: ' + inviteUrl);
-                }
-            });
-        }
+        // Invite-a-friend button removed per Petter (2026-07-07): the copy-link flow
+        // was confusing and not worth keeping. Re-introduce only as a deliberate,
+        // designed feature.
 
         // Auto-approve: everyone "adds" comps straight to the library.
         var isAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
@@ -1562,6 +1581,7 @@
 
         cancelAddBtn.addEventListener('click', function () { addCompModal.style.display = 'none'; });
         confirmAddBtn.addEventListener('click', executeAddComp);
+        existingCategorySelect.addEventListener('change', _syncAddCategoryField);
 
         cancelRenameBtn.addEventListener('click', function () { renameModal.style.display = 'none'; currentRenameInfo = null; });
         confirmRenameBtn.addEventListener('click', executeRename);
@@ -1577,6 +1597,14 @@
         // Move comp modal handlers
         if (cancelMoveCompBtn) cancelMoveCompBtn.addEventListener('click', function () { moveCompModal.style.display = 'none'; currentMoveCompInfo = null; });
         if (confirmMoveCompBtn) confirmMoveCompBtn.addEventListener('click', executeMoveComp);
+
+        // Multi-category edit modal
+        var _cancelEditCats = document.getElementById('cancel-edit-cats-btn');
+        var _confirmEditCats = document.getElementById('confirm-edit-cats-btn');
+        if (_cancelEditCats) _cancelEditCats.addEventListener('click', function () {
+            var m = document.getElementById('edit-categories-modal'); if (m) m.style.display = 'none'; _editCatsInfo = null;
+        });
+        if (_confirmEditCats) _confirmEditCats.addEventListener('click', executeEditCategories);
 
         // Bulk action modal handlers
         if (cancelBulkMoveBtn) cancelBulkMoveBtn.addEventListener('click', function () { bulkMoveModal.style.display = 'none'; });
@@ -1946,10 +1974,18 @@
         // (the previous nested filter was the dominant cost when re-rendering 248 comps).
         var sidebarIsAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
         var sidebarSignedIn = window.blitzkriegAuth && window.blitzkriegAuth.getUser && !!window.blitzkriegAuth.getUser();
+        // Multi-category counts: a template is tallied under EVERY category it carries
+        // (categories[]), mirroring the grid filter, so the sidebar number matches how
+        // many cards actually show under that category. Sum can exceed the template
+        // total because a template can live in several categories at once.
         var _categoryCounts = {};
         for (var _cci = 0; _cci < allComps.length; _cci++) {
-            var _ccCat = allComps[_cci].category;
-            _categoryCounts[_ccCat] = (_categoryCounts[_ccCat] || 0) + 1;
+            var _cc = allComps[_cci];
+            var _ccList = (_cc.categories && _cc.categories.length) ? _cc.categories : (_cc.category ? [_cc.category] : []);
+            for (var _cli = 0; _cli < _ccList.length; _cli++) {
+                var _ccCat = _ccList[_cli];
+                _categoryCounts[_ccCat] = (_categoryCounts[_ccCat] || 0) + 1;
+            }
         }
         categoryFiltersContainer.innerHTML = categories.map(function(cat) {
             var displayLabel = categoryDisplayName(cat);
@@ -2302,6 +2338,33 @@
     }
     function _isPreviewZero(sp) { return !!(sp && _previewZero[sp]); }
 
+    // Thumbnail-render failures are COSMETIC ONLY and must never touch sync state.
+    // A template can be 100% mirrored on disk (every byte, importable) yet still fail
+    // to RENDER a thumbnail (AE ran out of memory, or the comp genuinely produces no
+    // visible frame). Earlier builds wrote that failure into local-sync via markBroken,
+    // which mislabelled ~20 fully-synced templates "Needs re-stash". We track it here,
+    // in its own key, so it only affects the thumbnail-generation queue — nothing else.
+    var _thumbFailed = {};
+    try {
+        var tf = localStorage.getItem('blitzkrieg_thumb_failed');
+        if (tf) _thumbFailed = JSON.parse(tf);
+    } catch(e) {}
+    function _markThumbFailed(sp) {
+        if (!sp) return;
+        _thumbFailed[sp] = 1;
+        try { localStorage.setItem('blitzkrieg_thumb_failed', JSON.stringify(_thumbFailed)); } catch(e) {}
+    }
+    function _isThumbFailed(sp) { return !!(sp && _thumbFailed[sp]); }
+    function _clearThumbFailed(sp) {
+        if (!sp || !_thumbFailed[sp]) return;
+        delete _thumbFailed[sp];
+        try { localStorage.setItem('blitzkrieg_thumb_failed', JSON.stringify(_thumbFailed)); } catch(e) {}
+    }
+    function _clearAllThumbFailed() {
+        _thumbFailed = {};
+        try { localStorage.removeItem('blitzkrieg_thumb_failed'); } catch(e) {}
+    }
+
     // Debounced localStorage write — during a cold load with many missing thumbs,
     // every broken image used to fire a full JSON.stringify+setItem (O(n²) growth
     // in serialization cost). Now we batch writes within a 250ms window so a flurry
@@ -2322,6 +2385,11 @@
         if (!label) return;
         var cloudComps = allComps.filter(function(c) { return !!c.storagePath; });
         var missing = cloudComps.filter(function(c) {
+            // Mirror the "Generate Missing" filter EXACTLY: a template whose thumbnail
+            // render already failed (cosmetic thumb-failed set) is excluded there, so it
+            // must be excluded here too — otherwise the label nags "N missing" while
+            // clicking Generate refuses to touch them and the count never drops.
+            if (_isThumbFailed(c.storagePath)) return false;
             if (!c.thumbnailVerified) return true;
             if (thumbBlacklist[c.storagePath]) return true;
             return false;
@@ -2356,24 +2424,29 @@
         // tooltip so the two are never conflated. Every import now mirrors its template,
         // so this number climbs on its own; "Sync Remaining" completes the rest.
         var cloudComps = allComps.filter(function(c) { return !!c.storagePath; });
-        var total = cloudComps.length;
-        // Count only CURRENT-library templates that are truly import-ready (full .aep
-        // mirrored AND content-current) by intersecting allComps with the sync state.
-        // A global complete-count could include stale entries for cloud-deleted templates
-        // and over-report readiness.
+        // Denominator = the SYNCABLE universe (all templates minus terminally-empty
+        // folders that have no importable .aep). Using the raw template count parked
+        // the badge at "247/250 synced" forever — the 3 empties can never complete, so
+        // 100% was unreachable. getFullSyncStatus is the single source of truth for the
+        // complete + syncable counts (same numbers the dashboard + nav badge show).
         var _syncItems = [];
         for (var _ci = 0; _ci < cloudComps.length; _ci++) {
             _syncItems.push({ storagePath: cloudComps[_ci].storagePath, contentVersion: cloudComps[_ci].contentVersion || '' });
         }
+        var total = cloudComps.length;
         var displaySynced = 0;
         var thumbCached = 0;
         try {
-            var _readyMap = (window.localSync.getLocalDirsIfComplete ? window.localSync.getLocalDirsIfComplete(_syncItems) : {}) || {};
+            var _pv = _buildSyncPathsAndVersions();
+            var _fss = window.localSync.getFullSyncStatus(_pv.paths, _pv.versionMap);
+            // Denominator = library total (matches the "All Templates" count). Empty
+            // folders have nothing to download, so they count as satisfied — the badge
+            // still reaches N/N at done instead of parking below the library total.
+            displaySynced = _fss.complete + _fss.empty;
+            total = _fss.total;
             var _thumbMap = (window.localSync.getLocalThumbDirs ? window.localSync.getLocalThumbDirs(_syncItems) : {}) || {};
             for (var _ri = 0; _ri < cloudComps.length; _ri++) {
-                var _sp = cloudComps[_ri].storagePath;
-                if (_readyMap[_sp]) displaySynced++;
-                if (_thumbMap[_sp]) thumbCached++;
+                if (_thumbMap[cloudComps[_ri].storagePath]) thumbCached++;
             }
         } catch (_e) {
             var _st = window.localSync.getSyncState();
@@ -2394,7 +2467,9 @@
         } else if (displaySynced > 0) {
             badge.className = 'sync-badge sync-badge-partial';
             badge.title = displaySynced + '/' + total + ' templates ready for instant import' + thumbTip + '. Click, then Sync Remaining to finish.';
-            badge.innerHTML = '<svg class="sync-badge-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg><span>' + displaySynced + '/' + total + ' synced</span>';
+            // Download-to-tray glyph (NOT a checkmark): partial is still in progress,
+            // and a check here misread as "fully synced". Matches the warning color.
+            badge.innerHTML = '<svg class="sync-badge-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><polyline points="7 10 12 15 17 10"/><line x1="5" y1="21" x2="19" y2="21"/></svg><span>' + displaySynced + '/' + total + ' synced</span>';
         } else {
             badge.className = 'sync-badge sync-badge-none';
             badge.title = 'No templates mirrored for offline import yet' + thumbTip + '. Click, then Sync Remaining.';
@@ -2423,6 +2498,12 @@
         // getLocalDirIfComplete re-parsed the whole sync-state blob ~2x per comp, so a
         // 112-card library did ~225 synchronous JSON.parses on every load; batch it.
         var dirMap = null;
+        // FULL-mirror map (whole bundle incl. preview frames on disk), distinct from the
+        // thumbnail-only map above. A template present here can serve its hover preview
+        // frames + alt thumbnail from disk for fully-offline hover — the "sync thumbnails"
+        // half of the ask. getLocalThumbDirs only guarantees comp.png, so we cannot use
+        // it for preview frames.
+        var fullMap = null;
         if (hasBatch) {
             var items = [];
             for (var j = 0; j < comps.length; j++) {
@@ -2435,8 +2516,11 @@
                     ? window.localSync.getLocalThumbDirs(items)
                     : window.localSync.getLocalDirsIfComplete(items);
             } catch (e) { dirMap = null; }
+            if (typeof window.localSync.getLocalDirsIfComplete === 'function') {
+                try { fullMap = window.localSync.getLocalDirsIfComplete(items); } catch (e) { fullMap = null; }
+            }
         }
-        var served = 0;
+        var served = 0, previewServed = 0;
         for (var i = 0; i < comps.length; i++) {
             var comp = comps[i];
             if (!comp || !comp.storagePath) continue;
@@ -2463,8 +2547,27 @@
             comp.thumbUrl = pathToFileUrl(dir + '/comp.png');
             comp._localCached = true;
             served++;
+            // OFFLINE HOVER: when the WHOLE bundle is mirrored (not just comp.png), the
+            // preview frames + alt thumbnail are on disk too — point at them so hover
+            // previews play with zero network. Guarded to a full mirror so we never
+            // point at files a thumbnail-only cache lacks.
+            var fullDir = fullMap ? fullMap[comp.storagePath] : '';
+            if (fullDir) {
+                if (comp.thumbUrlAlt) comp.thumbUrlAlt = pathToFileUrl(fullDir + '/thumbnail.png');
+                var fcount = comp.previewFrameCount || 0;
+                if (fcount > 0 && (!comp.previewFrames || !comp.previewFrames.length)) {
+                    var frames = [];
+                    for (var pf = 0; pf < fcount; pf++) {
+                        frames.push(pathToFileUrl(fullDir + '/preview/frame_' + pf + '.png'));
+                    }
+                    comp.previewFrames = frames; // consumed directly on hover (skips cloud signing)
+                    previewServed++;
+                }
+            }
         }
-        if (served > 0) debugLog('Cache: serving ' + served + ' thumbnail(s) from local disk mirror', 'info');
+        if (served > 0) debugLog('Cache: serving ' + served + ' thumbnail(s)'
+            + (previewServed > 0 ? ' + ' + previewServed + ' offline hover preview(s)' : '')
+            + ' from local disk mirror', 'info');
     }
 
     // Animation-Composer parity (complaint 1). A one-time, background, throttled seed of
@@ -2566,7 +2669,14 @@
     function buildCompCardHtml(comp) {
         var safeUniqueId = escapeHTML(comp.uniqueId);
         var safeCategory = escapeHTML(comp.category);
-        var safeCategoryDisplay = escapeHTML(categoryDisplayName(comp.category));
+        // Display the PRIMARY category (first tag) on the card, not the physical home
+        // folder — after the audit they can differ. A template in several categories
+        // shows a "+N" hint so its multi-membership is visible at a glance.
+        var _cardCats = (comp.categories && comp.categories.length) ? comp.categories : (comp.category ? [comp.category] : []);
+        var _primaryCat = _cardCats.length ? _cardCats[0] : (comp.category || '');
+        var _extraCatCount = _cardCats.length > 1 ? _cardCats.length - 1 : 0;
+        var safeCategoryDisplay = escapeHTML(categoryDisplayName(_primaryCat));
+        var _catTitle = escapeHTML(_cardCats.map(function (c) { return categoryDisplayName(c); }).join(', '));
         var safeAepPath = escapeHTML(comp.aepPath || '');
         var safeStoragePath = escapeHTML(comp.storagePath || '');
         var safeName = escapeHTML(comp.name);
@@ -2610,11 +2720,16 @@
             generatePreviewBtn = '<button class="generate-preview-btn' + cepDisabledClass + '" title="' + escapeHTML(hasCepBridge ? 'Generate Thumbnail' : cepActionTitle) + '"' + cepDisabledAttr + '><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg> Thumb</button>';
         } else if (!hasPreview && !comp.storagePath) {
             generatePreviewBtn = '<button class="generate-preview-btn' + cepDisabledClass + '" title="' + escapeHTML(hasCepBridge ? 'Generate Preview Animation' : cepActionTitle) + '"' + cepDisabledAttr + '><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> Preview</button>';
-        } else if (isAdmin && comp.storagePath && comp.thumbnailVerified && !hasPreview && !isBlacklisted) {
+        } else if (isAdmin && comp.storagePath && comp.thumbnailVerified && !hasPreview && !isBlacklisted
+                   && !_isPreviewZero(comp.storagePath) && !_isThumbFailed(comp.storagePath)) {
             // Has a static thumbnail but NO hover preview frames. Offer a targeted,
             // per-comp preview render (the same safe on-demand full render as the
             // per-card Generate) so admins can backfill the missing hover animation
             // without the all-library "Regenerate All" pass that froze AE.
+            // GATED: never offer this on templates already known to yield 0 frames
+            // (missing footage / unrenderable source) - clicking it there only ran a
+            // slow on-demand render that produced nothing and timed out. Those tiles
+            // now just show their static thumbnail on hover (no failing button).
             generatePreviewBtn = '<button class="generate-preview-btn' + cepDisabledClass + '" title="' + escapeHTML(hasCepBridge ? 'Generate Preview Animation' : cepActionTitle) + '"' + cepDisabledAttr + '><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> Preview</button>';
         }
         // Suppress Generate on a needs-repair tile: generation imports the .aep to
@@ -2627,7 +2742,10 @@
 
         var safeName_ = comp.name || '?';
         var nameInitial = safeName_.charAt(0).toUpperCase();
-        var placeholderColors = ['#1e3a5f','#2d4a3e','#3d2c5e','#4a2c2c','#2c3e50','#1a472a','#3b1f2b','#2c3e6b'];
+        // No blue (brand rule): the three blue tints were replaced with dark
+        // teal-green / olive / plum so the ~44% of templates without a preview
+        // do not fill the grid with off-brand blue tiles.
+        var placeholderColors = ['#14453a','#2d4a3e','#3d2c5e','#4a2c2c','#3b4a1f','#1a472a','#3b1f2b','#4a2c3e'];
         var colorIdx = 0;
         for (var ci2 = 0; ci2 < safeName_.length; ci2++) { colorIdx += safeName_.charCodeAt(ci2); }
         var placeholderColor = placeholderColors[colorIdx % placeholderColors.length];
@@ -2652,6 +2770,7 @@
         var favFill = isFav ? 'currentColor' : 'none';
 
         var adminBtns = isAdmin ? (
+                '<button class="action-btn categories-btn" title="Edit categories"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1="7" y1="7" x2="7.01" y2="7"></line></svg></button>' +
                 '<button class="action-btn move-btn" title="Move to category"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path><line x1="12" y1="11" x2="12" y2="17"></line><polyline points="9 14 12 11 15 14"></polyline></svg></button>' +
                 '<button class="action-btn rename-btn" title="Rename"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg></button>' +
                 '<button class="action-btn delete-btn" title="Delete"><svg class="icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg></button>'
@@ -2661,7 +2780,8 @@
 
         var bulkCheckbox = isAdmin ? '<div class="bulk-select-checkbox" data-unique-id="' + safeUniqueId + '"></div>' : '';
         var metaParts = [];
-        if (comp.category) metaParts.push('<span class="item-category" title="' + safeCategoryDisplay + '">' + safeCategoryDisplay + '</span>');
+        if (_primaryCat) metaParts.push('<span class="item-category" title="' + _catTitle + '">' + safeCategoryDisplay
+            + (_extraCatCount > 0 ? '<span class="item-category-more">+' + _extraCatCount + '</span>' : '') + '</span>');
         if (comp.duration) {
             var durationLabel = comp.duration >= 60
                 ? Math.floor(comp.duration / 60) + 'm ' + Math.round(comp.duration % 60) + 's'
@@ -2811,10 +2931,15 @@
         var searchTerm = searchInput.value.toLowerCase();
         var filteredComps = sortComps(allComps.filter(function (comp) {
             // Filter by category (parentheses for clarity)
+            // Multi-category: match if the active category is ANY of the template's
+            // tags (categories[]), falling back to its single home category for any comp
+            // built without the array.
             var matchesCategory = (activeCategory === 'All') ||
                                   (activeCategory === 'Favorites' && _isInFavoritesView(comp)) ||
                                   (activeCategory === 'Recent' && isRecent(comp.uniqueId)) ||
-                                  (comp.categories && comp.categories.indexOf(activeCategory) !== -1);
+                                  ((comp.categories && comp.categories.length)
+                                      ? comp.categories.indexOf(activeCategory) !== -1
+                                      : comp.category === activeCategory);
             // Filter by search — indexOf instead of ES6 .includes() for CEP 8/9 compat
             var matchesSearch = !searchTerm || buildSearchText(comp).indexOf(searchTerm) !== -1;
             // "Submitted by" filter (applies to All + real categories, not the virtual views).
@@ -2844,6 +2969,18 @@
         for (var ci = 0; ci < renderUpTo; ci++) {
             htmlParts.push(buildCompCardHtml(filteredComps[ci]));
         }
+
+        // Play the staggered entrance animation ONLY when the view actually
+        // changed (category / first paint), not on every search keystroke. The
+        // grid rebuilds innerHTML on each keystroke, which otherwise replays the
+        // fade on all cards and reads as flicker instead of "fast and clean".
+        var _animCat = activeCategory + '|' + submitterFilter;
+        if (renderCompsGrid._lastAnimCat !== _animCat) {
+            stashGrid.classList.add('grid-animate-in');
+        } else {
+            stashGrid.classList.remove('grid-animate-in');
+        }
+        renderCompsGrid._lastAnimCat = _animCat;
 
         stashGrid.innerHTML = htmlParts.join('');
 
@@ -3326,6 +3463,7 @@
         if (e.target.closest('.import-btn')) { importComp(aepPath, uniqueId, storagePath); }
         else if (e.target.closest('.rename-btn')) { renameComp(uniqueId, category, name, storagePath); }
         else if (e.target.closest('.delete-btn')) { promptDelete(uniqueId, category, name, storagePath); }
+        else if (e.target.closest('.categories-btn')) { promptEditCategories(uniqueId, storagePath, name); }
         else if (e.target.closest('.move-btn')) { promptMoveComp(uniqueId, category, name); }
         else if (e.target.closest('.favorite-btn')) { toggleFavorite(uniqueId); }
         else if (e.target.closest('.generate-preview-btn')) {
@@ -3450,6 +3588,18 @@
     }
 
     /* --------- add/rename/delete/import flows --------- */
+    // Sentinel select value that reveals the "new category name" field.
+    var ADD_NEW_CATEGORY_VALUE = '__new_category__';
+
+    // Reveal/hide the new-category text field based on the category picker. One
+    // field is ever active at a time — no more "which box do I fill?" confusion.
+    function _syncAddCategoryField() {
+        var group = document.getElementById('add-new-category-group');
+        var isNew = existingCategorySelect.value === ADD_NEW_CATEGORY_VALUE;
+        if (group) group.style.display = isNew ? '' : 'none';
+        if (isNew) { try { newCategoryInput.focus(); } catch (e) {} }
+    }
+
     function addSelectedComp() {
         if (!ensureCepBridgeForAction('Adding comps')) return;
 
@@ -3460,23 +3610,50 @@
             return;
         }
 
-        var categories = getUniqueCategories();
-        existingCategorySelect.innerHTML = categories.map(function (cat) { return '<option value="' + escapeHTML(cat) + '">' + escapeHTML(categoryDisplayName(cat)) + '</option>'; }).join('');
-        existingCategorySelect.disabled = categories.length === 0;
-        if (categories.length === 0) { existingCategorySelect.innerHTML = '<option value="">No categories yet</option>'; }
-        newCategoryInput.value = '';
-        // Any signed-in user can create new categories (delete still admin-only)
-        var newCatGroup = newCategoryInput.closest('.form-group');
-        if (newCatGroup) {
-            var addSignedIn = window.blitzkriegAuth && window.blitzkriegAuth.getUser && !!window.blitzkriegAuth.getUser();
-            newCatGroup.style.display = addSignedIn ? '' : 'none';
-        }
+        // Confirm there IS an active comp before opening the modal, and show its
+        // name so the user knows exactly what they are adding (stupid-simple).
+        safeEvalScript('getActiveCompInfo()', function (raw) {
+            var info = null;
+            try { info = JSON.parse(raw); } catch (e) { info = null; }
+            if (!info || !info.name) {
+                showToast('Open or select a composition in After Effects first, then click Add Comp.', true);
+                return;
+            }
+            // Remember the AE comp name as the fallback title if the user clears
+            // the field. (No redundant "Adding X..." subtitle anymore.)
+            _addCompActiveName = info.name || '';
 
-        // Auto-approve: everyone adds straight to the library (no review step).
-        var isAdmin = window.blitzkriegAuth && window.blitzkriegAuth.isAdmin();
-        confirmAddBtn.textContent = 'Add Comp';
+            // Leave the Title BLANK with a hint placeholder rather than force-filling
+            // the comp's AE name (often a long auto-descriptive string). If the user
+            // leaves it blank, executeAddComp falls back to _addCompActiveName.
+            var titleEl = document.getElementById('add-comp-title-input');
+            if (titleEl) {
+                titleEl.value = '';
+                titleEl.setAttribute('placeholder', 'Title (optional). Defaults to the comp name.');
+            }
+            // Favorites default OFF each time the modal opens.
+            var favEl = document.getElementById('add-comp-favorite');
+            if (favEl) favEl.checked = false;
 
-        addCompModal.style.display = 'flex';
+            var canCreate = window.blitzkriegAuth && window.blitzkriegAuth.getUser && !!window.blitzkriegAuth.getUser();
+            var categories = getUniqueCategories();
+            var opts = categories.map(function (cat) {
+                return '<option value="' + escapeHTML(cat) + '">' + escapeHTML(categoryDisplayName(cat)) + '</option>';
+            }).join('');
+            // Any signed-in user can create a new category (delete stays admin-only).
+            if (canCreate) opts += '<option value="' + ADD_NEW_CATEGORY_VALUE + '">+ New category…</option>';
+            if (!opts) opts = '<option value="' + ADD_NEW_CATEGORY_VALUE + '">+ New category…</option>';
+            existingCategorySelect.innerHTML = opts;
+            existingCategorySelect.disabled = false;
+
+            newCategoryInput.value = '';
+            _syncAddCategoryField();
+
+            confirmAddBtn.textContent = 'Add Template';
+            addCompModal.style.display = 'flex';
+            // Focus + select the Title so the user can type a name immediately, no click.
+            try { var _t = document.getElementById('add-comp-title-input'); if (_t) { _t.focus(); _t.select(); } } catch (e) {}
+        });
     }
 
     // Promise wrapper around the read-only host footprint estimate. Resolves the parsed
@@ -3501,12 +3678,11 @@
     }
 
     function executeAddComp() {
-        var newCatName = newCategoryInput.value.trim();
-        var existingCatName = existingCategorySelect.value;
-        var rawCategory = newCatName || existingCatName;
+        var selected = existingCategorySelect.value;
+        var rawCategory = selected === ADD_NEW_CATEGORY_VALUE ? newCategoryInput.value.trim() : selected;
 
         if (!rawCategory) {
-            showToast('Please select or create a category.', true);
+            showToast(selected === ADD_NEW_CATEGORY_VALUE ? 'Type a name for the new category.' : 'Please select a category.', true);
             return;
         }
         var nameErr = validateName(rawCategory);
@@ -3514,6 +3690,22 @@
             showToast(nameErr, true);
             return;
         }
+
+        // User-supplied Title (pre-filled with the AE comp name, editable). Becomes
+        // the library display name. Same validation as any user-provided name so a
+        // title can never inject a path separator into storage. Falls back to the
+        // active comp name shown in the modal if the field was cleared.
+        var titleEl = document.getElementById('add-comp-title-input');
+        var userTitle = titleEl ? titleEl.value.trim() : '';
+        if (!userTitle) userTitle = (_addCompActiveName || '').trim();
+        if (!userTitle) { showToast('Give this comp a title.', true); return; }
+        var titleErr = validateName(userTitle);
+        if (titleErr) { showToast(titleErr, true); return; }
+        if (userTitle.length > 255) userTitle = userTitle.substring(0, 255);
+
+        // Favorite-on-add intent — starred for this user once it publishes.
+        var favEl = document.getElementById('add-comp-favorite');
+        var favWanted = favEl ? !!favEl.checked : false;
 
         // Store under URL-safe name so new categories follow the same convention
         // as the 12 classification-plan categories (no &, dashes for spaces).
@@ -3531,6 +3723,20 @@
         var submitTraceId = 'sub_' + Date.now() + '_' + Math.floor(Math.random() * 1e6);
         var safeCategory = escapeForExtendScript(categoryName);
 
+        // A submit_start must have exactly ONE matching submit_end. The happy
+        // path fires 'success', but if any later step throws the catch would
+        // fire a second 'failed' for the same trace_id, corrupting the
+        // crash-detection breadcrumb. This one-shot guard makes submit_end fire
+        // at most once per attempt.
+        var _submitEndFired = false;
+        function _fireSubmitEnd(outcome, detail) {
+            if (_submitEndFired) return;
+            _submitEndFired = true;
+            if (window.blitzkriegAnalytics && window.blitzkriegAnalytics.trackSubmitEnd) {
+                window.blitzkriegAnalytics.trackSubmitEnd(submitTraceId, categoryName, outcome, detail);
+            }
+        }
+
         // Pre-flight footage estimate, now BLOCKING for the over-limit case. Collecting a
         // multi-GB bundle runs synchronously on AE's UI thread (reduceProject + footage
         // copy) and can make AE unresponsive or crash; if it is ALSO over the upload limit
@@ -3544,9 +3750,7 @@
             if (estBytes !== null && estBytes > MAX_UPLOAD_TOTAL_BYTES) {
                 var gbOver = estBytes / (1024 * 1024 * 1024);
                 showToast('This composition bundles about ' + gbOver.toFixed(1) + ' GB of footage, over the ' + formatBytesShort(MAX_UPLOAD_TOTAL_BYTES) + ' limit. It cannot be submitted, and collecting it may make After Effects unresponsive. Reduce or relink the footage, or add it via the offline library.', true);
-                if (window.blitzkriegAnalytics && window.blitzkriegAnalytics.trackSubmitEnd) {
-                    window.blitzkriegAnalytics.trackSubmitEnd(submitTraceId, categoryName, 'blocked_oversize', estBytes + ' bytes');
-                }
+                _fireSubmitEnd('blocked_oversize', estBytes + ' bytes');
                 setStashInProgress(false);
                 hideSpinner();
                 return;
@@ -3628,14 +3832,12 @@
                         userId = liveUser.id;
                         var pendingBasePath = 'pending/' + userId + '/' + files.folderName;
 
-                        // Derive the display name for the submission record.
-                        var submissionName = (files.metadata && (files.metadata.displayName || files.metadata.name)) || files.folderName;
-                        if (submissionName && /^[#@]/.test(submissionName)) submissionName = submissionName.replace(/^[#@]+/, '').trim();
-                        if (submissionName && /^\d+$/.test(submissionName.trim()) && files.metadata && files.metadata.displayName) {
-                            // If the metadata displayName is just a number, derive from folder name instead
-                            submissionName = files.folderName.replace(/[_-]\d{10,}/g, '').replace(/[_-]+$/, '').replace(/_\d{1,3}$/, '').replace(/[_-]/g, ' ').trim() || submissionName;
-                        }
+                        // Display name = the user-supplied Title (validated above).
+                        // It drives both the submission record and the stored
+                        // metadata.json displayName, which is what the grid renders.
+                        var submissionName = userTitle;
                         if (submissionName && submissionName.length > 255) submissionName = submissionName.substring(0, 255);
+                        if (files.metadata) files.metadata.displayName = submissionName;
 
                         // INSERT-FIRST (data-loss fix, complaint 3). Create the pending
                         // submission row BEFORE uploading any bytes. If AE crashes or the
@@ -3765,9 +3967,7 @@
 
                         // Close the crash breadcrumb: a submit_start with this matching
                         // submit_end proves the synchronous export did NOT crash AE.
-                        if (window.blitzkriegAnalytics && window.blitzkriegAnalytics.trackSubmitEnd) {
-                            window.blitzkriegAnalytics.trackSubmitEnd(submitTraceId, categoryName, publishOk ? 'success' : 'failed', publishOk ? null : publishErr);
-                        }
+                        _fireSubmitEnd(publishOk ? 'success' : 'failed', publishOk ? null : publishErr);
                         if (window.blitzkriegAnalytics && window.blitzkriegAnalytics.trackStash) {
                             var totalBytes = 0;
                             try {
@@ -3789,6 +3989,19 @@
                         loadSubmissionCounts();
 
                         if (publishOk) {
+                            // Favorite-on-add: the approve fn moved the bundle to
+                            // <category>/<folderName>, which is the live storagePath the
+                            // grid keys on. Star it for this user (idempotent insert) and
+                            // reflect locally so loadLibrary paints the star immediately.
+                            if (favWanted) {
+                                try {
+                                    var favPath = categoryName + '/' + files.folderName;
+                                    await window.cloudLibrary.addFavorite(favPath, submissionName, categoryName, teamMember ? teamMember.id : null);
+                                    myFavoritePaths[favPath] = true;
+                                } catch (favErr) {
+                                    debugLog('Favorite-on-add failed: ' + (favErr && favErr.message || favErr), 'warn');
+                                }
+                            }
                             showToast('Added to the library!');
                             window.cloudLibrary.invalidateCache();
                             // Show it in its live category immediately.
@@ -3812,9 +4025,7 @@
                     // Breadcrumb: this outcome distinguishes a caught upload failure
                     // (submit_end 'failed') from an AE crash during export (submit_start
                     // with NO submit_end for this trace).
-                    if (window.blitzkriegAnalytics && window.blitzkriegAnalytics.trackSubmitEnd) {
-                        window.blitzkriegAnalytics.trackSubmitEnd(submitTraceId, categoryName, 'failed', err && err.message);
-                    }
+                    _fireSubmitEnd('failed', err && err.message);
                     setStashInProgress(false);
                     hideSpinner();
                     // With insert-first, a submission row was (usually) already created
@@ -4192,6 +4403,7 @@
         compToRenameCurrentName.textContent = currentName;
         newNameInput.value = currentName;
         renameModal.style.display = 'flex';
+        try { newNameInput.focus(); newNameInput.select(); } catch (e) {}
     }
 
     function executeRename() {
@@ -4511,7 +4723,7 @@
         var editors = isFav ? _distinctFavEditors() : [];
         var showEditor = isFav && editors.length >= 1; // show who favorited, even a single editor
 
-        if (!showEditor && !showSubmitter) { if (bar) bar.style.display = 'none'; return; }
+        if (!showEditor && !showSubmitter) { if (bar) { bar.style.display = 'none'; bar.dataset.gfbSig = ''; } return; }
 
         if (!bar) {
             bar = document.createElement('div');
@@ -4520,6 +4732,17 @@
             stashGrid.parentElement.insertBefore(bar, stashGrid);
         }
         bar.style.display = '';
+
+        // Skip the innerHTML rebuild + re-binding of click handlers when nothing that
+        // affects the bar changed. renderCompsGrid (hence this) runs on every debounced
+        // search keystroke; without this guard the whole bar was torn down and rebuilt
+        // on each one even though the chips are identical.
+        var _editorIds = '';
+        for (var _ei = 0; _ei < editors.length; _ei++) _editorIds += editors[_ei].userId + ',';
+        var sig = activeCategory + '|' + (isFav ? '1' : '0') + '|' + favEditorFilter + '|' +
+            submitterFilter + '|' + submitters.join(',') + '|' + _editorIds;
+        if (bar.dataset.gfbSig === sig) return;
+        bar.dataset.gfbSig = sig;
 
         var html = '';
         if (showEditor) {
@@ -4629,7 +4852,10 @@
             // Flag it broken so the Sync view surfaces it as "needs re-stash" and full
             // sync stops trying to "complete" a bundle that can never be complete.
             if (storagePath && window.localSync && window.localSync.markBroken) {
-                window.localSync.markBroken(storagePath, (warn || (m[1] + ' source file(s) missing')));
+                // Kind 'source': genuine missing footage surfaced at import. The mirror
+                // may still be complete (imports from its .aep) so this shows as a muted
+                // "re-stash to fix footage" advisory, not a hard broken state.
+                window.localSync.markBroken(storagePath, (warn || (m[1] + ' source file(s) missing')), 'source');
                 _updateSyncNavCount();
             }
             // Calm, non-alarming note (NOT the red error style). The comp imported
@@ -4639,7 +4865,15 @@
             // not nag with a red toast every time.
             showToast(successMsg + ' Some bundled footage is missing; this template is flagged for re-stash in Sync and Analytics.');
         } else {
-            showToast(successMsg);
+            // Image-only missing: decorative, non-critical. Do NOT flag re-stash;
+            // just add a calm one-liner so the user has accurate info.
+            var im = /\[BLITZ_IMG_MISSING:(\d+)\]/.exec(res);
+            if (im && parseInt(im[1], 10) > 0) {
+                var n = parseInt(im[1], 10);
+                showToast(successMsg + ' ' + n + ' decorative image' + (n === 1 ? '' : 's') + ' not found (safe to ignore).');
+            } else {
+                showToast(successMsg);
+            }
         }
     }
 
@@ -5197,6 +5431,132 @@
         if (moveCompModal) moveCompModal.style.display = 'flex';
     }
 
+    // ── Multi-category edit ─────────────────────────────────────────────────
+    // Admin picks every category a template belongs in (checkboxes) and which one is
+    // primary (radio). Saved to metadata.categories via cloudLibrary.setTemplateCategories
+    // — metadata-only, the physical folder never moves, so nothing re-mirrors.
+    var _editCatsInfo = null;
+    function promptEditCategories(uniqueId, storagePath, name) {
+        if (!window.blitzkriegAuth || !window.blitzkriegAuth.isAdmin()) {
+            showToast('You do not have permission to edit categories.', true);
+            return;
+        }
+        var comp = null;
+        for (var i = 0; i < allComps.length; i++) { if (allComps[i].uniqueId === uniqueId) { comp = allComps[i]; break; } }
+        if (!comp) { showToast('Template not found.', true); return; }
+        if (!storagePath && comp.storagePath) storagePath = comp.storagePath;
+        if (!storagePath) { showToast('Only cloud templates can be categorized.', true); return; }
+
+        _editCatsInfo = { uniqueId: uniqueId, storagePath: storagePath, name: name };
+        var current = (comp.categories && comp.categories.length) ? comp.categories.slice() : (comp.category ? [comp.category] : []);
+        var primary = current.length ? current[0] : '';
+
+        // Union of the canonical list + whatever this comp already has (so a legacy
+        // category not in the sidebar list still appears and stays checked).
+        var all = getUniqueCategories().slice();
+        for (var c = 0; c < current.length; c++) { if (all.indexOf(current[c]) === -1) all.push(current[c]); }
+        all.sort();
+
+        var nameEl = document.getElementById('edit-cats-comp-name');
+        if (nameEl) nameEl.textContent = name || comp.name || '';
+        var list = document.getElementById('edit-cats-list');
+        if (list) {
+            list.innerHTML = all.map(function (cat) {
+                var checked = current.indexOf(cat) !== -1;
+                var isPrim = cat === primary;
+                var safe = escapeHTML(cat);
+                return '<div class="edit-cat-row" data-cat="' + safe + '">' +
+                    '<label class="edit-cat-main">' +
+                        '<input type="checkbox" class="edit-cat-cb" value="' + safe + '"' + (checked ? ' checked' : '') + '>' +
+                        '<span class="edit-cat-name">' + escapeHTML(categoryDisplayName(cat)) + '</span>' +
+                    '</label>' +
+                    '<label class="edit-cat-prim' + (checked ? '' : ' hidden') + '">' +
+                        '<input type="radio" name="edit-cat-primary" class="edit-cat-primary" value="' + safe + '"' + (isPrim ? ' checked' : '') + '>' +
+                        '<span>primary</span>' +
+                    '</label>' +
+                '</div>';
+            }).join('');
+            // Toggling a checkbox shows/hides its primary radio.
+            list.addEventListener('change', _editCatsRowToggle);
+        }
+        var newInput = document.getElementById('edit-cats-new-input');
+        if (newInput) newInput.value = '';
+        var modal = document.getElementById('edit-categories-modal');
+        if (modal) modal.style.display = 'flex';
+    }
+
+    function _editCatsRowToggle(e) {
+        var cb = e.target.closest('.edit-cat-cb');
+        if (!cb) return;
+        var row = cb.closest('.edit-cat-row');
+        if (!row) return;
+        var prim = row.querySelector('.edit-cat-prim');
+        if (prim) prim.classList.toggle('hidden', !cb.checked);
+        // Unchecking the current primary clears its radio so save re-picks one.
+        if (!cb.checked) { var r = row.querySelector('.edit-cat-primary'); if (r) r.checked = false; }
+    }
+
+    function executeEditCategories() {
+        if (!window.blitzkriegAuth || !window.blitzkriegAuth.isAdmin()) { showToast('You do not have permission to edit categories.', true); return; }
+        var info = _editCatsInfo;
+        if (!info) return;
+        var modal = document.getElementById('edit-categories-modal');
+        var list = document.getElementById('edit-cats-list');
+        var newInput = document.getElementById('edit-cats-new-input');
+
+        var checked = [];
+        if (list) {
+            var cbs = list.querySelectorAll('.edit-cat-cb');
+            for (var i = 0; i < cbs.length; i++) { if (cbs[i].checked) checked.push(cbs[i].value); }
+        }
+        // Optional new category typed in.
+        var rawNew = newInput ? newInput.value.trim() : '';
+        if (rawNew) {
+            var nameErr = validateName(rawNew);
+            if (nameErr) { showToast(nameErr, true); return; }
+            var newCat = sanitizeCategoryName(rawNew);
+            if (newCat && checked.indexOf(newCat) === -1) checked.push(newCat);
+        }
+        if (!checked.length) { showToast('Pick at least one category.', true); return; }
+
+        // Primary = the selected radio if it is still checked, else the first checked.
+        var primary = '';
+        var primRadio = list ? list.querySelector('.edit-cat-primary:checked') : null;
+        if (primRadio && checked.indexOf(primRadio.value) !== -1) primary = primRadio.value;
+        if (!primary) primary = checked[0];
+        var ordered = [primary];
+        for (var k = 0; k < checked.length; k++) { if (checked[k] !== primary) ordered.push(checked[k]); }
+
+        if (modal) modal.style.display = 'none';
+        showSpinner();
+        window.cloudLibrary.setTemplateCategories(info.storagePath, ordered).then(function (saved) {
+            hideSpinner();
+            // Reflect immediately in the loaded model so the grid + sidebar update without
+            // a full reload (save must persist AND reflect).
+            for (var i = 0; i < allComps.length; i++) {
+                if (allComps[i].storagePath === info.storagePath) { allComps[i].categories = saved.slice(); break; }
+            }
+            _invalidateCategoryCache();
+            // If this edit emptied the category the user is currently viewing (e.g. the
+            // last template tagged X was re-tagged away from X), that category vanishes
+            // from the sidebar — leaving activeCategory pointing at a now-nonexistent
+            // filter and an empty grid. Fall back to All. Only real categories can be
+            // orphaned this way; virtual views (All/Favorites/Recent/__*) always exist.
+            var isRealCat = activeCategory !== 'All' && activeCategory !== 'Favorites'
+                && activeCategory !== 'Recent' && String(activeCategory).indexOf('__') !== 0;
+            if (isRealCat && getUniqueCategories().indexOf(activeCategory) === -1) {
+                activeCategory = 'All';
+            }
+            renderCategories();
+            renderCompsGrid();
+            _editCatsInfo = null;
+            debugLog('Categories saved for ' + info.storagePath + ': ' + saved.join(', '), 'success');
+        }, function (err) {
+            hideSpinner();
+            showToast('Failed to save categories: ' + (err && err.message || err), true);
+        });
+    }
+
     /**
      * Executes the move comp operation from modal
      */
@@ -5531,6 +5891,16 @@
         } else if (addCompModal.style.display === 'flex') {
             e.preventDefault();
             executeAddComp();
+        } else if (bulkMoveModal && bulkMoveModal.style.display === 'flex') {
+            e.preventDefault();
+            executeBulkMove();
+        } else {
+            // Edit-categories (multi-category tag editor) — non-destructive save.
+            var _ecm = document.getElementById('edit-categories-modal');
+            if (_ecm && _ecm.style.display === 'flex') {
+                e.preventDefault();
+                executeEditCategories();
+            }
         }
     }
 
@@ -6530,7 +6900,8 @@
     }
 
     function analyticsAvatarColor(name) {
-        var colors = ['#3B82F6', '#8B5CF6', '#EC4899', '#14B8A6', '#F59E0B', '#10B981', '#6366F1', '#EF4444'];
+        // No blue (brand rule): blues replaced with green/violet variants.
+        var colors = ['#22C55E', '#8B5CF6', '#EC4899', '#14B8A6', '#F59E0B', '#10B981', '#A855F7', '#EF4444'];
         var hash = 0;
         for (var i = 0; i < (name || '').length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
         return colors[Math.abs(hash) % colors.length];
@@ -6569,9 +6940,13 @@
         var trendHtml = '';
         if (opts.trend && opts.trend.pct !== undefined) {
             var dir = opts.trend.direction || 'neutral';
-            var arrow = dir === 'up' ? '↑' : dir === 'down' ? '↓' : '-';
-            var pctStr = Math.abs(opts.trend.pct).toFixed(0) + '%';
-            trendHtml = '<div class="stat-trend ' + dir + '">' + arrow + ' ' + pctStr + '</div>';
+            if (opts.trend.isNew) {
+                trendHtml = '<div class="stat-trend up">NEW</div>';
+            } else {
+                var arrow = dir === 'up' ? '↑' : dir === 'down' ? '↓' : '-';
+                var pctStr = Math.abs(opts.trend.pct).toFixed(0) + '%';
+                trendHtml = '<div class="stat-trend ' + dir + '">' + arrow + ' ' + pctStr + '</div>';
+            }
         }
         return '<div class="' + cls + '"' + attrs + '>' +
             '<div class="stat-value">' + escapeHTML(String(value)) + '</div>' +
@@ -6598,6 +6973,27 @@
         return html;
     }
 
+    // A Postgres DATE column ("2026-07-08") parsed via new Date() is UTC
+    // midnight; formatting it in a timezone west of UTC renders the PREVIOUS
+    // day. Parse the Y-M-D as a LOCAL date so the label matches the real date.
+    function _parseYmdLocal(dateStr) {
+        var s = String(dateStr || '').split('T')[0];
+        var p = s.split('-');
+        if (p.length === 3) {
+            return new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
+        }
+        return new Date(dateStr);
+    }
+
+    // Local YYYY-MM-DD key for a Date. Using toISOString() here would emit the
+    // UTC date, which is a day off from the DB's local stat_date west of UTC.
+    function _localDateKey(date) {
+        var y = date.getFullYear();
+        var m = ('0' + (date.getMonth() + 1)).slice(-2);
+        var d = ('0' + date.getDate()).slice(-2);
+        return y + '-' + m + '-' + d;
+    }
+
     function buildCSSBarChart(dailyStats) {
         if (!dailyStats || dailyStats.length === 0) {
             return '<p class="placeholder-text">No usage data for this period.</p>';
@@ -6613,7 +7009,7 @@
         dailyStats.forEach(function(d) {
             var importH = Math.max(((Number(d.import_count) || 0) / maxVal) * 100, 3);
             var sessionH = Math.max(((Number(d.session_count) || 0) / maxVal) * 100, 3);
-            var dateLabel = new Date(d.stat_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+            var dateLabel = _parseYmdLocal(d.stat_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
             html += '<div class="chart-bar-group" title="' + dateLabel + ': ' + (d.import_count || 0) + ' imports, ' + (d.session_count || 0) + ' sessions">';
             html += '<div class="chart-bar-pair">';
             html += '<div class="chart-bar imports" style="height:' + importH + '%"></div>';
@@ -6716,14 +7112,35 @@
         return h + 'h ' + (rem < 10 ? '0' : '') + rem + 'm';
     }
 
-    /** Total library sync-nav badge = full mirrors complete out of all templates. */
+    /**
+     * Build the {storagePath: contentVersion} map for the current library so sync
+     * counts can be VERSION-AWARE (a mirror whose cloud content changed since it was
+     * downloaded is not "synced"). Without this, getFullSyncStatus counts stale
+     * mirrors and disagrees with the sidebar badge (the "182 vs 116" inconsistency).
+     */
+    function _buildSyncPathsAndVersions() {
+        var paths = [];
+        var versionMap = {};
+        for (var i = 0; i < allComps.length; i++) {
+            var sp = allComps[i].storagePath;
+            if (!sp) continue;
+            paths.push(sp);
+            versionMap[sp] = allComps[i].contentVersion || '';
+        }
+        return { paths: paths, versionMap: versionMap };
+    }
+
+    /** Total library sync-nav badge = up-to-date full mirrors out of all templates. */
     function _updateSyncNavCount() {
         var el = document.getElementById('sync-nav-count');
         if (!el || !window.localSync || !window.localSync.getFullSyncStatus) return;
-        var paths = [];
-        for (var i = 0; i < allComps.length; i++) if (allComps[i].storagePath) paths.push(allComps[i].storagePath);
-        var s = window.localSync.getFullSyncStatus(paths);
-        el.textContent = s.complete + '/' + s.total;
+        var pv = _buildSyncPathsAndVersions();
+        var s = window.localSync.getFullSyncStatus(pv.paths, pv.versionMap);
+        // ONE denominator across the whole sidebar = the library total, so this row
+        // matches "All Templates 247" exactly (no more 247 vs 245/245 confusion). A
+        // terminally-empty folder has nothing to download, so it is already satisfied
+        // and counts toward the numerator — the count still reaches 247/247 at done.
+        el.textContent = (s.complete + s.empty) + '/' + s.total;
     }
 
     /**
@@ -6744,8 +7161,11 @@
         }
         if (!paths.length) return;
         window.localSync.startFullSync(paths, versionMap, function () {
-            // Live tick: refresh the badge + (if visible) the sync dashboard stats.
+            // Live tick: refresh the sidebar badge + nav count + (if visible) the sync
+            // dashboard stats on EVERY tick so the "N/250 synced" pill streams upward as
+            // templates land, instead of only jumping at the end of the run.
             _updateSyncNavCount();
+            _updateSyncBadge();
             if (activeCategory === '__sync') _syncDashTick();
         }).then(function (finalStatus) {
             _updateSyncNavCount();
@@ -6768,7 +7188,10 @@
             syncing:  { c: 'sd-chip-syncing',  t: 'Syncing' },
             pending:  { c: 'sd-chip-pending',  t: 'Not synced' },
             broken:   { c: 'sd-chip-broken',   t: 'Needs re-stash' },
-            failed:   { c: 'sd-chip-failed',   t: 'Failed' }
+            failed:   { c: 'sd-chip-failed',   t: 'Retry' },
+            // Terminal empty (no importable .aep in the cloud folder). Muted, NOT red —
+            // it is not an error the user can act on, just a folder with nothing to sync.
+            empty:    { c: 'sd-chip-empty',    t: 'No file' }
         };
         var m = map[status] || map.pending;
         return '<span class="sd-chip ' + m.c + '">' + m.t + '</span>';
@@ -6777,19 +7200,35 @@
     /** Live-update the header stats + progress bar (no full re-render, keeps scroll). */
     function _syncDashTick() {
         if (!window.localSync || !window.localSync.getFullSyncStatus) return;
-        var paths = [];
-        for (var i = 0; i < allComps.length; i++) if (allComps[i].storagePath) paths.push(allComps[i].storagePath);
-        var s = window.localSync.getFullSyncStatus(paths);
+        var pv = _buildSyncPathsAndVersions();
+        var s = window.localSync.getFullSyncStatus(pv.paths, pv.versionMap);
 
         var setTxt = function (id, txt) { var e = document.getElementById(id); if (e) e.textContent = txt; };
-        setTxt('sd-synced', s.complete);
+        // Headline denominator = library total (matches "All Templates"); empties
+        // count as satisfied (nothing to download) so it reaches N/N at done. The
+        // "N empty (no file)" chip below still itemizes them, so nothing is hidden.
+        setTxt('sd-synced', s.complete + s.empty);
         setTxt('sd-total', s.total);
         setTxt('sd-broken', s.broken);
         setTxt('sd-pending', s.pending);
+        setTxt('sd-failed', s.failed);
+        setTxt('sd-empty', s.empty);
+        var failedStat = document.getElementById('sd-stat-failed');
+        if (failedStat) failedStat.style.display = s.failed > 0 ? '' : 'none';
+        var brokenStat = document.getElementById('sd-stat-broken');
+        if (brokenStat) brokenStat.style.display = s.broken > 0 ? '' : 'none';
+        var emptyStat = document.getElementById('sd-stat-empty');
+        if (emptyStat) emptyStat.style.display = s.empty > 0 ? '' : 'none';
 
-        var pct = s.total > 0 ? Math.round((s.complete / s.total) * 100) : 0;
+        var pct = s.total > 0 ? Math.round(((s.complete + s.empty) / s.total) * 100) : 100;
         var bar = document.getElementById('sd-bar');
-        if (bar) bar.style.width = pct + '%';
+        if (bar) {
+            bar.style.width = pct + '%';
+            // In-flight shimmer so the bar never looks frozen while a large template
+            // downloads (its width holds until the template completes).
+            if (s.running && !s.done) bar.classList.add('sd-bar-active');
+            else bar.classList.remove('sd-bar-active');
+        }
 
         var etaEl = document.getElementById('sd-eta');
         if (etaEl) {
@@ -6802,8 +7241,13 @@
             } else if (s.paused) {
                 etaEl.textContent = 'Paused - ' + s.pending + ' remaining' +
                     (s.sessionBytes > 0 ? ' · ' + formatBytesShort(s.sessionBytes) + ' downloaded this session' : '');
-            } else if (s.pending === 0) {
-                etaEl.textContent = 'Everything synced' + (s.broken ? ' (' + s.broken + ' need re-stashing)' : '') + '.';
+            } else if (s.done) {
+                // 100% of the syncable set is on disk. Mention re-stash / empty only as
+                // calm context, never as an alarm.
+                var extra = [];
+                if (s.broken > 0) extra.push(s.broken + ' need re-stashing');
+                if (s.empty > 0) extra.push(s.empty + ' empty (no file)');
+                etaEl.textContent = 'Everything syncable is downloaded' + (extra.length ? ' (' + extra.join(', ') + ')' : '') + '.';
             } else {
                 etaEl.textContent = s.pending + ' not yet synced.';
             }
@@ -6839,7 +7283,7 @@
         var statuses = window.localSync.getTemplateStatuses(allComps);
 
         // Order: broken first (need attention), then syncing, pending, failed, complete.
-        var rank = { broken: 0, syncing: 1, failed: 2, pending: 3, complete: 4 };
+        var rank = { broken: 0, syncing: 1, failed: 2, pending: 3, complete: 4, empty: 5 };
         statuses.sort(function (a, b) {
             var ra = rank[a.status], rb = rank[b.status];
             if (ra !== rb) return ra - rb;
@@ -6857,7 +7301,9 @@
         html += '<div class="sync-dash-stats">';
         html += '<span class="sd-stat"><strong id="sd-synced">0</strong> of <strong id="sd-total">0</strong> synced</span>';
         html += '<span class="sd-stat sd-stat-pending"><strong id="sd-pending">0</strong> not synced</span>';
-        html += '<span class="sd-stat sd-stat-broken"><strong id="sd-broken">0</strong> need re-stash</span>';
+        html += '<span class="sd-stat sd-stat-failed" id="sd-stat-failed" style="display:none;"><strong id="sd-failed">0</strong> retrying</span>';
+        html += '<span class="sd-stat sd-stat-broken" id="sd-stat-broken" style="display:none;"><strong id="sd-broken">0</strong> need re-stash</span>';
+        html += '<span class="sd-stat sd-stat-empty" id="sd-stat-empty" style="display:none;"><strong id="sd-empty">0</strong> empty (no file)</span>';
         html += '</div>';
 
         html += '<div class="sync-dash-progress"><div id="sd-bar" class="sync-dash-bar"></div></div>';
@@ -6900,8 +7346,19 @@
             html += '</div>';
             html += '<div class="sd-row-meta">';
             if (st.bytes) html += '<span class="sd-row-size">' + formatBytesShort(st.bytes) + '</span>';
-            if (st.status === 'broken' && st.reason) {
-                html += '<span class="sd-row-reason" title="' + escapeHTML(st.reason) + '">missing footage</span>';
+            if (st.status === 'broken') {
+                // Label by the REAL cause, not a blanket "missing footage". A
+                // transient give-up (network blips) is NOT missing footage and must
+                // not be mislabeled as such — it just needs a retry. Red (sd-row-reason).
+                var _rlabel = st.brokenKind === 'transient' ? 'sync failed' : 'source unavailable';
+                html += '<span class="sd-row-reason" title="' + escapeHTML(st.reason || _rlabel) + '">' + _rlabel + '</span>';
+            } else if (st.status === 'empty') {
+                // Terminal empty: calm, muted note (NOT red) — nothing to download.
+                html += '<span class="sd-row-note" title="No importable .aep in this cloud folder">no file to sync</span>';
+            } else if (st.status === 'complete' && st.advisory === 'restash') {
+                // Fully mirrored + importable, but references footage missing from the
+                // stash. Muted advisory, never the alarming red re-stash treatment.
+                html += '<span class="sd-row-note" title="Imports fine; re-stash to bundle its missing footage">re-stash to fix footage</span>';
             }
             html += _syncStatusChip(st.status);
             html += '</div>';
@@ -6926,6 +7383,11 @@
         var dl = document.getElementById('sd-download-all');
         if (dl) dl.addEventListener('click', function () {
             if (!hasPath) { showToast('Set a library path first', true); return; }
+            // Explicit user sync: retry EVERY retryable break now (network give-ups AND
+            // source/re-stash markers), skipping the cooldown. Terminal 'empty' folders
+            // are left out — no .aep will ever exist there.
+            if (window.localSync.retryBroken) window.localSync.retryBroken();
+            else if (window.localSync.retryTransient) window.localSync.retryTransient();
             _startFullLibrarySync();
             _syncDashTick();
         });
@@ -6936,6 +7398,10 @@
         });
         var resumeB = document.getElementById('sd-resume');
         if (resumeB) resumeB.addEventListener('click', function () {
+            // Explicit user resume: retry EVERY retryable break now (skip the cooldown);
+            // terminal 'empty' folders stay excluded.
+            if (window.localSync.retryBroken) window.localSync.retryBroken();
+            else if (window.localSync.retryTransient) window.localSync.retryTransient();
             window.localSync.resumeFullSync();
             _startFullLibrarySync();
             _syncDashTick();
@@ -7014,7 +7480,9 @@
         var cur = Number(current) || 0;
         var prev = Number(previous) || 0;
         if (prev === 0 && cur === 0) return { pct: 0, direction: 'neutral' };
-        if (prev === 0) return { pct: 100, direction: 'up' };
+        // 0 -> N is not a "100% increase" (that would be a fabricated figure).
+        // Flag it as brand-new so the UI can render "NEW" instead of a bogus %.
+        if (prev === 0) return { pct: 0, direction: 'up', isNew: true };
         var pct = ((cur - prev) / prev) * 100;
         var direction = pct > 0 ? 'up' : pct < 0 ? 'down' : 'neutral';
         return { pct: Math.abs(pct), direction: direction };
@@ -7037,6 +7505,36 @@
             html += '<div class="category-bar-value">' + analyticsFormatNumber(c.import_count) + '</div>';
             html += '</div>';
         });
+        html += '</div>';
+        return html;
+    }
+
+    // Full-width "Top Templates" section for the overview: the most-imported
+    // templates across the fleet. Data (get_blitzkrieg_top_templates) was already
+    // fetched for the overview but previously only surfaced in editor-detail.
+    function buildTopTemplatesSection(rows) {
+        if (!rows || rows.length === 0) return '';
+        var html = '<div class="analytics-table-section top-templates-section">';
+        html += '<h3 class="analytics-table-title">Top Templates</h3>';
+        html += '<div class="top-templates-list">';
+        rows.slice(0, 10).forEach(function(t, i) {
+            var rank = i + 1;
+            var rankCls = rank <= 3 ? 'top-' + rank : '';
+            html += '<div class="top-template-row clickable-row" data-analytics-action="goto-template" data-template-name="' +
+                escapeHTML(t.template_name || '') + '">';
+            html += '<div class="top-template-rank ' + rankCls + '">' + rank + '</div>';
+            html += '<div class="top-template-info">';
+            html += '<div class="top-template-name">' + escapeHTML(t.template_name || 'Untitled') + '</div>';
+            html += '<div class="top-template-meta">' + escapeHTML(t.template_category || '') + '</div>';
+            html += '</div>';
+            html += '<div class="top-template-stats">';
+            html += '<span class="tt-stat"><span class="tt-val">' + analyticsFormatNumber(t.import_count) + '</span> imports</span>';
+            html += '<span class="tt-stat"><span class="tt-val">' + analyticsFormatNumber(t.view_count) + '</span> views</span>';
+            html += '<span class="tt-stat"><span class="tt-val">' + analyticsFormatNumber(t.unique_users) + '</span> editors</span>';
+            html += '</div>';
+            html += '</div>';
+        });
+        html += '</div>';
         html += '</div>';
         return html;
     }
@@ -7180,9 +7678,13 @@
         var trendHtml = '';
         if (opts.trend && opts.trend.pct !== undefined) {
             var dir = opts.trend.direction || 'neutral';
-            var arrow = dir === 'up' ? '↑' : dir === 'down' ? '↓' : '';
-            var pctStr = Math.abs(opts.trend.pct).toFixed(0) + '%';
-            trendHtml = '<span class="compact-trend ' + dir + '">' + arrow + ' ' + pctStr + '</span>';
+            if (opts.trend.isNew) {
+                trendHtml = '<span class="compact-trend up">NEW</span>';
+            } else {
+                var arrow = dir === 'up' ? '↑' : dir === 'down' ? '↓' : '';
+                var pctStr = Math.abs(opts.trend.pct).toFixed(0) + '%';
+                trendHtml = '<span class="compact-trend ' + dir + '">' + arrow + ' ' + pctStr + '</span>';
+            }
         }
         return '<div class="' + cls + '"' + attrs + '>' +
             iconHtml +
@@ -7288,7 +7790,8 @@
 
             var html = '';
 
-            // ── Command Center Header ──
+            // ── Command Center Header (title + context subtitle) ──
+            var _rangeDays = ANALYTICS_PERIOD_DAYS[analyticsDateRange] || 30;
             html += '<div class="command-center-header">';
             html += '<div class="command-center-title">';
             html += '<span class="command-title-text">Blitzkrieg Command Center</span>';
@@ -7296,17 +7799,12 @@
                 html += '<span class="live-dot"></span>';
                 html += '<span class="live-label">' + onlineCount + ' online</span>';
             }
+            html += '<span class="command-center-subtitle">Team activity, last ' + _rangeDays + ' days</span>';
             html += '</div>';
             html += '<div class="command-center-timestamp">' + new Date().toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + '</div>';
             html += '</div>';
 
-            // ── Live SVG World Map ──
-            html += buildCommandMap(editorLocations);
-
-            // ── Active Editors Ticker ──
-            html += buildEditorsTicker(editorLocations);
-
-            // ── 6 KPI Cards (compact single row) ──
+            // ── 6 KPI Cards first (numbers lead the view) ──
             html += '<div class="analytics-stat-cards-6col">';
             html += buildCompactStatCard(analyticsFormatNumber(summary.total_imports), 'Imports', { icon: 'imports', trend: trends.imports });
             html += buildCompactStatCard(analyticsFormatNumber(summary.active_users), 'Editors', { icon: 'editors', clickable: true, action: 'goto-editors', trend: trends.users });
@@ -7315,6 +7813,12 @@
             html += buildCompactStatCard(analyticsFormatNumber(summary.unique_templates), 'Templates', { icon: 'templates', trend: trends.templates });
             html += buildCompactStatCard(analyticsFormatNumber(summary.pending_submissions), 'Submissions', { icon: 'submissions', trend: trends.submissions });
             html += '</div>';
+
+            // ── Slim live map + active-editors ticker (only when we have located editors) ──
+            if (editorLocations && editorLocations.length) {
+                html += buildCommandMap(editorLocations);
+                html += buildEditorsTicker(editorLocations);
+            }
 
             // ── Two-column: Daily Activity + Editor Leaderboard ──
             html += '<div class="analytics-two-col">';
@@ -7366,11 +7870,20 @@
 
             html += '</div>'; // .analytics-two-col
 
+            // ── Top Templates (full width) — most-imported across the fleet ──
+            html += buildTopTemplatesSection(topTemplates);
+
             contentEl.innerHTML = html;
 
             // Init map tooltips
             var mapContainer = contentEl.querySelector('.command-map-container');
             if (mapContainer) initMapTooltips(mapContainer);
+
+            // Resolve submitter names for rows whose metadata lacks submitterName,
+            // using the user_id -> full_name map from the leaderboard stats. This
+            // fixes the "Unknown" submitter on older submissions.
+            var nameByUid = {};
+            userStats.forEach(function(u) { if (u.user_id) nameByUid[String(u.user_id)] = u.full_name; });
 
             // Load recent submissions async
             sb.from('blitzkrieg_template_submissions')
@@ -7390,7 +7903,9 @@
                         var statusCls = 'feed-status-' + sub.status;
                         var statusLabel = sub.status.charAt(0).toUpperCase() + sub.status.slice(1);
                         var timeAgo = analyticsFormatTimeAgo(sub.created_at);
-                        var submitter = (sub.metadata && sub.metadata.submitterName) ? sub.metadata.submitterName : 'Unknown';
+                        var submitter = (sub.metadata && sub.metadata.submitterName)
+                            ? sub.metadata.submitterName
+                            : (nameByUid[String(sub.user_id)] || 'Unknown');
                         sHtml += '<div class="feed-row">';
                         sHtml += '<div class="feed-status-dot ' + statusCls + '"></div>';
                         sHtml += '<div class="feed-content">';
@@ -7549,7 +8064,7 @@
                 weekHtml = '';
                 weekCount++;
             }
-            var dateStr = current.toISOString().split('T')[0];
+            var dateStr = _localDateKey(current);
             var dayData = dayMap[dateStr];
             var count = dayData ? Number(dayData.event_count) : 0;
             var level = 0;
@@ -8013,7 +8528,7 @@
         container.innerHTML = '<div class="analytics-loading">Loading error logs...</div>';
 
         var sb = window.blitzkriegSupabase;
-        if (!sb) { container.innerHTML = '<div class="analytics-empty">Supabase not available</div>'; return; }
+        if (!sb) { container.innerHTML = '<div class="analytics-empty">Connection unavailable. Try reopening the panel.</div>'; return; }
 
         sb.rpc('get_blitzkrieg_error_logs', { p_limit: 100, p_offset: 0 }).then(function(res) {
             if (res.error) { container.innerHTML = '<div class="analytics-empty">Error: ' + escapeHTML(res.error.message) + '</div>'; return; }
@@ -8026,7 +8541,10 @@
             var html = '<div class="analytics-summary-row">';
             html += '<div class="analytics-stat-card-compact"><div class="compact-stat-value" style="color:var(--error)">' + errorCount + '</div><div class="compact-stat-label">Errors</div></div>';
             html += '<div class="analytics-stat-card-compact"><div class="compact-stat-value" style="color:var(--warning)">' + warnCount + '</div><div class="compact-stat-label">Warnings</div></div>';
-            html += '<div class="analytics-stat-card-compact"><div class="compact-stat-value">' + logs.length + '</div><div class="compact-stat-label">Total Logs</div></div>';
+            // logs is capped at p_limit (100). Labeling it "Total" understated the
+            // real count; show "100+" and "Recent Logs" so it never claims to be the total.
+            var logsShown = logs.length >= 100 ? '100+' : String(logs.length);
+            html += '<div class="analytics-stat-card-compact"><div class="compact-stat-value">' + logsShown + '</div><div class="compact-stat-label">Recent Logs</div></div>';
             html += '</div>';
 
             html += '<table class="analytics-table" style="margin-top:var(--sp-4)">';
@@ -8058,7 +8576,7 @@
         container.innerHTML = '<div class="analytics-loading">Loading team members...</div>';
 
         var sb = window.blitzkriegSupabase;
-        if (!sb) { container.innerHTML = '<div class="analytics-empty">Supabase not available</div>'; return; }
+        if (!sb) { container.innerHTML = '<div class="analytics-empty">Connection unavailable. Try reopening the panel.</div>'; return; }
 
         sb.rpc('get_blitzkrieg_team_members').then(function(res) {
             if (res.error) { container.innerHTML = '<div class="analytics-empty">Error: ' + escapeHTML(res.error.message) + '</div>'; return; }
@@ -8068,17 +8586,21 @@
             var adminCount = members.filter(function(m) { return m.blitzkrieg_admin; }).length;
 
             var html = '<div class="analytics-summary-row">';
-            html += '<div class="analytics-stat-card-compact"><div class="compact-stat-value">' + activeCount + '</div><div class="compact-stat-label">Active Users</div></div>';
+            html += '<div class="analytics-stat-card-compact"><div class="compact-stat-value">' + activeCount + '</div><div class="compact-stat-label">With Access</div></div>';
             html += '<div class="analytics-stat-card-compact"><div class="compact-stat-value">' + adminCount + '</div><div class="compact-stat-label">Admins</div></div>';
             html += '<div class="analytics-stat-card-compact"><div class="compact-stat-value">' + members.length + '</div><div class="compact-stat-label">Total Members</div></div>';
             html += '</div>';
 
-            html += '<table class="analytics-table" style="margin-top:var(--sp-4)">';
+            // Client-side filter for the 144-member table so admins can find
+            // anyone without scrolling (purely additive, no pagination/logic change).
+            html += '<input type="text" id="team-search" class="team-search-input" placeholder="Search by name or email">';
+            html += '<table class="analytics-table">';
             html += '<thead><tr><th>Name</th><th>Email</th><th>Access</th><th>Admin</th><th>Last Active</th></tr></thead>';
             html += '<tbody>';
             members.forEach(function(m) {
-                var lastActive = m.last_active ? new Date(m.last_active).toLocaleDateString() : 'Never';
-                html += '<tr>';
+                var lastActive = analyticsFormatTimeAgo(m.last_active);
+                var _hay = ((m.full_name || '') + ' ' + (m.slack_email || '')).toLowerCase();
+                html += '<tr data-search="' + escapeHTML(_hay) + '">';
                 html += '<td>' + escapeHTML(m.full_name || 'Unknown') + '</td>';
                 html += '<td>' + escapeHTML(m.slack_email || '') + '</td>';
                 html += '<td><label class="blitz-toggle"><input type="checkbox"' + (m.blitzkrieg_access ? ' checked' : '') + ' data-analytics-action="toggle-access" data-member-id="' + m.id + '" data-member-name="' + escapeHTML(m.full_name || '') + '" data-field="blitzkrieg_access"><span class="blitz-toggle-slider"></span></label></td>';
@@ -8089,6 +8611,18 @@
             html += '</tbody></table>';
 
             container.innerHTML = html;
+
+            var teamSearch = document.getElementById('team-search');
+            if (teamSearch) {
+                teamSearch.addEventListener('input', function() {
+                    var q = teamSearch.value.toLowerCase();
+                    var rows = container.querySelectorAll('tbody tr');
+                    for (var i = 0; i < rows.length; i++) {
+                        var hay = rows[i].getAttribute('data-search') || '';
+                        rows[i].style.display = hay.indexOf(q) === -1 ? 'none' : '';
+                    }
+                });
+            }
         }).catch(function(err) {
             container.innerHTML = '<div class="analytics-empty">Failed to load team: ' + escapeHTML(err.message) + '</div>';
         });
@@ -9773,16 +10307,20 @@
                 // Backfill hover-preview frames for every template that has none.
                 // Keys on previewFrameCount === 0 (metadata) so a template that
                 // already has frames is never re-rendered, and the run CONVERGES.
-                // Skips known-broken (unrenderable) sources so it doesn't churn on
-                // missing-footage comps every time.
+                // Skips templates whose thumbnail render already failed (cosmetic
+                // thumb-failed set, NOT sync state) so it doesn't churn on unrenderable
+                // comps every time. Sync-broken is irrelevant here — a synced template
+                // can still fail to render, and an unsynced one can still render fine.
                 compsToProcess = allComps.filter(function(c) {
                     if (!c.storagePath) return false;
-                    if (_isTemplateBroken(c.storagePath)) return false;
+                    if (_isThumbFailed(c.storagePath)) return false;
                     if (_isPreviewZero(c.storagePath)) return false; // already tried, yields no frames
                     return !(c.previewFrameCount > 0);
                 });
             } else if (forceAll) {
-                // Force regenerate all cloud templates
+                // Force regenerate all cloud templates. Wipe the cosmetic thumb-failed
+                // set first so previously-failed thumbnails get a fresh attempt.
+                _clearAllThumbFailed();
                 compsToProcess = allComps.filter(function(c) { return !!c.storagePath; });
             } else {
                 // Default "Generate Missing" targets templates missing a static
@@ -9798,11 +10336,13 @@
                 // generates signed URLs even for non-existent files. Use thumbnailVerified.
                 compsToProcess = allComps.filter(function(c) {
                     if (!c.storagePath) return false;
-                    // A template already flagged broken (unrenderable source: missing
-                    // footage / corrupt .aep) will fail forever — never re-enqueue it in
-                    // the default run, so "Generate Missing" CONVERGES instead of showing
-                    // the same "N failed" every time. "Force regenerate ALL" still tries it.
-                    if (_isTemplateBroken(c.storagePath)) return false;
+                    // A template whose thumbnail render already failed (cosmetic
+                    // thumb-failed set) will fail forever — never re-enqueue it in the
+                    // default run, so "Generate Missing" CONVERGES instead of showing
+                    // the same "N failed" every time. "Force regenerate ALL" still tries
+                    // it (and clears the set). This is deliberately DECOUPLED from sync
+                    // state: a fully-synced template can still lack a renderable thumbnail.
+                    if (_isThumbFailed(c.storagePath)) return false;
                     if (!c.thumbnailVerified) return true;
                     if (thumbBlacklist[c.storagePath]) return true;
                     return false;
@@ -9961,6 +10501,9 @@
                     skipped++;
                 } else {
                     succeeded++;
+                    // A successful render clears any prior cosmetic thumb-failure mark
+                    // so the template stops being skipped on future generate runs.
+                    if (comp.storagePath) _clearThumbFailed(comp.storagePath);
                     // Preview-backfill convergence: a template that rendered but produced
                     // 0 usable preview frames can never satisfy previewFrameCount>0, so
                     // record it and stop re-rendering it on the next backfill run.
@@ -9976,13 +10519,13 @@
                     failed++;
                     _advance(true);
                 } else {
-                    // A per-comp render failure that is NOT a bridge issue means the
-                    // template's source is unrenderable (missing footage / corrupt .aep).
-                    // Flag it broken (so it shows as "needs re-stash" in the Sync view and
-                    // is excluded from future runs) and count it as skipped, not failed.
-                    if (comp.storagePath && window.localSync && window.localSync.markBroken) {
-                        window.localSync.markBroken(comp.storagePath, 'thumbnail render failed (unrenderable source)');
-                    }
+                    // A per-comp THUMBNAIL render failure that is NOT a bridge issue.
+                    // This is COSMETIC: the template may be fully mirrored and importable;
+                    // it simply could not produce a thumbnail (memory/unrenderable frame).
+                    // Record it in the cosmetic thumb-failed set ONLY — it must NEVER
+                    // touch sync state (doing so mislabelled ~20 synced templates
+                    // "Needs re-stash"). It just drops out of future generate runs.
+                    if (comp.storagePath) _markThumbFailed(comp.storagePath);
                     skipped++;
                     _advance(false);
                 }
