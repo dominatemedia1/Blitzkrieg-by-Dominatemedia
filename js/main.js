@@ -9004,8 +9004,22 @@
         icon.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM8 4.5v4M8 10.5v.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
         infoDiv.appendChild(icon);
         var msg = document.createElement('span');
-        var detail = errMsg ? ' (last error: ' + errMsg + ')' : '';
-        msg.appendChild(document.createTextNode('Auto-update to v' + version + ' keeps failing' + detail + '. Reinstall manually to recover.'));
+        // A machine-wide install (Program Files / Common Files) needs admin rights
+        // to write the update-staging dir, so every OTA mkdir fails identically and
+        // a plain "reinstall" into the same spot loops. Detect that case and give
+        // the actual remedy instead of the generic message.
+        var lowerErr = (errMsg || '').toLowerCase();
+        var isSystemDir = lowerErr.indexOf('mkdir failed') !== -1 &&
+            (lowerErr.indexOf('program files') !== -1 || lowerErr.indexOf('common files') !== -1);
+        var msgText;
+        if (isSystemDir) {
+            msgText = 'Auto-update to v' + version + " can't write to its install folder (it needs admin rights). "
+                + 'Run After Effects as administrator once, then click Try anyway. Or use Reinstall manually.';
+        } else {
+            var detail = errMsg ? ' (last error: ' + errMsg + ')' : '';
+            msgText = 'Auto-update to v' + version + ' keeps failing' + detail + '. Reinstall manually to recover.';
+        }
+        msg.appendChild(document.createTextNode(msgText));
 
         var reinstall = document.createElement('button');
         reinstall.className = 'button-primary';

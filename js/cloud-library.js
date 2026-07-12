@@ -964,25 +964,39 @@
         if (_previewPathCache[cacheKey]) return _previewPathCache[cacheKey].slice();
 
         var previewPrefix = storagePath + '/preview';
-        try {
-            var items = await listAllPaginated(previewPrefix, { sortBy: { column: 'name', order: 'asc' } });
-            var paths = [];
-            (items || []).forEach(function(item) {
-                if (!item || item.id === null || !item.name) return;
-                if (/^frame_\d+\.png$/i.test(item.name)) {
-                    paths.push(previewPrefix + '/' + item.name);
+        // Preview folders are tiny (flat frame_N.png), but the same cold-load list
+        // storm that slows category listing can push a single 15s attempt over the
+        // edge, silently dropping the hover preview. Give it one longer retry
+        // (mirrors the category ladder) instead of failing on the first timeout.
+        var PREVIEW_LIST_TIMEOUTS = [15000, 30000];
+        var attempt = 0;
+        var lastErr;
+        while (attempt < PREVIEW_LIST_TIMEOUTS.length) {
+            try {
+                var items = await listAllPaginated(previewPrefix, {
+                    sortBy: { column: 'name', order: 'asc' },
+                    _timeoutMs: PREVIEW_LIST_TIMEOUTS[attempt]
+                });
+                var paths = [];
+                (items || []).forEach(function(item) {
+                    if (!item || item.id === null || !item.name) return;
+                    if (/^frame_\d+\.png$/i.test(item.name)) {
+                        paths.push(previewPrefix + '/' + item.name);
+                    }
+                });
+                paths = sortPreviewPaths(paths);
+                if (expectedCount && paths.length < expectedCount) {
+                    _log('preview mismatch for ' + storagePath + ': metadata says ' + expectedCount + ', storage has ' + paths.length, 'warn');
                 }
-            });
-            paths = sortPreviewPaths(paths);
-            if (expectedCount && paths.length < expectedCount) {
-                _log('preview mismatch for ' + storagePath + ': metadata says ' + expectedCount + ', storage has ' + paths.length, 'warn');
+                _previewPathCache[cacheKey] = paths.slice();
+                return paths;
+            } catch (e) {
+                lastErr = e;
+                attempt++;
             }
-            _previewPathCache[cacheKey] = paths.slice();
-            return paths;
-        } catch (e) {
-            _log('preview listing failed for ' + storagePath + ': ' + (e && e.message || e), 'warn');
-            return [];
         }
+        _log('preview listing failed for ' + storagePath + ' after ' + PREVIEW_LIST_TIMEOUTS.length + ' attempts: ' + (lastErr && lastErr.message || lastErr), 'warn');
+        return [];
     }
 
     function _dispatchLibraryPartial(detail) {
