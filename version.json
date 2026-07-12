@@ -1,5 +1,5 @@
 {
-  "version": "1.3.20",
+  "version": "1.3.21",
   "files": [
     "js/main.js",
     "js/cloud-library.js",
@@ -13,14 +13,14 @@
     "version.json"
   ],
   "integrity": {
-    "js/main.js": "sha256-805c2df6b23f80a4654e8cdf2ac83f912a678d5d86bfa82db2a420f4bd71f82f",
-    "js/cloud-library.js": "sha256-0e5c6ace81d0ed85f9edbb52a7292b9d6b4616368bf4ef863919ce94b751eaf9",
+    "js/main.js": "sha256-9065d28972a3da795fa3555ed294e7fe415ea884c94e49342ad8d7891e36c707",
+    "js/cloud-library.js": "sha256-3d2efe5939ad7d6a3180058d199f841f99e29eee634014982dd6671cf5cc1916",
     "js/supabase-config.js": "sha256-356b184ca681f88d07d5a4fe5c22c959bc07cff2f053bdce1576cf6949bc1640",
     "js/auth.js": "sha256-ffd76b1ae1804df0fdc3340547232b984868cf98cc6243021b5ef8225eabff67",
     "js/analytics.js": "sha256-152acb6203cdfdb580961c80487b2bd70c7e37c9265cfc669d76161fe63c1031",
     "js/telemetry.js": "sha256-2638e39b4ac12800c61c53eaad888da97b800d2af2972db376d09e9395f64a01",
     "jsx/hostscript.jsx": "sha256-0cd3195920e80f5b286e04aff411856c8ae289412b60262479d900d8b9c7fd6a",
     "CSS/style.css": "sha256-fd81edd4c18c438f30f1a589ed51458afdbc47b8c3fbc61f6d38ced40f1fbf6c",
-    "index.html": "sha256-22eb8ce4b8cb8bb02947b39510de8d07fcca976209c927047da944f2374ef2a6"
+    "index.html": "sha256-2805b5653bb697647068424b55608441b7d727d5ed6b80f3761deb427f05cc93"
   }
 }
