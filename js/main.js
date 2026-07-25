@@ -424,6 +424,13 @@
     };
     function setStashInProgress(val, label) {
         stashInProgress = !!val;
+        // Tell the background mirror to stand down while a user-initiated import,
+        // generate, or stash holds the network and the JS thread.
+        try {
+            if (window.localSync && window.localSync.setUserActionInFlight) {
+                window.localSync.setUserActionInFlight(!!val);
+            }
+        } catch (e) { /* the mirror simply does not yield if local-sync is absent */ }
         if (_stashWatchdogTimer) {
             clearTimeout(_stashWatchdogTimer);
             _stashWatchdogTimer = null;
@@ -911,7 +918,8 @@
                 var paths = [];
                 for (var bsi = 0; bsi < allComps.length; bsi++) if (allComps[bsi].storagePath) paths.push(allComps[bsi].storagePath);
                 var st = window.localSync.getFullSyncStatus(paths);
-                if (!st.running && !st.paused && st.pending > 0) _startFullLibrarySync();
+                // Opening the Sync view must not itself start a 68GB mirror.
+                if (window.localSync.getFullSyncOptIn() && !st.running && !st.paused && st.pending > 0) _startFullLibrarySync();
                 _syncDashTick();
             });
 
@@ -1005,7 +1013,8 @@
                     var paths = [];
                     for (var fsi = 0; fsi < allComps.length; fsi++) if (allComps[fsi].storagePath) paths.push(allComps[fsi].storagePath);
                     var s = window.localSync.getFullSyncStatus(paths);
-                    if (!s.running && !s.paused && s.pending > 0) _startFullLibrarySync();
+                    // Opt-in gated: idle-kick must not resurrect an unwanted mirror.
+                    if (window.localSync.getFullSyncOptIn() && !s.running && !s.paused && s.pending > 0) _startFullLibrarySync();
                     _syncDashTick();
                 });
             }
@@ -1792,11 +1801,15 @@
             _updateSyncBadge();
             _updateSyncNavCount();
 
-            // Full-library background mirror (Petter opted into "download all").
-            // Auto-resume ONLY when the user has not explicitly paused/stopped it —
-            // so a deliberate Pause/Stop in the Sync view is respected across reloads,
-            // while a first load (or an interrupted run) picks up where it left off.
-            if (window.localSync && window.localSync.getFullSyncStatus && window.localSync.getLibraryPath && window.localSync.getLibraryPath()) {
+            // Full-library background mirror. This is a 68GB job: 3 workers x 6
+            // concurrent requests plus a parallel pre-sizing pass, writing through the
+            // SYNCHRONOUS cep.fs.writeFile on the panel's only JS thread. Auto-resuming
+            // it on every library load saturated the network that listCategory needs
+            // (the 15s/30s/60s list timeouts in the logs) and made the panel stutter for
+            // editors who never asked for it. It now requires an explicit per-machine
+            // opt-in, on top of the existing paused/cancelled checks.
+            if (window.localSync && window.localSync.getFullSyncOptIn && window.localSync.getFullSyncOptIn() &&
+                window.localSync.getFullSyncStatus && window.localSync.getLibraryPath && window.localSync.getLibraryPath()) {
                 var _fssPaths = [];
                 for (var _fi = 0; _fi < allComps.length; _fi++) if (allComps[_fi].storagePath) _fssPaths.push(allComps[_fi].storagePath);
                 var _fss = window.localSync.getFullSyncStatus(_fssPaths);
@@ -7388,6 +7401,8 @@
             // are left out — no .aep will ever exist there.
             if (window.localSync.retryBroken) window.localSync.retryBroken();
             else if (window.localSync.retryTransient) window.localSync.retryTransient();
+            // Clicking Download all IS the opt-in for this machine.
+            window.localSync.setFullSyncOptIn(true);
             _startFullLibrarySync();
             _syncDashTick();
         });
@@ -7402,12 +7417,16 @@
             // terminal 'empty' folders stay excluded.
             if (window.localSync.retryBroken) window.localSync.retryBroken();
             else if (window.localSync.retryTransient) window.localSync.retryTransient();
+            window.localSync.setFullSyncOptIn(true);
             window.localSync.resumeFullSync();
             _startFullLibrarySync();
             _syncDashTick();
         });
         var cancelB = document.getElementById('sd-cancel');
         if (cancelB) cancelB.addEventListener('click', function () {
+            // Cancelling withdraws the opt-in, so the mirror cannot resurrect itself
+            // on the next library load.
+            window.localSync.setFullSyncOptIn(false);
             window.localSync.cancelFullSync();
             _syncDashTick();
         });

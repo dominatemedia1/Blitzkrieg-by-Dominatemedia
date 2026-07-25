@@ -11,6 +11,16 @@
     'use strict';
 
     var STATE_KEY = 'blitzkrieg_local_sync';
+    // Per-machine opt-in for the full-library background mirror. The mirror is 68GB
+    // and used to auto-resume on every library load, saturating the network that
+    // listCategory needs (the 15s/30s/60s list timeouts in the logs) and stalling the
+    // panel's only JS thread on synchronous cep.fs.writeFile calls. Default OFF.
+    var FULL_SYNC_OPTIN_KEY = 'blitzkrieg_full_sync_optin';
+
+    // Set while a user-initiated action (import, generate, grid load) is in flight.
+    // The background mirror yields to it: foreground work must always win the
+    // network and the JS thread.
+    var _userActionInFlight = false;
 
     // Runtime (non-persisted) control state for the full-library background mirror.
     // Persisted flags live in state.fullSync; this holds the in-flight loop handles,
@@ -226,7 +236,13 @@
                     if (typeof cep !== 'undefined' && cep.fs && typeof cep.fs.writeFile === 'function' &&
                         cep.encoding && typeof cep.encoding.Base64 !== 'undefined') {
                         var res = cep.fs.writeFile(filePath, b64, cep.encoding.Base64);
-                        if (res && res.err === 0) { resolve(); return; }
+                        if (res && res.err === 0) {
+                            // cep.fs.writeFile is SYNCHRONOUS and this is the panel's only
+                            // JS thread, so a run of large writes freezes the UI outright.
+                            // Yield a frame before resolving so the grid stays interactive.
+                            setTimeout(resolve, 0);
+                            return;
+                        }
                         // else fall through to the ExtendScript decoder
                     }
                 } catch (e) { /* fall through to fallback */ }
@@ -975,6 +991,14 @@
                         _emit();
                         return _delay(600).then(step);
                     }
+                    if (_userActionInFlight) {
+                        // A user-initiated import, generate, or grid load is running.
+                        // Foreground work always wins the network and the JS thread:
+                        // idle here rather than competing with it.
+                        myRun.current = '';
+                        _emit();
+                        return _delay(500).then(step);
+                    }
                     if (qi >= queue.length) return Promise.resolve(); // drained
                     // Byte-budget admission: if taking the next template would push the
                     // in-flight buffer estimate over budget AND something is already
@@ -1048,14 +1072,13 @@
                 return step();
             }
 
-            // Up to 3 templates at once, but the per-worker BYTE BUDGET gate (in step)
-            // keeps total in-flight buffers bounded so small templates pack together
-            // while a large one runs alone. This is the speed win over the old serial
-            // (CONCURRENCY 1) path without risking the OOM that naive concurrency would.
-            // downloadStorageFiles still uses 6 concurrent requests per template (the
-            // CEP per-host cap); 3 templates leaves enough slots for interactive
-            // thumbnail signing + imports to stay responsive.
-            var CONCURRENCY = 3;
+            // ONE template at a time. This is a background mirror with no deadline, so
+            // it must never compete with foreground work. At 3 workers x 6 concurrent
+            // requests each it saturated the connection pool and starved listCategory
+            // into the 15s/30s/60s timeout ladder visible in the error logs, on machines
+            // whose owners had not asked for a 68GB download at all. The per-worker BYTE
+            // BUDGET gate (in step) still bounds in-flight buffers.
+            var CONCURRENCY = 1;
             var workers = [];
             for (var w = 0; w < Math.min(CONCURRENCY, queue.length || 1); w++) workers.push(worker());
 
@@ -1484,6 +1507,33 @@
                 if (state.templates) delete state.templates[storagePath];
                 _saveState(state);
             });
+        },
+
+        /**
+         * Per-machine opt-in for the full-library background mirror.
+         * Defaults to false so a 68GB mirror never starts unless asked for.
+         */
+        getFullSyncOptIn: function () {
+            try {
+                return localStorage.getItem(FULL_SYNC_OPTIN_KEY) === '1';
+            } catch (e) {
+                return false;
+            }
+        },
+
+        setFullSyncOptIn: function (on) {
+            try {
+                localStorage.setItem(FULL_SYNC_OPTIN_KEY, on ? '1' : '0');
+            } catch (e) { /* a machine with no localStorage simply never opts in */ }
+        },
+
+        /** True while a user-initiated action holds the network and JS thread. */
+        isUserActionInFlight: function () {
+            return _userActionInFlight === true;
+        },
+
+        setUserActionInFlight: function (on) {
+            _userActionInFlight = !!on;
         },
 
         /**
