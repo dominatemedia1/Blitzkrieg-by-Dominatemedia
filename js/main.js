@@ -2529,8 +2529,13 @@
                     ? window.localSync.getLocalThumbDirs(items)
                     : window.localSync.getLocalDirsIfComplete(items);
             } catch (e) { dirMap = null; }
-            if (typeof window.localSync.getLocalDirsIfComplete === 'function') {
-                try { fullMap = window.localSync.getLocalDirsIfComplete(items); } catch (e) { fullMap = null; }
+            // Whole-mirror gate, NOT the plain complete gate: `complete` only promises
+            // the .aep landed, so a template can be complete with a short preview folder
+            // (skipped frame, or storage holding fewer frames than metadata claims). The
+            // block below invents frame paths from the metadata count with no per-frame
+            // fallback, so a short folder means hover 404s one frame at a time.
+            if (typeof window.localSync.getWholeMirrorDirs === 'function') {
+                try { fullMap = window.localSync.getWholeMirrorDirs(items); } catch (e) { fullMap = null; }
             }
         }
         var served = 0, previewServed = 0;
@@ -2549,14 +2554,13 @@
             // a doomed file:// load + cloud re-sign before falling to the letter placeholder.
             // Leave those on the normal cloud/placeholder path.
             if (!comp.thumbnailVerified) { comp._localCached = false; continue; }
-            // Serve only the primary thumbnail (comp.png) from disk — it is always
-            // mirrored and always visible, so it is the real per-launch re-sign cost.
-            // We deliberately do NOT point thumbnailAlt or preview frames at disk: the
-            // local "complete" flag only guarantees the .aep, so those files can be
-            // absent/short in the mirror and have no per-frame fallback. Preview frames
-            // stay cloud-lazy-signed (now backed by the persisted signed-URL cache, so
-            // not re-signed every launch). If disk comp.png is missing, handleThumbError
-            // re-signs the cloud copy.
+            // The primary thumbnail (comp.png) serves from disk on any complete mirror:
+            // it is always mirrored and always visible, so it is the real per-launch
+            // re-sign cost. If the disk copy is missing, handleThumbError re-signs the
+            // cloud copy. thumbnailAlt and the preview frames are handled further down
+            // and need the stricter whole-mirror gate, because they have no per-file
+            // fallback; anything that fails that gate stays cloud-lazy-signed (backed by
+            // the persisted signed-URL cache, so still not re-signed every launch).
             comp.thumbUrl = pathToFileUrl(dir + '/comp.png');
             comp._localCached = true;
             served++;
@@ -3247,8 +3251,11 @@
                     } else if (previewCount > 0 && storagePath && !signingInProgress) {
                         // Lazy sign preview frames on first hover
                         signingInProgress = true;
-                        // Safety timeout: reset flag after 15s if promise never settles
-                        var signingTimeout = setTimeout(function() { signingInProgress = false; }, 15000);
+                        // Safety timeout: reset the flag only if the promise never settles.
+                        // This must exceed signPreviewFrames' own worst case (a 15s + 30s
+                        // list ladder). At 15s it fired DURING a healthy slow ladder and
+                        // let the next hover stack a second one on top.
+                        var signingTimeout = setTimeout(function() { signingInProgress = false; }, 60000);
                         window.cloudLibrary.signPreviewFrames(storagePath, previewCount).then(function(urls) {
                             clearTimeout(signingTimeout);
                             if (urls && urls.length > 0) {

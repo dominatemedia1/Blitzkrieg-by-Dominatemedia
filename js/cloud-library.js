@@ -63,6 +63,16 @@
     var _signedPathUrlCache = {};
     var _previewUrlCache = {};
     var _previewPathCache = {};
+    // A preview listing that fails is remembered for this long. Without it, a folder
+    // whose listing keeps failing re-ran the whole 45s ladder on EVERY hover, hammering
+    // the storage that was already the reason it was slow. Short enough that a transient
+    // outage recovers on the user's next pass over the grid.
+    var PREVIEW_NEGATIVE_TTL = 60000;
+    var _previewFailCache = {};
+    // In-flight ladders keyed the same way, so N simultaneous hovers cost ONE ladder.
+    // The card-level guard in main.js resets after 15s, which is shorter than this
+    // ladder's own 45s worst case, so without this a second hover stacked a second run.
+    var _previewInFlight = {};
 
     // ── Wave 2B: persist the signed-URL cache across panel reloads ──────────
     // Signed URLs stay valid for hours; without persistence every reload re-signs
@@ -766,6 +776,7 @@
         _signedPathUrlCache = {};
         _previewUrlCache = {};
         _previewPathCache = {};
+        _previewFailCache = {};
         _clearPersistedSignedUrls();
         invalidateManifest();
     }
@@ -789,6 +800,7 @@
             _signedPathUrlCache = {};
             _previewUrlCache = {};
             _previewPathCache = {};
+            _previewFailCache = {};
             _clearPersistedSignedUrls();
         }
     }
@@ -808,6 +820,7 @@
             });
             Object.keys(_previewPathCache).forEach(function(key) {
                 if (key.indexOf(storagePath + '|') === 0) delete _previewPathCache[key];
+                if (key.indexOf(storagePath + '|') === 0) delete _previewFailCache[key];
             });
             _persistSignedUrlCache();   // re-write the persisted copy without the dropped keys
         }
@@ -1034,7 +1047,20 @@
         if (!storagePath) return [];
         var cacheKey = storagePath + '|' + (expectedCount || 0);
         if (_previewPathCache[cacheKey]) return _previewPathCache[cacheKey].slice();
+        var failedAt = _previewFailCache[cacheKey];
+        if (failedAt && (Date.now() - failedAt) < PREVIEW_NEGATIVE_TTL) return [];
+        if (_previewInFlight[cacheKey]) return (await _previewInFlight[cacheKey]).slice();
 
+        var run = _listPreviewFramePaths(storagePath, expectedCount, cacheKey);
+        _previewInFlight[cacheKey] = run;
+        try {
+            return (await run).slice();
+        } finally {
+            delete _previewInFlight[cacheKey];
+        }
+    }
+
+    async function _listPreviewFramePaths(storagePath, expectedCount, cacheKey) {
         var previewPrefix = storagePath + '/preview';
         // Preview folders are tiny (flat frame_N.png), but the same cold-load list
         // storm that slows category listing can push a single 15s attempt over the
@@ -1068,6 +1094,7 @@
             }
         }
         _log('preview listing failed for ' + storagePath + ' after ' + PREVIEW_LIST_TIMEOUTS.length + ' attempts: ' + (lastErr && lastErr.message || lastErr), 'warn');
+        _previewFailCache[cacheKey] = Date.now();
         return [];
     }
 
@@ -2690,6 +2717,7 @@
         }
         _previewUrlCache = {};
         _previewPathCache = {};
+        _previewFailCache = {};
         invalidateCache();
         return framePaths.length;
     }
@@ -2986,6 +3014,7 @@
         _signedPathUrlCache = {};
         _previewUrlCache = {};
         _previewPathCache = {};
+        _previewFailCache = {};
         _clearPersistedSignedUrls();
 
         var fresh = await fetchAllMetadata();
@@ -3096,6 +3125,12 @@
         __setSignedUrlForTest: function (path, url) { _signedPathUrlCache[path] = url; },
         __getSignedUrlForTest: function (path) { return _signedPathUrlCache[path]; },
         __buildCompsFromMetadataForTest: buildCompsFromMetadata,
+        __getExistingPreviewFramePathsForTest: getExistingPreviewFramePaths,
+        __expirePreviewNegativeCacheForTest: function () {
+            Object.keys(_previewFailCache).forEach(function (k) {
+                _previewFailCache[k] = Date.now() - PREVIEW_NEGATIVE_TTL - 1;
+            });
+        },
         invalidateCacheForPath: invalidateCacheForPath,
         flushMetaCacheSync: flushMetaCacheSync,
         flushSignedUrlCacheSync: flushSignedUrlCacheSync,

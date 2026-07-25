@@ -88,3 +88,38 @@ Do Step 1 with Task 11, then the pre-sizing pass can be deleted outright.
 ## Out of scope, do not start in this loop
 
 Tasks 2, 3, 6, 7, 8, 11, 12. No Supabase migration, no RLS change.
+
+## Second audit pass, findings 4-6 (2026-07-25)
+
+Surfaces the first pass never read: `jsx/hostscript.jsx`, `js/auth.js`,
+`js/telemetry.js`, plus the three log patterns left unexplained.
+
+**Not a defect, closed:** `Telemetry sync failed: HTTP 0`. `xhr.status === 0` is the
+offline/CORS case; `js/telemetry.js:278` warns and falls through to `_queueAndDone`,
+so the payload is queued and flushed later. Working as designed, just noisy.
+
+**Not a defect, closed:** mirroring `preview/frame_N.png` to disk. It looked like dead
+weight, but `_applyLocalAssetCache` (js/main.js:2567) does consume those files for
+offline hover. A stale comment above it claimed the opposite; corrected.
+
+**Finding 4 (fixed): fabricated preview paths on a short mirror.** The offline-hover
+block invents `frame_0..frame_(previewFrameCount-1)` file:// URLs from metadata, with
+no per-frame fallback, gated only on `complete` (which promises the .aep and nothing
+else). Two log patterns prove those frames are routinely absent: `preview mismatch for
+X: metadata says 31, storage has N` (7 users) and `mirror: skipped unrecoverable file
+X/preview/frame_N`. Added `localSync.getWholeMirrorDirs`, which additionally requires
+`!partial`, and pointed the hover/alt-thumbnail block at it. The primary comp.png path
+still uses the looser gate, so a partial mirror keeps its disk thumbnail.
+
+**Finding 5 (fixed): the preview list ladder re-ran on every hover.** Only success was
+cached, so a folder whose listing kept failing paid the full 15s + 30s ladder on every
+single hover, against the storage that was already the reason it was slow. Added a 60s
+negative cache, wired into all five existing invalidation sites.
+
+**Finding 6 (fixed): concurrent hovers stacked ladders.** The card-level
+`signingInProgress` guard reset itself after 15s, shorter than the ladder's own 45s
+worst case, so hover 2 started a second run while hover 1 was still going. Added an
+in-flight promise map in `cloud-library.js` (covers every caller, not just the grid)
+and raised the card guard to 60s.
+
+Suite: 40 tests, 0 failing. `js/cloud-library.js` CRLF preserved (3155).

@@ -540,6 +540,39 @@
         },
 
         /**
+         * WHOLE-MIRROR variant of getLocalDirsIfComplete. `complete` only promises the
+         * .aep landed, so a template can be complete while its preview folder is short
+         * (a skipped/unrecoverable frame, or storage genuinely holding fewer frames than
+         * metadata claims — both are in the production logs). The offline-hover path
+         * FABRICATES file:// paths frame_0..frame_(count-1) from metadata and has no
+         * per-frame fallback, so it needs the stricter gate: only a mirror with nothing
+         * recorded missing may have frame paths invented for it. The primary comp.png
+         * thumbnail keeps using getLocalDirsIfComplete and is unaffected.
+         * @param {Array<{storagePath:string, contentVersion?:string}>} items
+         * @returns {Object} map of storagePath -> absolute local dir ('' if not whole)
+         */
+        getWholeMirrorDirs: function (items) {
+            var out = {};
+            if (!items || !items.length) return out;
+            var state = _loadState();
+            var lib = state && state.libraryPath;
+            if (!lib) return out;
+            var templates = (state && state.templates) || {};
+            for (var i = 0; i < items.length; i++) {
+                var it = items[i];
+                if (!it || !it.storagePath) continue;
+                var tpl = templates[it.storagePath];
+                if (!tpl || !tpl.complete || tpl.partial) { out[it.storagePath] = ''; continue; }
+                if (it.contentVersion && tpl.contentVersion && tpl.contentVersion !== it.contentVersion) {
+                    out[it.storagePath] = '';
+                    continue;
+                }
+                out[it.storagePath] = lib + '/' + it.storagePath;
+            }
+            return out;
+        },
+
+        /**
          * THUMBNAIL variant of getLocalDirsIfComplete. Returns the local dir when the
          * template has its comp.png on disk — either from a FULL mirror (complete=.aep
          * present) OR from a thumbnail-only mirror (thumbComplete=comp.png present). Used
