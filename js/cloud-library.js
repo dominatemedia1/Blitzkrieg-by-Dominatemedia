@@ -1832,6 +1832,19 @@
         return results;
     }
 
+    // Like downloadStorageFiles but never rejects on a single failure. Returns
+    // {ok: [...downloaded], failed: [...storagePaths]} so the CALLER decides whether
+    // a partial bundle is acceptable, rather than having that decided for it by a
+    // swallowed catch that discarded every already-downloaded asset.
+    async function downloadStorageFilesSettled(paths, basePath, concurrency) {
+        var failed = [];
+        var ok = await downloadStorageFiles(paths, basePath, concurrency, null, {
+            skipFailures: true,
+            skipped: failed
+        });
+        return { ok: ok || [], failed: failed };
+    }
+
     // Read a template's declared linked-comp/pre-comp dependencies from its
     // metadata.json. Returns an array of sibling storagePaths (possibly empty).
     // Forward-compatible: legacy templates have no `dependencies` key → []. The
@@ -1928,12 +1941,22 @@
         // placeholders for any un-fetched footage) instead of hard-failing the whole
         // operation. A longer 45s list window also absorbs transient backend slowness.
         var allFiles = [];
+        var bundleComplete = true;
+        var bundleMissing = [];
+        var bundleReason = null;
+
         try {
             allFiles = await collectAllFiles(storagePath, { _timeoutMs: 45000 });
         } catch (listErr) {
             if (!chosenAepPath) throw listErr; // no .aep yet AND cannot list -> real failure
-            _log('downloadTemplate: asset listing failed (' + (listErr && listErr.message || listErr) + '); proceeding with AEP-only bundle for ' + storagePath, 'warn');
+            // We have the .aep but cannot enumerate its footage. Returning here used to
+            // look identical to a complete bundle, so the caller cached it as good and
+            // the footage never arrived. Report the degradation instead of hiding it.
+            _log('downloadTemplate: asset listing failed (' + (listErr && listErr.message || listErr) +
+                 '); bundle is INCOMPLETE for ' + storagePath, 'warn');
             allFiles = [chosenAepPath];
+            bundleComplete = false;
+            bundleReason = 'list-failed';
         }
 
         // If the fast path missed (legacy templates whose .aep is not at the
@@ -1985,12 +2008,20 @@
 
         var extras = [];
         if (extraPaths.length > 0) {
-            try {
-                extras = await downloadStorageFiles(extraPaths, storagePath, 6);
-                _log('downloadTemplate: downloaded AEP + ' + extras.length + ' bundle asset(s) for ' + storagePath, 'info');
-            } catch (exErr) {
-                _log('downloadTemplate: bundle asset download failed (' + (exErr && exErr.message || exErr) + '); proceeding AEP-only for ' + storagePath, 'warn');
-                extras = [];
+            // Previously a single failing asset threw and the catch discarded EVERY
+            // downloaded asset, so one bad file cost the whole footage bundle and the
+            // import silently landed with nothing but the .aep. Settle per file instead.
+            var settled = await downloadStorageFilesSettled(extraPaths, storagePath, 6);
+            extras = settled.ok;
+            if (settled.failed.length > 0) {
+                bundleComplete = false;
+                bundleReason = bundleReason || 'assets-failed';
+                bundleMissing = bundleMissing.concat(settled.failed);
+                _log('downloadTemplate: ' + settled.failed.length + ' of ' + extraPaths.length +
+                     ' bundle asset(s) failed for ' + storagePath + '; bundle is INCOMPLETE', 'warn');
+            } else {
+                _log('downloadTemplate: downloaded AEP + ' + extras.length +
+                     ' bundle asset(s) for ' + storagePath, 'info');
             }
         }
 
@@ -2009,7 +2040,13 @@
             blob: aepBlob,
             fileName: chosenAepPath.split('/').pop(),
             storagePath: chosenAepPath,
-            extraFiles: depExtras.length > 0 ? extras.concat(depExtras) : extras
+            extraFiles: depExtras.length > 0 ? extras.concat(depExtras) : extras,
+            // Completeness contract. `complete` is false whenever the caller is NOT
+            // holding every import-essential asset, so callers (notably the mirror
+            // import) can refuse to cache a partial bundle as if it were whole.
+            complete: bundleComplete,
+            missing: bundleMissing,
+            reason: bundleReason
         };
     }
 
