@@ -12,7 +12,7 @@ Plan: `docs/superpowers/plans/2026-07-24-blitzkrieg-perf-and-missing-files.md`
 | 4 - bundle completeness | DONE | `node --test test/bundle-completeness.test.js` |
 | 5 - partial never marks complete | DONE | `node --test test/bundle-completeness.test.js` |
 | 9 - list ladder discipline | DONE (partial, see below) | `node --test test/list-ladder.test.js` |
-| 14 - pre-sizing list storm | TODO | |
+| 14 - pre-sizing list storm | DONE (partial, see below) | `node --test test/presize-storm.test.js` |
 | 15 - cache wipe on bad name | TODO | |
 | 16 - panel-thread polish | TODO | |
 
@@ -34,6 +34,23 @@ backend, where a prefix list takes 11.5s under RLS, would put more concurrent sl
 queries on the same pool and make the timeouts worse, not better.
 
 Do this immediately after Task 3 merges, and re-measure.
+
+## Task 14: one step deferred
+
+Plan Task 14 Step 1 ("read sizes from metadata instead of listing") needs each
+template's byte total persisted into the shared manifest at publish time. That is the
+manifest publish path, which is Task 11, out of scope for this loop. Steps 2 to 4 are
+done, which removes the storm itself:
+
+- `getTemplateSize` recursion is now bounded at 3 (was uncapped `Promise.all`; a test
+  measured peak 20 concurrent lists for a template with 20 subfolders).
+- Pre-sizing workers cut from 4 to 2, and they now yield entirely while a user action
+  is in flight.
+- Circuit breaker: the pass stops after 5 consecutive failures instead of churning the
+  queue at full speed against a failing backend.
+- Errors are logged instead of silently swallowed.
+
+Do Step 1 with Task 11, then the pre-sizing pass can be deleted outright.
 
 ## Findings from execution, not in the original plan
 

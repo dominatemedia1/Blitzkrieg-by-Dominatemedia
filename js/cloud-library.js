@@ -2481,30 +2481,44 @@
     // account for, or a large .aep with absent size metadata could be mis-sized as
     // tiny, packed with others, and OOM the CEP heap. We only relax serialization
     // when the whole template's byte count is known.
+    // Max concurrent recursive size lists. This used to be an uncapped
+    // Promise.all over every subfolder, so one template with N subfolders issued N
+    // simultaneous lists, multiplied again by the pre-sizing workers calling this.
+    // That fan-out is the logged burst of consecutive "List FAILED" entries.
+    var SIZE_RECURSE_CONCURRENCY = 3;
+
     async function getTemplateSize(storagePath) {
         var items = await listAllPaginated(storagePath, { sortBy: { column: 'name', order: 'asc' } });
         var total = 0;
         var trustworthy = true;
-        var subPromises = [];
+        var subFolders = [];
         for (var i = 0; i < items.length; i++) {
             // Ignore the empty-folder placeholder (see collectAllFiles): it is not real
             // content and its 0-byte size would wrongly flip `trustworthy` off, forcing
             // an otherwise-packable template to sync strictly serially.
             if (items[i].name === '.emptyFolderPlaceholder') continue;
             if (items[i].id === null) {
-                subPromises.push(getTemplateSize(storagePath + '/' + items[i].name));
+                subFolders.push(storagePath + '/' + items[i].name);
             } else if (items[i].metadata && typeof items[i].metadata.size === 'number' && items[i].metadata.size > 0) {
                 total += items[i].metadata.size;
             } else {
                 trustworthy = false; // a file with no known size -> cannot trust the sum
             }
         }
-        if (subPromises.length > 0) {
-            var nested = await Promise.all(subPromises);
-            for (var n = 0; n < nested.length; n++) {
-                total += nested[n].total;
-                if (!nested[n].trustworthy) trustworthy = false;
+        if (subFolders.length > 0) {
+            var sfIdx = 0;
+            async function _subWorker() {
+                while (sfIdx < subFolders.length) {
+                    var mine = sfIdx++;
+                    var nested = await getTemplateSize(subFolders[mine]);
+                    total += nested.total;
+                    if (!nested.trustworthy) trustworthy = false;
+                }
             }
+            var subWorkers = [];
+            var subCount = Math.min(SIZE_RECURSE_CONCURRENCY, subFolders.length);
+            for (var w = 0; w < subCount; w++) subWorkers.push(_subWorker());
+            await Promise.all(subWorkers);
         }
         return { total: total, trustworthy: trustworthy };
     }

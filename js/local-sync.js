@@ -944,12 +944,30 @@
             (function _presize() {
                 if (!window.cloudLibrary || typeof window.cloudLibrary.getTemplateSize !== 'function') return;
                 var si = 0;
-                var SIZE_CONC = 4;
+                // Two workers, not four. Each getTemplateSize recurses into subfolders
+                // with its own bounded pool, so the real in-flight list count is this
+                // number multiplied by that pool, on top of the download worker's own
+                // listing of the SAME templates.
+                var SIZE_CONC = 2;
+                // A backend returning instant "Failed to fetch" let the workers churn
+                // the whole queue at full speed, which is what produced the logged burst
+                // of ~30 list failures inside 10 seconds. Stop the pass rather than
+                // hammering a backend that is already failing.
+                var consecutiveFailures = 0;
+                var FAILURE_LIMIT = 5;
+
                 function _sizeWorker() {
                     // Stop sizing when superseded OR when the run is cancelled/stopped
                     // (do not keep issuing LIST calls after the user hits Stop).
                     if (_fsRun !== myRun || _isDead()) return;
+                    if (consecutiveFailures >= FAILURE_LIMIT) return;
                     if (si >= queue.length) return;
+                    // Pre-sizing is an optimisation, never a priority. Yield entirely
+                    // while the user is importing or generating.
+                    if (_userActionInFlight) {
+                        setTimeout(_sizeWorker, 500);
+                        return;
+                    }
                     var sp = queue[si++];
                     // Skip if already known (persisted from a prior sync).
                     var st = _loadState();
@@ -961,8 +979,20 @@
                         // run-alone, so pre-sizing can only ever relax serialization
                         // for provably-bounded templates, never risk an OOM.
                         if (res && res.trustworthy && res.total > 0) _sizeMap[sp] = res.total;
+                        consecutiveFailures = 0;
                         _sizeWorker();
-                    }, function () { _sizeWorker(); });
+                    }, function (err) {
+                        consecutiveFailures++;
+                        // Previously swallowed entirely, so a failing backend was
+                        // invisible here and only showed up as list errors from
+                        // cloud-library. Log it so the next occurrence is diagnosable.
+                        if (consecutiveFailures >= FAILURE_LIMIT) {
+                            console.warn('[local-sync] pre-sizing stopped after ' + consecutiveFailures +
+                                         ' consecutive failures; last: ' + (err && err.message || err));
+                            return;
+                        }
+                        _sizeWorker();
+                    });
                 }
                 for (var k = 0; k < SIZE_CONC; k++) _sizeWorker();
             })();
