@@ -77,3 +77,19 @@ test('a warm meta cache paints without waiting on the signed-URL host bridge', a
     'first paint must not block on the 2.5s signed-URL host round-trip when the meta cache is warm, took ' + elapsed + 'ms'
   );
 });
+
+test('the background-repaint flag is cleared at entry, so it cannot leak to the next render', () => {
+  const { window } = loadModule('js/main.js');
+  const render = window.__blitzRenderCompsGridForTest;
+  assert.strictEqual(typeof render, 'function', 'renderCompsGrid must be reachable for this guard');
+
+  // Simulate a background repaint that hits one of the early returns (no grid element
+  // exists in the stub DOM, so renderCompsGrid bails long before it paints).
+  render._preserveScrollDepth = true;
+  try { render(); } catch (e) { /* the stub DOM cannot paint; the flag reset is what matters */ }
+
+  assert.notStrictEqual(
+    render._preserveScrollDepth, true,
+    'an early return must not leave the flag set for a later user-initiated render'
+  );
+});

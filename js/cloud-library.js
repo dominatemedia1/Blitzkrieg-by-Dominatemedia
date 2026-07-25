@@ -2222,7 +2222,13 @@
             aepBlob: null,
             fileCount: downloaded.length,
             sizeBytes: totalSize,
-            skippedCount: skippedFiles.length
+            skippedCount: skippedFiles.length,
+            // Paths of files deliberately NOT mirrored. skippedLarge is the size-cap
+            // skip; skippedUnrecoverable is the per-file download give-up. Both mean
+            // the local mirror is INCOMPLETE, and both were previously reported to
+            // nobody: the caller marked the template complete on the .aep alone.
+            skippedLarge: skippedLarge.map(function (s) { return s.path; }),
+            skippedUnrecoverable: skippedFiles.slice()
         };
     }
 

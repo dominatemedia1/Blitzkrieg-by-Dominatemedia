@@ -2853,8 +2853,17 @@
         return Math.min(want, filteredLength);
     }
     window.__blitzComputeRenderUpToForTest = _computeRenderUpTo;
+    window.__blitzRenderCompsGridForTest = renderCompsGrid;
 
     function renderCompsGrid() {
+        // Read and CLEAR the background-repaint flag at entry. renderCompsGrid has
+        // several early returns below (empty state, special views); clearing it later
+        // meant the flag could survive an early return and then silently apply to the
+        // NEXT render, which is usually a user-initiated one. That would render the
+        // preserved deep page instead of a fresh first page on a category switch.
+        var preserveScrollDepth = renderCompsGrid._preserveScrollDepth === true;
+        renderCompsGrid._preserveScrollDepth = false;
+
         // Leaving the Sync view (or re-entering any view) stops its live refresh timer.
         if (activeCategory !== '__sync') _clearSyncViewTimer();
         // Special (__-prefixed) views never show the template filter bar.
@@ -2995,9 +3004,8 @@
             PAGE_SIZE,
             filteredComps.length,
             renderCompsGrid._rendered,
-            renderCompsGrid._preserveScrollDepth === true
+            preserveScrollDepth
         );
-        renderCompsGrid._preserveScrollDepth = false;
 
         // Store filtered comps and page state for loadMore
         renderCompsGrid._filteredComps = filteredComps;

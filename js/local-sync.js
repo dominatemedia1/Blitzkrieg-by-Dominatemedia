@@ -30,6 +30,35 @@
     var MAX_SYNC_FAILS = 3; // consecutive transient sync failures before a template is given up (marked broken) so full-sync converges
     var SYNC_RETRY_COOLDOWN_MS = 30 * 60 * 1000; // after giving up on a TRANSIENT failure, auto-retry once this cooldown passes (a network blip self-heals; genuinely-broken sources are not retried)
 
+    /**
+     * Decide a mirrored template's completeness from what actually landed.
+     * A template is complete ONLY when its .aep verified AND nothing was skipped.
+     * Judging on the .aep alone marked templates with missing footage as complete,
+     * which is what made missing files permanent on the sync path.
+     * Always returns explicit partial/missing so a clean re-sync CLEARS a stale
+     * partial record instead of leaving complete:true next to partial:true.
+     */
+    function _completenessFromMirror(aepOk, skippedCount, skippedPaths) {
+        var missing = [];
+        var paths = skippedPaths || [];
+        for (var i = 0; i < paths.length; i++) {
+            var p = paths[i];
+            missing.push(p && p.path ? p.path : p);
+        }
+        var skipped = (skippedCount || 0) + missing.length;
+        // `complete` means CONVERGENCE: the sync has done everything it can for this
+        // template, so _pendingFor stops re-queueing it. It deliberately does NOT mean
+        // "every byte is present" - a file skipped for a permanent reason (the 300MB
+        // footage cap) would otherwise be re-downloaded on every pass forever.
+        // `partial` carries the honesty: the mirror is usable but known incomplete,
+        // which _classifyEntry surfaces through the existing 'restash' advisory.
+        return {
+            complete: !!aepOk,
+            partial: !!aepOk && skipped > 0,
+            missing: missing
+        };
+    }
+
     /** Promise that resolves after ms (CEP has setTimeout). */
     function _delay(ms) {
         return new Promise(function (resolve) { setTimeout(resolve, ms); });
@@ -160,6 +189,10 @@
             // migration has already stripped legacy THUMBNAIL breaks, so a remaining
             // kindless break on a complete mirror is a real footage break → advise too.
             if (t.broken && (kind === 'source' || kind === '')) return { status: 'complete', advisory: 'restash' };
+            // A mirror that converged but is KNOWN to be missing files earns the same
+            // advisory. It imports fine from its .aep meanwhile, which is exactly what
+            // this advisory already means.
+            if (t.partial) return { status: 'complete', advisory: 'restash' };
             return { status: 'complete', advisory: '' };
         }
         if (t.broken) {
@@ -679,7 +712,18 @@
                             _prevEntry.ts = Date.now();
                             _prevEntry.files = files.length;
                             _prevEntry.bytes = mirroredBytes;
-                            _prevEntry.complete = aepOk;
+                            var _mc = _completenessFromMirror(
+                                aepOk,
+                                mirrored.skippedCount,
+                                (mirrored.skippedLarge || []).concat(mirrored.skippedUnrecoverable || [])
+                            );
+                            _prevEntry.complete = _mc.complete;
+                            _prevEntry.partial = _mc.partial;
+                            _prevEntry.missing = _mc.missing;
+                            if (_mc.partial) {
+                                console.warn('[local-sync] ' + storagePath + ' mirrored INCOMPLETE: ' +
+                                             _mc.missing.length + ' file(s) skipped');
+                            }
                             _prevEntry.contentVersion = contentVersion || '';
                             // A template that DID download and write an .aep is not broken,
                             // even if a prior run flagged it — clear the stale flag and
@@ -1425,6 +1469,9 @@
          * non-empty first. Merges into any existing entry so a prior thumbComplete is
          * preserved. Resolves true if marked complete.
          */
+        __completenessFromMirrorForTest: _completenessFromMirror,
+        __classifyEntryForTest: _classifyEntry,
+
         /** Read one template's mirror state. {} when nothing is recorded. */
         getTemplateState: function (storagePath) {
             var state = _loadState();
