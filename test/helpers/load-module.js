@@ -48,7 +48,12 @@ function loadModule(relPath, windowExtras) {
     cep: { fs: { readFile: () => ({ err: 1 }), writeFile: () => ({ err: 0 }) } }
   }, windowExtras || {});
 
+  // js/main.js references several CEP globals bare (not via window.), so they must
+  // exist as true globals in the sandbox, not only as properties of the window stub.
   const sandbox = {
+    CSInterface: windowStub.CSInterface,
+    cep: windowStub.cep,
+    __adobe_cep__: undefined,
     window: windowStub,
     localStorage: localStorageStub,
     document: windowStub.document,

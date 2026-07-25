@@ -13,8 +13,8 @@ Plan: `docs/superpowers/plans/2026-07-24-blitzkrieg-perf-and-missing-files.md`
 | 5 - partial never marks complete | DONE | `node --test test/bundle-completeness.test.js` |
 | 9 - list ladder discipline | DONE (partial, see below) | `node --test test/list-ladder.test.js` |
 | 14 - pre-sizing list storm | DONE (partial, see below) | `node --test test/presize-storm.test.js` |
-| 15 - cache wipe on bad name | TODO | |
-| 16 - panel-thread polish | TODO | |
+| 15 - cache wipe on bad name | DONE | `node --test test/cache-wipe.test.js` |
+| 16 - panel-thread polish | DONE | `node --test test/grid-paging.test.js` |
 
 ## Dependencies deferred to out-of-scope tasks
 
@@ -24,6 +24,18 @@ Plan: `docs/superpowers/plans/2026-07-24-blitzkrieg-perf-and-missing-files.md`
 - Task 13 found three auto-start sites, not one: `js/main.js:915` and `:1010` start the
   mirror merely on opening the Sync view. Both are now opt-in gated. The explicit
   "Download all" and "Resume" buttons set the opt-in; "Cancel" clears it.
+
+## Measured results
+
+- **First paint with a warm meta cache: 2521ms -> 2.3ms.** `_ensureMetaRehydrated`
+  awaited `Promise.all([meta, signedUrl])`. The meta half short-circuits on a valid
+  localStorage cache, but the signed-URL half does not, so a user whose meta cache was
+  warm and whose signed-URL cache was empty still sat through the full 2.5s host
+  round-trip. Signed URLs only matter for thumbnails, which fill in after paint.
+- **Recursive size listing: peak 20 concurrent lists -> peak 3** for a template with
+  20 subfolders.
+- **Failing-category ladder: ~108s -> ~46.5s** (dropped the 60s third attempt), and a
+  timed-out attempt now aborts instead of staying live on the pool.
 
 ## Task 9: one step deliberately NOT done
 

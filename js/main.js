@@ -2634,7 +2634,11 @@
                         var onTemplateView = activeCategory !== '__analytics'
                             && String(activeCategory).indexOf('__submissions_') !== 0
                             && activeCategory !== '__review_pending';
-                        if (onTemplateView && typeof renderCompsGrid === 'function') renderCompsGrid();
+                        if (onTemplateView && typeof renderCompsGrid === 'function') {
+                            // Background progress repaint: keep the user's scroll depth.
+                            renderCompsGrid._preserveScrollDepth = true;
+                            renderCompsGrid();
+                        }
                     } catch (e) {}
                 }, delay || 1500);
             }
@@ -2837,6 +2841,19 @@
         return comp._searchText;
     }
 
+    /**
+     * How many cards to render. A user-initiated render starts at one page; a
+     * background repaint preserves the depth the user had already scrolled to,
+     * clamped to what is actually available and never below one page.
+     */
+    function _computeRenderUpTo(pageSize, filteredLength, previouslyRendered, preserve) {
+        if (!preserve) return Math.min(pageSize, filteredLength);
+        var prev = previouslyRendered || 0;
+        var want = Math.max(pageSize, prev);
+        return Math.min(want, filteredLength);
+    }
+    window.__blitzComputeRenderUpToForTest = _computeRenderUpTo;
+
     function renderCompsGrid() {
         // Leaving the Sync view (or re-entering any view) stops its live refresh timer.
         if (activeCategory !== '__sync') _clearSyncViewTimer();
@@ -2971,7 +2988,16 @@
 
         // PAGINATED RENDERING: Render first batch, load more on scroll
         var PAGE_SIZE = 40;
-        var renderUpTo = Math.min(PAGE_SIZE, filteredComps.length);
+        // A BACKGROUND repaint (thumbnail-seed progress) must keep the user where they
+        // were. Resetting to page 1 every 25 cached thumbnails threw an editor scrolled
+        // to card 200 back to the top roughly every 1.5s.
+        var renderUpTo = _computeRenderUpTo(
+            PAGE_SIZE,
+            filteredComps.length,
+            renderCompsGrid._rendered,
+            renderCompsGrid._preserveScrollDepth === true
+        );
+        renderCompsGrid._preserveScrollDepth = false;
 
         // Store filtered comps and page state for loadMore
         renderCompsGrid._filteredComps = filteredComps;

@@ -305,16 +305,24 @@
     // Run once, lazily, on the first listTemplates(). Lazy (not at module load)
     // because cloud-library.js loads BEFORE main.js, so window.blitzMetaCacheStore
     // isn't defined yet at module-eval time.
+    // Kept so the signed-URL rehydration is not garbage-collected mid-flight and so
+    // callers that genuinely need warm thumbnail URLs can await it.
+    var _signedUrlRehydratePromise = null;
+
     function _ensureMetaRehydrated() {
         if (!_metaRehydratePromise) {
             // Fire the meta-cache AND signed-URL file rehydrations CONCURRENTLY. Each is
             // individually 2.5s-timeout-bounded, so firing them together keeps the
             // worst-case cold-launch wait at ~2.5s instead of ~5s from chaining two
             // sequential host round-trips (the exact busy-host launch this all targets).
-            _metaRehydratePromise = Promise.all([
-                _rehydrateMetaCacheFromFile(),
-                _rehydrateSignedUrlCacheFromFile()
-            ]);
+            // Both start together, but only the META rehydration gates first paint.
+            // The signed-URL file is needed for THUMBNAILS, which fill in after the
+            // grid is on screen. Awaiting it too meant that a user whose meta cache was
+            // warm but whose signed-URL cache was empty still sat behind the full 2.5s
+            // host round-trip, staring at a spinner, on a bridge that is at its slowest
+            // precisely at cold launch.
+            _signedUrlRehydratePromise = _rehydrateSignedUrlCacheFromFile();
+            _metaRehydratePromise = _rehydrateMetaCacheFromFile();
         }
         return _metaRehydratePromise;
     }
