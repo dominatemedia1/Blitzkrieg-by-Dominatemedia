@@ -9,9 +9,9 @@ Plan: `docs/superpowers/plans/2026-07-24-blitzkrieg-perf-and-missing-files.md`
 |------|--------|-------|
 | 1 - test harness | DONE | `node --test test/harness.test.js` |
 | 13 - stop 68GB auto-resume | DONE | `node --test test/full-sync-optin.test.js` |
-| 4 - bundle completeness | TODO | |
-| 5 - partial never marks complete | TODO | |
-| 9 - list ladder discipline | TODO | |
+| 4 - bundle completeness | DONE | `node --test test/bundle-completeness.test.js` |
+| 5 - partial never marks complete | DONE | `node --test test/bundle-completeness.test.js` |
+| 9 - list ladder discipline | DONE (partial, see below) | `node --test test/list-ladder.test.js` |
 | 14 - pre-sizing list storm | TODO | |
 | 15 - cache wipe on bad name | TODO | |
 | 16 - panel-thread polish | TODO | |
@@ -24,6 +24,33 @@ Plan: `docs/superpowers/plans/2026-07-24-blitzkrieg-perf-and-missing-files.md`
 - Task 13 found three auto-start sites, not one: `js/main.js:915` and `:1010` start the
   mirror merely on opening the Sync view. Both are now opt-in gated. The explicit
   "Download all" and "Resume" buttons set the opt-in; "Cancel" clears it.
+
+## Task 9: one step deliberately NOT done
+
+Plan Task 9 Step 6 raises `LIST_CAT_CONCURRENCY` from 2 to 6. **Skipped on purpose.**
+That step is only safe once Task 3 (the storage.objects RLS consolidation) has landed,
+and Task 3 is out of scope for this loop. Raising concurrency against the CURRENT
+backend, where a prefix list takes 11.5s under RLS, would put more concurrent slow
+queries on the same pool and make the timeouts worse, not better.
+
+Do this immediately after Task 3 merges, and re-measure.
+
+## Findings from execution, not in the original plan
+
+- **The plan's Task 5 used `contentCurrent`.** The real field in `js/local-sync.js` is
+  `complete`. Implemented against the real schema: `markTemplatePartial` sets
+  `complete: false` plus `partial: true` and `missing: []`, so every existing read path
+  (serve-from-mirror at :155, pending-for at :721, staleness at :930) already treats a
+  partial mirror as needing a re-fetch. No new read paths were needed.
+- **The RPC memoization had a concurrency race.** Checking `_rpcFolderListDown` before
+  any worker sets it meant a down RPC was still probed once per worker. Fixed by sharing
+  the first probe promise (`_rpcFolderListProbe`). Caught by the test, which measured 2
+  probes at `LIST_CAT_CONCURRENCY = 2`.
+- **`downloadStorageFiles` already had a `skipFailures` + `skipped` mode.** Task 4's
+  `downloadStorageFilesSettled` delegates to it rather than adding a second worker pool.
+- **TDD ordering slip, recorded honestly:** the RPC memoization in Task 9 was written
+  before its test. The test was added immediately after and did fail against the racy
+  implementation, which is how the race was found.
 
 ## Out of scope, do not start in this loop
 

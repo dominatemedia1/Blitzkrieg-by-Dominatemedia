@@ -354,11 +354,14 @@
     // invisible). The Supabase server-side timeout is ~30s; we want to
     // sit under that on the first try and grow on retries to forgive a
     // single transient backend slowdown.
-    //   attempt 1 → 15s, attempt 2 → 30s, attempt 3 → 60s
-    // Worst case 3-attempt cost is 15+1+30+2+60 = 108s per failing category
-    // BUT a healthy category resolves in 1-2s so this only matters when the
-    // backend is genuinely failing for that prefix.
-    var LIST_TIMEOUT_BY_ATTEMPT = [15000, 30000, 60000];
+    //   attempt 1 → 15s, attempt 2 → 30s
+    // The old third attempt waited a further 60s. A storage.list that already
+    // failed at 30s does not succeed at 60s; it only held the spinner up for
+    // another minute and kept a third live query on the pool. Two attempts, then
+    // degrade to whatever the manifest already has.
+    // Worst case 2-attempt cost is 15+1.5+30 = ~46.5s per failing category, down
+    // from ~108s.
+    var LIST_TIMEOUT_BY_ATTEMPT = [15000, 30000];
     var LIST_TIMEOUT_MS = LIST_TIMEOUT_BY_ATTEMPT[0]; // legacy alias for diagnostics
     // If Supabase times out on one category, do not retry a full bucket scan on
     // every focus/reload. The visible library keeps stale entries for the failed
@@ -374,16 +377,54 @@
     // away and back, panel re-shows, etc.).
     var _bgRefreshInFlight = false;
 
+    // Set once the blitzkrieg_list_folders RPC fails in a run, so the remaining
+    // categories skip the 15s RPC preflight instead of each paying it again before
+    // dropping to the same storage.list ladder. Reset at the top of listTemplates.
+    var _rpcFolderListDown = false;
+    // The first RPC attempt of a run, shared by concurrent category workers. Without
+    // it every worker checks _rpcFolderListDown before any of them has set it, so a
+    // down RPC is still probed once PER WORKER. Harmless at 2 workers, wasteful as
+    // concurrency rises.
+    var _rpcFolderListProbe = null;
+
     function _listWithTimeout(folder, opts, timeoutMs) {
         timeoutMs = timeoutMs || LIST_TIMEOUT_MS;
-        var listPromise = sb.storage.from(BUCKET).list(folder, opts || {});
+
+        var controller = null;
+        try { if (typeof AbortController === 'function') controller = new AbortController(); } catch (e) { controller = null; }
+
+        var listOpts = {};
+        var srcOpts = opts || {};
+        for (var k in srcOpts) { if (Object.prototype.hasOwnProperty.call(srcOpts, k)) listOpts[k] = srcOpts[k]; }
+        if (controller) listOpts.signal = controller.signal;
+
+        var timer = null;
+        var listPromise = sb.storage.from(BUCKET).list(folder, listOpts).then(function (r) {
+            if (timer) { clearTimeout(timer); timer = null; }
+            return r;
+        }, function (e) {
+            if (timer) { clearTimeout(timer); timer = null; }
+            throw e;
+        });
+
         var timeoutPromise = new Promise(function (_, reject) {
-            setTimeout(function () {
+            timer = setTimeout(function () {
+                // Without this abort the attempt stays LIVE on the connection pool
+                // while the next attempt opens another, so the retry ladder adds
+                // load to a backend that is already failing. That is how the logged
+                // "The connection to the database timed out" errors were produced.
+                if (controller) { try { controller.abort(); } catch (e) {} }
                 reject(new Error('List timed out after ' + timeoutMs + 'ms'));
             }, timeoutMs);
         });
+
         return Promise.race([listPromise, timeoutPromise]);
     }
+
+    // Test seams. Exposed so the ladder's shape and abort behaviour can be asserted
+    // without a CEP host or a live Supabase backend.
+    window.__blitzListTimeoutsForTest = LIST_TIMEOUT_BY_ATTEMPT;
+    window.__blitzListWithTimeoutForTest = _listWithTimeout;
 
     // Fast child-folder listing via the blitzkrieg_list_folders RPC (index-only
     // scan, ~70ms) instead of Storage list() -> storage.search(), which does a
@@ -1121,7 +1162,7 @@
         // function declaration, hoisted to the top of fetchAllMetadata, so it is
         // callable here even though it is defined lower down.)
         _log('fetchAllMetadata: listing root...', 'info');
-        var allRootItems = await listCategoryWithRetry('', 3, { column: 'name', order: 'asc' });
+        var allRootItems = await listCategoryWithRetry('', LIST_TIMEOUT_BY_ATTEMPT.length, { column: 'name', order: 'asc' });
         _log('fetchAllMetadata: root has ' + allRootItems.length + ' items (folders + files)', 'info');
 
         // Log all root item names for debugging
@@ -1193,14 +1234,29 @@
             // from files. On any RPC failure we fall through to the Storage
             // list() retry ladder below, so an older DB without the function
             // still works.
-            if (catName) {
-                try {
-                    return await _listFoldersViaRpc(catName);
-                } catch (rpcErr) {
-                    _log('listCategory "' + catName + '": fast RPC failed (' + (rpcErr && rpcErr.message || rpcErr) + '); falling back to storage.list', 'warn');
+            if (catName && !_rpcFolderListDown) {
+                // Let the first probe of this run settle before deciding. Concurrent
+                // workers then see the verdict instead of each launching their own.
+                if (_rpcFolderListProbe) {
+                    try { await _rpcFolderListProbe; } catch (probeErr) { /* verdict is in _rpcFolderListDown */ }
                 }
             }
-            maxAttempts = maxAttempts || 3;
+            if (catName && !_rpcFolderListDown) {
+                try {
+                    var _rpcCall = _listFoldersViaRpc(catName);
+                    if (!_rpcFolderListProbe) _rpcFolderListProbe = _rpcCall;
+                    return await _rpcCall;
+                } catch (rpcErr) {
+                    // Memoize for the rest of this run. The RPC is a single shared
+                    // function: if it is down for one category it is down for all,
+                    // and re-probing it per category cost a further 15s x N of pure
+                    // waste on top of the storage ladder.
+                    _rpcFolderListDown = true;
+                    _log('listCategory "' + catName + '": fast RPC failed (' + (rpcErr && rpcErr.message || rpcErr) + '); falling back to storage.list for the rest of this run', 'warn');
+                }
+            }
+            // Derive the cap from the ladder so the two can never drift apart.
+            maxAttempts = maxAttempts || LIST_TIMEOUT_BY_ATTEMPT.length;
             var attempts = 0;
             var lastErr;
             while (attempts < maxAttempts) {
@@ -1412,6 +1468,10 @@
      */
     async function listTemplates() {
         var t0 = Date.now();
+        // Fresh run: re-probe the fast RPC once rather than staying pessimistic
+        // forever after a single transient failure.
+        _rpcFolderListDown = false;
+        _rpcFolderListProbe = null;
 
         // Promote the file-backed cache into localStorage if the OS/CEP wiped it
         // across the AE restart. Awaited so Tier 1 sees the rehydrated cache
