@@ -774,9 +774,7 @@
      * Clear only this panel's local caches. Does not delete the shared cloud
      * manifest, because that manifest is the fast source of truth for all
      * editors and should only be invalidated after real storage mutations.
-     */
-    /**
-     * Drop the local caches.
+     *
      * @param {{keepSignedUrls?: boolean}} [opts] When keepSignedUrls is true the
      *   signed-URL caches survive. Signed URLs are keyed by storagePath, so a
      *   DISPLAY-NAME problem (the garbage-folder-name case) has no bearing on their
@@ -835,11 +833,9 @@
     var _permanentBadNamesWarnedThisSession = false;
 
     /**
-     * Build comp objects from metadata results.
-     * Thumbnail and preview URLs are signed lazily by the UI.
-     */
-    /**
-     * Pure builder: metadata entries in, comp objects out.
+     * Build comp objects from metadata results. Pure builder: metadata entries in,
+     * comp objects out. Thumbnail and preview URLs are signed lazily by the UI.
+     *
      * @param {object[]} metadataResults
      * @param {{allowCacheClear?: boolean}} [opts] Only the Tier-1 localStorage path
      *   may clear the cache on detecting garbage names. Every other caller runs the

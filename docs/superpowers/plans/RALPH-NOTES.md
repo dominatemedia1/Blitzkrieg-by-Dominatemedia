@@ -77,6 +77,10 @@ Do Step 1 with Task 11, then the pre-sizing pass can be deleted outright.
   probes at `LIST_CAT_CONCURRENCY = 2`.
 - **`downloadStorageFiles` already had a `skipFailures` + `skipped` mode.** Task 4's
   `downloadStorageFilesSettled` delegates to it rather than adding a second worker pool.
+- **CRLF regression, caught and fixed before merge.** `js/cloud-library.js` is a CRLF
+  file. Scripted edits rewrote it as LF, which turned a surgical change into a 6085-line
+  whole-file diff. Restored to CRLF; the diff is now only the intended hunks. Any future
+  scripted edit to that file must write bytes with CRLF preserved.
 - **TDD ordering slip, recorded honestly:** the RPC memoization in Task 9 was written
   before its test. The test was added immediately after and did fail against the racy
   implementation, which is how the race was found.
