@@ -1,0 +1,9 @@
+{
+  "name": "blitzkrieg-by-dominatemedia",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Adobe CEP panel for the Dominate Media cloud template library",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}
