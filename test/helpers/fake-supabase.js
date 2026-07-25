@@ -48,6 +48,9 @@ function fakeSupabase(config) {
       slice(start, end) {
         return makeBlob({ size: Math.max(0, (end || 0) - (start || 0)), body: '' });
       },
+      // metadata.json / manifest.json are read via .text(); without it every
+      // metadata download "succeeds" and then yields no comps.
+      text() { return Promise.resolve(String(body)); },
       arrayBuffer() { return Promise.resolve(new ArrayBuffer(0)); }
     };
   }

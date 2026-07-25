@@ -23,3 +23,9 @@ jobs:
         run: bash scripts/ci-check.sh
       - name: Unit tests
         run: node --test test/*.test.js
+      # Blocking, like every other step here. It exits non-zero when a hot-path
+      # budget is blown, so a regression that only shows up as slowness (a re-added
+      # retry attempt, a lost cache, a leaked timer) fails the build instead of
+      # reaching an editor.
+      - name: Performance budgets
+        run: node test/perf.bench.js

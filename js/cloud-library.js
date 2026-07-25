@@ -456,12 +456,19 @@
     function _listFoldersViaRpc(catName, timeoutMs) {
         timeoutMs = timeoutMs || 15000;
         var rpcPromise = sb.rpc('blitzkrieg_list_folders', { _category: catName });
+        // The losing side of a race is NOT cancelled by the race settling: without
+        // clearing it, every category leaves a live 15s wakeup behind, ~24 per load,
+        // accumulating because the panel reloads on every focus event.
+        var timer = null;
         var timeoutPromise = new Promise(function (_, reject) {
-            setTimeout(function () {
+            timer = setTimeout(function () {
+                timer = null;
                 reject(new Error('RPC folder-list timed out after ' + timeoutMs + 'ms'));
             }, timeoutMs);
         });
+        function _clearTimer() { if (timer) { clearTimeout(timer); timer = null; } }
         return Promise.race([rpcPromise, timeoutPromise]).then(function (res) {
+            _clearTimer();
             if (!res || res.error) {
                 throw new Error('blitzkrieg_list_folders("' + catName + '") failed: ' + ((res && res.error && res.error.message) || 'unknown'));
             }
@@ -472,8 +479,12 @@
                 if (nm) out.push({ name: nm, id: null });
             }
             return out;
+        }, function (err) {
+            _clearTimer();
+            throw err;
         });
     }
+    window.__blitzListFoldersViaRpcForTest = _listFoldersViaRpc;
 
     // Storage-truth for thumbnail/preview state via the blitzkrieg_thumbnail_status
     // RPC (one index-only aggregate over storage.objects). Returns a map keyed
@@ -485,12 +496,18 @@
     // exist (the mass regenerate that crashes AE 2026).
     function _fetchThumbnailStatus() {
         var rpcPromise = sb.rpc('blitzkrieg_thumbnail_status');
+        // Same leak as _listFoldersViaRpc: clear the loser so the race settling does
+        // not leave a 15s wakeup scheduled for every library load.
+        var timer = null;
         var timeoutPromise = new Promise(function (_, reject) {
-            setTimeout(function () {
+            timer = setTimeout(function () {
+                timer = null;
                 reject(new Error('blitzkrieg_thumbnail_status timed out'));
             }, 15000);
         });
+        function _clearTimer() { if (timer) { clearTimeout(timer); timer = null; } }
         return Promise.race([rpcPromise, timeoutPromise]).then(function (res) {
+            _clearTimer();
             if (!res || res.error || !res.data) return null;
             var rows = res.data;
             var map = {};
@@ -503,7 +520,7 @@
                 };
             }
             return map;
-        }).then(null, function () { return null; });
+        }).then(null, function () { _clearTimer(); return null; });
     }
 
     // CEP 8/9 fallback for `new CustomEvent(name, {detail})` — old Chromium
@@ -1887,6 +1904,14 @@
         return Promise.race([dlPromise, timeoutPromise]);
     }
 
+    // Backoff before the single skip-path retry. Long enough to ride out a brief
+    // network drop, short enough that a template with several dead objects does
+    // not visibly stall the sync.
+    var SKIP_RETRY_BACKOFF_MS = 400;
+    function _sleep(ms) {
+        return new Promise(function (resolve) { setTimeout(resolve, ms); });
+    }
+
     // opts.skipFailures (sync mirror path): a single file that errors or hangs is
     // SKIPPED (recorded, not thrown) so one broken/phantom footage object cannot
     // block the whole template from mirroring. The caller decides whether the
@@ -1912,13 +1937,34 @@
                         throw new Error((res.error && res.error.message) || 'no data');
                     }
                 } catch (dlErr) {
+                    // Give the file ONE more go before writing it off. The production
+                    // skips are dominated by transient "Failed to fetch" bursts inside a
+                    // single bad half hour, and one of them was a skipped .aep, which IS
+                    // the reported "project files are missing". A skip is permanent: the
+                    // template still completes on its .aep and nothing ever goes back for
+                    // the rest, so one blip costs that file until the user re-stashes.
+                    var recovered = false;
                     if (skipFailures) {
-                        // One bad footage object must not fail the whole template.
-                        if (skippedOut) skippedOut.push(path);
-                        _log('mirror: skipped unrecoverable file ' + path + ' (' + (dlErr && dlErr.message || dlErr) + ')', 'warn');
-                        continue;
+                        try {
+                            await _sleep(SKIP_RETRY_BACKOFF_MS);
+                            res = await _downloadWithTimeout(path);
+                            if (res.error || !res.data) {
+                                throw new Error((res.error && res.error.message) || 'no data');
+                            }
+                            recovered = true;
+                        } catch (retryErr) {
+                            dlErr = retryErr;
+                        }
                     }
-                    throw new Error('Failed to download bundle file ' + path + ': ' + (dlErr && dlErr.message || 'unknown'));
+                    if (!recovered) {
+                        if (skipFailures) {
+                            // One bad footage object must not fail the whole template.
+                            if (skippedOut) skippedOut.push(path);
+                            _log('mirror: skipped unrecoverable file ' + path + ' (' + (dlErr && dlErr.message || dlErr) + ')', 'warn');
+                            continue;
+                        }
+                        throw new Error('Failed to download bundle file ' + path + ': ' + (dlErr && dlErr.message || 'unknown'));
+                    }
                 }
                 results[idx] = {
                     path: path,
@@ -3126,6 +3172,7 @@
         __getSignedUrlForTest: function (path) { return _signedPathUrlCache[path]; },
         __buildCompsFromMetadataForTest: buildCompsFromMetadata,
         __getExistingPreviewFramePathsForTest: getExistingPreviewFramePaths,
+        __downloadStorageFilesForTest: downloadStorageFiles,
         __expirePreviewNegativeCacheForTest: function () {
             Object.keys(_previewFailCache).forEach(function (k) {
                 _previewFailCache[k] = Date.now() - PREVIEW_NEGATIVE_TTL - 1;

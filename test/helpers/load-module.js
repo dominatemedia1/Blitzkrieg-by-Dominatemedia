@@ -50,6 +50,18 @@ function loadModule(relPath, windowExtras) {
 
   // js/main.js references several CEP globals bare (not via window.), so they must
   // exist as true globals in the sandbox, not only as properties of the window stub.
+  // Counting timers. A Promise.race timeout whose loser is never cleared leaks a
+  // live timer per call: harmless-looking, but it keeps a wakeup and a closure
+  // scheduled for the full timeout, and on a panel that reloads on every focus
+  // event they accumulate. `pendingTimers()` is how a test asserts none leaked.
+  const live = new Map();
+  const countingSetTimeout = (fn, ms, ...rest) => {
+    const id = setTimeout((...a) => { live.delete(id); return fn(...a); }, ms, ...rest);
+    live.set(id, ms || 0);
+    return id;
+  };
+  const countingClearTimeout = (id) => { live.delete(id); return clearTimeout(id); };
+
   const sandbox = {
     CSInterface: windowStub.CSInterface,
     cep: windowStub.cep,
@@ -59,8 +71,8 @@ function loadModule(relPath, windowExtras) {
     document: windowStub.document,
     navigator: windowStub.navigator,
     console,
-    setTimeout,
-    clearTimeout,
+    setTimeout: countingSetTimeout,
+    clearTimeout: countingClearTimeout,
     setInterval,
     clearInterval,
     Promise,
@@ -86,7 +98,18 @@ function loadModule(relPath, windowExtras) {
     windowStub.blitzkriegAuth ||
     null;
 
-  return { window: windowStub, exports: exported, localStorage: localStorageStub };
+  return {
+    window: windowStub,
+    exports: exported,
+    localStorage: localStorageStub,
+    pendingTimers: () => live.size,
+    // Delays of every still-live timer. Short debounces (a coalesced file write) are
+    // legitimate and self-clearing; a surviving multi-second deadline is the leak.
+    pendingTimerDelays: () => Array.from(live.values()),
+    // Drop any still-live timer so a test file exits immediately instead of the
+    // runner waiting out a real 15s deadline.
+    clearAllTimers: () => { live.forEach((id) => clearTimeout(id)); live.clear(); }
+  };
 }
 
 module.exports = { loadModule, REPO_ROOT };

@@ -123,3 +123,46 @@ in-flight promise map in `cloud-library.js` (covers every caller, not just the g
 and raised the card guard to 60s.
 
 Suite: 40 tests, 0 failing. `js/cloud-library.js` CRLF preserved (3155).
+
+## Eval pass, findings 7-9 (2026-07-25)
+
+**Finding 7 (fixed): leaked 15s timers on every load.** `Promise.race([work, timeout])`
+settles when the work wins, but the losing timer keeps running to its full deadline.
+`_listWithTimeout` and `_downloadWithTimeout` clear theirs; `_listFoldersViaRpc` and
+`_fetchThumbnailStatus` did not. That is ~24 categories + 1 status call = ~25 live 15s
+wakeups per library load, accumulating because the panel reloads on every focus event.
+Both now clear on the success AND rejection paths (`Promise.prototype.finally` stays
+banned for CEP 8/9). This is also why the test suite sat for 15s: 15.5s to 2.6s.
+
+**Finding 8 (fixed): mirror file downloads had zero retries.** Live logs for the 7 days
+to 2026-07-25 show `mirror: skipped unrecoverable file .../11.aep (Failed to fetch)` and
+several `(Footage)/*.mp4` skips. All the "Failed to fetch" entries come from one user
+inside one bad half hour, so they are transient network drops, not dead objects. A skip
+was permanent: the template still completed on its .aep and nothing went back for the
+rest. A skipped .aep IS the reported "project files are missing". Added one retry with a
+400ms backoff on the skip path only; the strict throw-on-any-failure contract that
+comp.png and dependency callers rely on is untouched.
+
+**Finding 9 (test harness): the fake blob had no `.text()`.** Every metadata download
+"succeeded" and then yielded zero comps, so the cold-path benchmark was silently
+measuring a fully degraded load. Fixed; the cold path builds 384 comps in 247ms.
+
+**Not a defect, closed:** the `Failed to fetch` cluster (30 events). One user,
+2026-07-20 14:33 to 14:55, across root list, category list, getTeamFavorites and
+getTemplateSubmitters at once. That is their connection dropping, not a code path.
+
+### New: `test/perf.bench.js`, wired into CI as a BLOCKING step
+
+Budgets on the paths an editor actually waits on, against a 384-template fake library
+at 12ms/op. A regression that only shows up as slowness now fails the build.
+
+| Path | Measured | Budget |
+|---|---|---|
+| cold slow path, no cache, no RPC | 247ms | 12000ms |
+| timers left live after that load | 0 | 0 |
+| warm cache first paint, hung host bridge | 2ms | 250ms |
+| worst-case ladder per category | 45000ms | 45000ms |
+| 80 hovers on a failing preview folder | 0ms / 2 lists | 500ms |
+| healthy 3-file mirror | 15ms | 200ms |
+
+Suite: 46 tests, 0 failing, 2.6s. CI GATE: PASS. `js/cloud-library.js` CRLF preserved.
