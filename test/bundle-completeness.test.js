@@ -53,3 +53,28 @@ test('one failed asset does not discard the whole footage bundle', async () => {
   assert.strictEqual(r.reason, 'assets-failed');
   assert.deepStrictEqual(Array.from(r.missing), [TPL + '/(Footage)/bad.mp4']);
 });
+
+// --- Task 5: a partial bundle must never be cached as a complete mirror ---
+
+test('markTemplatePartial records the mirror as NOT complete so it re-fetches', async () => {
+  const { exports: sync } = loadModule('js/local-sync.js');
+  assert.strictEqual(typeof sync.markTemplatePartial, 'function');
+
+  await sync.markTemplatePartial(TPL, '/tmp/x.aep', '1.3.21', [TPL + '/(Footage)/bad.mp4']);
+  const st = sync.getTemplateState(TPL);
+
+  assert.strictEqual(st.complete, false, 'a partial mirror must not read as complete');
+  assert.strictEqual(st.partial, true);
+  assert.deepStrictEqual(Array.from(st.missing), [TPL + '/(Footage)/bad.mp4']);
+});
+
+test('a later complete download clears the partial marker', async () => {
+  const { exports: sync } = loadModule('js/local-sync.js');
+  await sync.markTemplatePartial(TPL, '/tmp/x.aep', '1.3.21', [TPL + '/(Footage)/bad.mp4']);
+  await sync.markTemplateComplete(TPL, '/tmp/x.aep', '1.3.21');
+  const st = sync.getTemplateState(TPL);
+
+  assert.strictEqual(st.complete, true);
+  assert.ok(!st.partial, 'partial must be cleared once the full bundle lands');
+  assert.strictEqual((st.missing || []).length, 0);
+});

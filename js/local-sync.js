@@ -1395,6 +1395,35 @@
          * non-empty first. Merges into any existing entry so a prior thumbComplete is
          * preserved. Resolves true if marked complete.
          */
+        /** Read one template's mirror state. {} when nothing is recorded. */
+        getTemplateState: function (storagePath) {
+            var state = _loadState();
+            var t = (state.templates || {})[storagePath];
+            return t ? t : {};
+        },
+
+        /**
+         * Record a mirror that exists on disk but is KNOWN to be missing assets.
+         * Deliberately leaves `complete` false so every read path (serve-from-mirror,
+         * pending-for, staleness) treats it as needing a re-fetch. Marking a partial
+         * bundle complete is what made missing footage PERMANENT: the fast path served
+         * the incomplete mirror forever and never went back to the cloud for the rest.
+         */
+        markTemplatePartial: function (storagePath, aepFsPath, contentVersion, missingPaths) {
+            if (!storagePath || !aepFsPath) return Promise.resolve(false);
+            var state = _loadState();
+            if (!state.templates) state.templates = {};
+            var prev = state.templates[storagePath] || {};
+            prev.ts = Date.now();
+            prev.complete = false;
+            prev.partial = true;
+            prev.missing = missingPaths || [];
+            prev.contentVersion = contentVersion || '';
+            state.templates[storagePath] = prev;
+            _saveState(state);
+            return Promise.resolve(true);
+        },
+
         markTemplateComplete: function (storagePath, aepFsPath, contentVersion) {
             if (!storagePath || !aepFsPath) return Promise.resolve(false);
             function _mark() {
@@ -1403,6 +1432,9 @@
                 var prev = state.templates[storagePath] || {};
                 prev.ts = Date.now();
                 prev.complete = true;
+                // A full bundle supersedes any earlier partial record.
+                prev.partial = false;
+                prev.missing = [];
                 prev.contentVersion = contentVersion || '';
                 state.templates[storagePath] = prev;
                 _saveState(state);

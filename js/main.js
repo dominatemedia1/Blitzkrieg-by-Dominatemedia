@@ -4961,14 +4961,29 @@
         showToast('Downloading template...');
         debugLog('IMPORT: mirror import starting for ' + storagePath);
         var mirrorDir = null;
+        var downloadedBundle = null;
         window.localSync.ensureTemplateMirrorDir(storagePath).then(function(dir) {
             mirrorDir = dir;
             return window.cloudLibrary.downloadTemplate(storagePath);
         }).then(function(downloaded) {
+            downloadedBundle = downloaded;
             debugLog('IMPORT: downloaded ' + downloaded.fileName + ' (' + (downloaded.blob.size / 1024).toFixed(0) + 'KB, assets: ' + ((downloaded.extraFiles && downloaded.extraFiles.length) || 0) + ') -> mirror');
             return writeDownloadedTemplateBundle(downloaded, mirrorDir);
         }).then(function(aepDiskPath) {
-            return window.localSync.markTemplateComplete(storagePath, aepDiskPath, impVer).then(function() {
+            // Only a COMPLETE bundle may be cached as a complete mirror. Marking a
+            // partial one complete is what made missing footage permanent: the fast
+            // path served the incomplete mirror forever and never re-fetched.
+            var _complete = !downloadedBundle || downloadedBundle.complete !== false;
+            var _missing = (downloadedBundle && downloadedBundle.missing) || [];
+            if (!_complete) {
+                debugLog('IMPORT: bundle INCOMPLETE (' + (downloadedBundle.reason || 'unknown') + '), ' +
+                         _missing.length + ' file(s) missing for ' + storagePath, 'warn');
+                showToast('Imported without ' + _missing.length + ' asset(s). Re-import to retry the missing files.', true);
+            }
+            var _mark = _complete
+                ? window.localSync.markTemplateComplete(storagePath, aepDiskPath, impVer)
+                : window.localSync.markTemplatePartial(storagePath, aepDiskPath, impVer, _missing);
+            return _mark.then(function() {
                 // The import bundle excludes comp.png (downloadTemplate skips it), but
                 // marking the template complete makes the grid serve file://.../comp.png
                 // as its thumbnail. Cache the thumbnail into the mirror too so that file
