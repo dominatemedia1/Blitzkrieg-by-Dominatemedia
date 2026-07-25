@@ -767,13 +767,24 @@
      * manifest, because that manifest is the fast source of truth for all
      * editors and should only be invalidated after real storage mutations.
      */
-    function clearLocalCache() {
+    /**
+     * Drop the local caches.
+     * @param {{keepSignedUrls?: boolean}} [opts] When keepSignedUrls is true the
+     *   signed-URL caches survive. Signed URLs are keyed by storagePath, so a
+     *   DISPLAY-NAME problem (the garbage-folder-name case) has no bearing on their
+     *   validity, and throwing them away forced a re-sign of every thumbnail in the
+     *   library on the next load.
+     */
+    function clearLocalCache(opts) {
+        var keepSignedUrls = !!(opts && opts.keepSignedUrls);
         try { localStorage.removeItem(META_CACHE_KEY); } catch (e) {}
         _clearMetaCacheFile();
-        _signedPathUrlCache = {};
-        _previewUrlCache = {};
-        _previewPathCache = {};
-        _clearPersistedSignedUrls();
+        if (!keepSignedUrls) {
+            _signedPathUrlCache = {};
+            _previewUrlCache = {};
+            _previewPathCache = {};
+            _clearPersistedSignedUrls();
+        }
     }
 
     /**
@@ -819,7 +830,17 @@
      * Build comp objects from metadata results.
      * Thumbnail and preview URLs are signed lazily by the UI.
      */
-    async function buildCompsFromMetadata(metadataResults) {
+    /**
+     * Pure builder: metadata entries in, comp objects out.
+     * @param {object[]} metadataResults
+     * @param {{allowCacheClear?: boolean}} [opts] Only the Tier-1 localStorage path
+     *   may clear the cache on detecting garbage names. Every other caller runs the
+     *   builder IMMEDIATELY AFTER setCachedMetadata, so clearing from in here deleted
+     *   the write that had just happened and forced a full manifest re-download on
+     *   the next load, every load, for as long as one bad folder name existed.
+     */
+    async function buildCompsFromMetadata(metadataResults, opts) {
+        var allowCacheClear = !!(opts && opts.allowCacheClear);
         var validEntries = metadataResults.filter(function(mr) { return mr.metadata !== null && mr.metadata !== undefined; });
         _log('buildCompsFromMetadata: ' + validEntries.length + ' entries with metadata (of ' + metadataResults.length + ' total)', 'info');
 
@@ -953,11 +974,17 @@
         // load just loops a full rescan forever. One clear recovers a real stale
         // cache; the per-session guard prevents the rescan loop.
         var _badList = badNameFolders.slice(0, 10).join(', ') + (badNameFolders.length > 10 ? ', +' + (badNameFolders.length - 10) + ' more' : '');
-        if (staleCacheCount > 0 && !_garbageCacheClearedThisSession) {
+        if (staleCacheCount > 0 && allowCacheClear && !_garbageCacheClearedThisSession) {
             _garbageCacheClearedThisSession = true;
-            _log('buildCompsFromMetadata: ' + staleCacheCount + ' entries had garbage names [' + _badList + '] - clearing stale cache once this session', 'warn');
-            clearLocalCache();
+            _log('buildCompsFromMetadata: ' + staleCacheCount + ' entries had garbage names [' + _badList + '] - clearing stale meta cache once this session', 'warn');
+            // Keep the signed URLs. They are keyed by storagePath and a bad DISPLAY
+            // name says nothing about their validity; dropping them re-signed every
+            // thumbnail in the library on the next load, every session, for as long as
+            // one permanently-bad folder name existed in storage.
+            clearLocalCache({ keepSignedUrls: true });
         } else if (staleCacheCount > 0 && !_permanentBadNamesWarnedThisSession) {
+            // Reached when the cache was already cleared this session, or when the
+            // caller is a fresh-data path that has nothing stale to clear.
             // Guard so a permanently-bad folder (real garbage in storage, not a
             // stale-cache artifact) is reported ONCE per session instead of on
             // every library load. Rename the listed folders to clear this.
@@ -1515,7 +1542,7 @@
             var ageMs = Date.now() - (cache.ts || 0);
             var partialUntilFresh = cache.partialUntilTs && Date.now() < cache.partialUntilTs;
             _log('listTemplates: FAST PATH — using cached metadata (' + cache.folders.length + ' entries, age: ' + Math.round(ageMs / 1000) + 's' + (partialUntilFresh ? ', partial-grace ' + Math.round((cache.partialUntilTs - Date.now()) / 1000) + 's' : '') + ')', 'info');
-            var comps = await buildCompsFromMetadata(cache.folders);
+            var comps = await buildCompsFromMetadata(cache.folders, { allowCacheClear: true });
             _log('listTemplates: FAST PATH complete — ' + comps.length + ' comps in ' + (Date.now() - t0) + 'ms', 'success');
             _lastLoad = { ts: Date.now(), source: 'cache', durationMs: Date.now() - t0, count: comps.length, partial: !!partialUntilFresh, failedCategories: (cache.failedCategories || []).slice() };
 
@@ -3054,6 +3081,11 @@
         getArchiveDownloadUrl: getArchiveDownloadUrl,
         invalidateCache: invalidateCache,
         clearLocalCache: clearLocalCache,
+        // Test seams: seed and read a signed URL without a live backend. Kept off the
+        // public surface so the real signed-URL flow stays the only supported path.
+        __setSignedUrlForTest: function (path, url) { _signedPathUrlCache[path] = url; },
+        __getSignedUrlForTest: function (path) { return _signedPathUrlCache[path]; },
+        __buildCompsFromMetadataForTest: buildCompsFromMetadata,
         invalidateCacheForPath: invalidateCacheForPath,
         flushMetaCacheSync: flushMetaCacheSync,
         flushSignedUrlCacheSync: flushSignedUrlCacheSync,
