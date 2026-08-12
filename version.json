@@ -1,5 +1,5 @@
 {
-  "version": "1.3.21",
+  "version": "1.3.22",
   "files": [
     "js/main.js",
     "js/cloud-library.js",
@@ -15,7 +15,7 @@
     "version.json"
   ],
   "integrity": {
-    "js/main.js": "sha256-54a365bfedf45595d55f6176507a00c0eada360a4baf58ccd61c181a8e6dbcec",
+    "js/main.js": "sha256-d12b7f6083e3fec1e3ca6024ab52c9ed1bbd73581b8693632a6e68eb1e4ab9f9",
     "js/cloud-library.js": "sha256-c67c8523b3623fd66612eaa35f06158f2df6ca86c591f5c8fd37f131aa564b3b",
     "js/supabase-config.js": "sha256-356b184ca681f88d07d5a4fe5c22c959bc07cff2f053bdce1576cf6949bc1640",
     "js/auth.js": "sha256-ffd76b1ae1804df0fdc3340547232b984868cf98cc6243021b5ef8225eabff67",
@@ -25,6 +25,6 @@
     "js/local-sync.js": "sha256-911e3ae9b6827f4ace676931228396609698179627f5ef30f82fbb408e6398a3",
     "jsx/hostscript.jsx": "sha256-25fdaf9433d6f71808086f99c722a23c5ccba1d2bfbcd76b3224b928335e73cb",
     "CSS/style.css": "sha256-fd81edd4c18c438f30f1a589ed51458afdbc47b8c3fbc61f6d38ced40f1fbf6c",
-    "index.html": "sha256-3477e92af248e7c069e9f69aa02a126c72f3f806c3fbcd0ffb35b9bd8a4840c1"
+    "index.html": "sha256-3a3a792373d39907634369e613c55ff5fb42f6add373851f71acc15c1fca4508"
   }
 }
