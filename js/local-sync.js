@@ -12,6 +12,40 @@
 
     var STATE_KEY = 'blitzkrieg_local_sync';
 
+    // Internal logging helper (falls back to console if the panel log is not up yet).
+    // Mirrors cloud-library.js's _log: every warn/error is ALSO auto-reported to the
+    // server, so a local-mirror failure shows up in the Bug Log and in the durable
+    // error table instead of dying in a CEP remote-debug console nobody opens. That
+    // silence is exactly why a stalled mirror looked like "no error at all".
+    function _log(msg, level) {
+        level = level || 'info';
+        if (typeof window._blitzLog === 'function') {
+            window._blitzLog('[sync] ' + msg, level);
+        } else if (level === 'error') {
+            console.error('[local-sync] ' + msg);
+        } else if (level === 'warn') {
+            console.warn('[local-sync] ' + msg);
+        } else {
+            console.log('[local-sync] ' + msg);
+        }
+
+        // Auto-report errors and warnings to server
+        if ((level === 'error' || level === 'warn') && window.blitzkriegAnalytics && window.blitzkriegAnalytics.reportError) {
+            window.blitzkriegAnalytics.reportError('[sync] ' + msg, level, { source: 'local-sync' });
+        }
+    }
+
+    // Log a persistent condition ONCE per session. The state read/write helpers run on
+    // every render and every worker step, so a corrupt blob or a full localStorage would
+    // otherwise emit thousands of identical lines and flood the analytics queue - which
+    // buries the one-off failures the log exists to show.
+    var _loggedOnce = {};
+    function _logOnce(key, msg, level) {
+        if (_loggedOnce[key]) return;
+        _loggedOnce[key] = true;
+        _log(msg, level);
+    }
+
     // Runtime (non-persisted) control state for the full-library background mirror.
     // Persisted flags live in state.fullSync; this holds the in-flight loop handles,
     // rate/ETA accounting, and the live progress callback. Reset on every startFullSync.
@@ -20,6 +54,142 @@
     var MAX_SYNC_FAILS = 3; // consecutive transient sync failures before a template is given up (marked broken) so full-sync converges
     var SYNC_RETRY_COOLDOWN_MS = 30 * 60 * 1000; // after giving up on a TRANSIENT failure, auto-retry once this cooldown passes (a network blip self-heals; genuinely-broken sources are not retried)
 
+    // Default ceiling for ONE ExtendScript round trip. See _callExtendScript.
+    var CALL_TIMEOUT_MS = 120000;
+    // Ceiling for the whole-library delete. That call walks and unlinks every file
+    // under the library root in one synchronous host pass; a few thousand files on
+    // an external drive takes minutes, and the default 120s ceiling would reject the
+    // bridge while the host keeps deleting. 10 minutes bounds a genuinely wedged
+    // host without ever racing a real wipe.
+    var WIPE_TIMEOUT_MS = 10 * 60 * 1000;
+
+    // ── size-capped footage skips ─────────────────────────────────
+    // cloud-library caps the raw footage it mirrors (MIRROR_MAX_FOOTAGE_BYTES): a
+    // multi-GB source video buffered whole in the CEP heap hangs the download, so the
+    // panel deliberately leaves it out and the comp imports from its .aep instead.
+    // That decision used to be known ONLY to the import that did the downloading.
+    // Nothing persisted it, so a later import off the LOCAL fast path saw the host
+    // report missing footage, could not tell "the panel chose not to download this"
+    // from "this template is genuinely broken", and flagged a healthy template for
+    // re-stash forever. These constants + helpers persist the decision WITH the mirror.
+    //
+    // The stored list is deliberately tiny: at most MAX_SKIPPED_TRACKED entries, each
+    // holding the BASENAME (which is what the host relink walk and every user-facing
+    // sentence use) and a byte count. The state blob already lives under a localStorage
+    // quota, so this must never grow with template size.
+    var MAX_SKIPPED_TRACKED = 20;
+    // Mirrors cloud-library's MIRROR_MAX_FOOTAGE_BYTES. ONLY used by the fallback
+    // derivation below, and a drift between the two can never excuse a genuinely
+    // missing file: every candidate is intersected against the files that actually
+    // landed, so a file the mirror really did download can never be recorded as
+    // "skipped on purpose".
+    var MIRROR_SKIP_CAP_BYTES = 300 * 1024 * 1024;
+
+    /** Last path segment. Storage paths are always '/'-joined. */
+    function _baseName(p) {
+        var s = String(p || '');
+        var i = s.lastIndexOf('/');
+        return i >= 0 ? s.substring(i + 1) : s;
+    }
+
+    function _isArray(v) {
+        return Object.prototype.toString.call(v) === '[object Array]';
+    }
+
+    /**
+     * Normalize raw skip records into the stored contract shape, deduped, capped, and
+     * filtered against what actually landed on disk.
+     * @param {Array} raw - entries shaped {path|name, size|bytes, reason?}
+     * @param {?Object} landedNames - basename -> 1 for every file the mirror wrote
+     * @returns {Array<{path:string, bytes:number}>} path is the BASENAME
+     */
+    function _normalizeSkipEntries(raw, landedNames) {
+        var out = [];
+        if (!raw || !raw.length) return out;
+        var seen = {};
+        for (var i = 0; i < raw.length && out.length < MAX_SKIPPED_TRACKED; i++) {
+            var e = raw[i];
+            if (!e) continue;
+            // A tolerant read of a mixed-reason list: only the SIZE-CAP skips belong
+            // here. A footage file that failed to download is a real shortfall and
+            // must keep its ability to surface as a re-stash.
+            if (e.reason && String(e.reason) !== 'oversize') continue;
+            var name = _baseName(e.path || e.name || '');
+            if (!name || seen[name]) continue;
+            if (landedNames && landedNames[name]) continue; // it downloaded, so it was not skipped
+            seen[name] = 1;
+            var b = (typeof e.bytes === 'number') ? e.bytes
+                : ((typeof e.size === 'number') ? e.size : 0);
+            out.push({ path: name, bytes: b > 0 ? b : 0 });
+        }
+        return out;
+    }
+
+    /** basename -> 1 for every file a mirror result actually wrote. */
+    function _landedNameSet(mirrored) {
+        var set = {};
+        var files = (mirrored && mirrored.files) || [];
+        for (var i = 0; i < files.length; i++) {
+            var rel = files[i] && (files[i].relativePath || files[i].path);
+            if (!rel) continue;
+            set[_baseName(rel)] = 1;
+        }
+        return set;
+    }
+
+    /**
+     * Resolve the oversized-footage skip set for a finished mirror. Never rejects.
+     *
+     * PRIMARY: whatever mirrorTemplate reports on its result (skippedLarge, or a
+     * skippedFootage list whose entries carry reason:'oversize'). An array here is
+     * authoritative even when empty, so the fallback never runs.
+     *
+     * FALLBACK: the mirror result carries no skip field at all (cloud-library has not
+     * been taught to report it yet). Re-run the SAME listing cloud-library uses, with
+     * the same cap, purely to learn which files were skipped. Costs one extra LIST per
+     * mirrored template and no downloads, and it runs only after the bytes have landed.
+     *
+     * @returns {Promise<Array<{path:string, bytes:number}>>} always an array
+     */
+    function _resolveSkippedLarge(storagePath, mirrored) {
+        var landed = _landedNameSet(mirrored);
+        var reported = mirrored && (mirrored.skippedLarge || mirrored.skippedOversize || mirrored.skippedFootage);
+        if (_isArray(reported)) {
+            return Promise.resolve(_normalizeSkipEntries(reported, landed));
+        }
+        if (!window.cloudLibrary || typeof window.cloudLibrary.collectAllFiles !== 'function') {
+            return Promise.resolve([]);
+        }
+        _logOnce('skip-derive', 'the mirror result does not report its oversized-footage skips, deriving them with one extra listing per template', 'warn');
+        var raw = [];
+        var listing;
+        try {
+            listing = window.cloudLibrary.collectAllFiles(storagePath, {
+                _timeoutMs: 45000,
+                _skipLargerThan: MIRROR_SKIP_CAP_BYTES,
+                _skippedLarge: raw
+            });
+        } catch (e) {
+            _log('could not derive the skipped-footage list for ' + storagePath + ' (' + (e && e.message || e) + '), the local fast path will have no skip information for it', 'warn');
+            return Promise.resolve([]);
+        }
+        return Promise.resolve(listing).then(function () {
+            return _normalizeSkipEntries(raw, landed);
+        }, function (err) {
+            // Not fatal: the mirror itself is fine. The cost is that a later local
+            // import cannot explain this template's missing footage, which is exactly
+            // the pre-fix behavior, so say it once rather than failing the sync.
+            _log('could not derive the skipped-footage list for ' + storagePath + ' (' + (err && err.message || err) + '), the local fast path will have no skip information for it', 'warn');
+            return [];
+        });
+    }
+
+    // The library root is gone (drive unplugged, folder moved/renamed). Every path
+    // under it then reads as "not there", which is indistinguishable from a clean
+    // delete unless the caller checks. Shared by resetAllLocal and resetTemplate so
+    // the user sees one sentence for one condition.
+    var MISSING_ROOT_MSG = 'The library folder is not there. Reconnect the drive or set the library folder again.';
+
     /** Promise that resolves after ms (CEP has setTimeout). */
     function _delay(ms) {
         return new Promise(function (resolve) { setTimeout(resolve, ms); });
@@ -27,8 +197,15 @@
 
     // ── internal helpers ──────────────────────────────────────────
 
-    /** Call an ExtendScript function and return a Promise of the parsed JSON result. */
-    function _callExtendScript(expr) {
+    /**
+     * Call an ExtendScript function and return a Promise of the parsed JSON result.
+     * @param {string} expr
+     * @param {number} [timeoutMs] - ceiling for this one call, default CALL_TIMEOUT_MS.
+     *   Only raise it for a call that legitimately runs for minutes (the library
+     *   wipe). A rejected bridge does NOT stop the host, so any caller that raises
+     *   the ceiling must also handle err.timedOut as "may still be running".
+     */
+    function _callExtendScript(expr, timeoutMs) {
         return new Promise(function (resolve, reject) {
             if (!window.__adobe_cep__ || typeof window.__adobe_cep__.evalScript !== 'function') {
                 reject(new Error('CEP bridge unavailable'));
@@ -40,16 +217,22 @@
             // wedges the whole full-sync loop. Time-bound it so the caller's
             // reject path runs (verify already fails open; dir-create rejects ->
             // template marked retryable).
-            // 120s: generous enough that the base64-decode WRITE fallback (used only
-            // when native cep.fs.writeFile is unavailable and it decodes a whole large
-            // .aep in one host round-trip) does not falsely time out, while still
+            // 120s default: generous enough that the base64-decode WRITE fallback (used
+            // only when native cep.fs.writeFile is unavailable and it decodes a whole
+            // large .aep in one host round-trip) does not falsely time out, while still
             // bounding a genuinely wedged host so the sync loop can never hang forever.
+            var ceiling = (typeof timeoutMs === 'number' && timeoutMs > 0) ? timeoutMs : CALL_TIMEOUT_MS;
             var settled = false;
             var timer = setTimeout(function () {
                 if (settled) return;
                 settled = true;
-                reject(new Error('ExtendScript call timed out'));
-            }, 120000);
+                // Tag it. A timeout means the BRIDGE gave up, not that the host stopped:
+                // a delete keeps emptying the disk after this rejects. A caller that
+                // touches files must say "may still be running", never "nothing happened".
+                var timeoutErr = new Error('ExtendScript call timed out');
+                timeoutErr.timedOut = true;
+                reject(timeoutErr);
+            }, ceiling);
             window.__adobe_cep__.evalScript(expr, function (result) {
                 if (settled) return;
                 settled = true;
@@ -72,7 +255,11 @@
         try {
             var state = JSON.parse(localStorage.getItem(STATE_KEY) || 'null');
             if (state && state.libraryPath) return state.libraryPath;
-        } catch (e) { /* corrupt */ }
+        } catch (e) {
+            // Corrupt blob. Every path resolution below now returns '' , so the panel
+            // behaves as "library not configured" - say so instead of guessing.
+            _logOnce('getpath-parse', 'sync state is unreadable, treating the library as unconfigured: ' + (e && e.message || e), 'warn');
+        }
         return ''; // Empty = not configured yet
     }
 
@@ -82,6 +269,9 @@
         try {
             state = JSON.parse(localStorage.getItem(STATE_KEY) || 'null') || { templates: {} };
         } catch (e) {
+            // The whole ledger is gone from this read onward: every template reads as
+            // pending and the next save overwrites the old blob. Loud, not silent.
+            _logOnce('load-parse', 'sync state failed to parse, starting from an empty ledger: ' + (e && e.message || e), 'error');
             return { templates: {} };
         }
         // One-time repair: earlier builds wrote thumbnail-render failures into the
@@ -125,6 +315,10 @@
             state.migratedThumbBroken = true;
             localStorage.setItem(STATE_KEY, JSON.stringify(state));
         } catch (e) {
+            // The migration is marked done in memory so we never loop, which means any
+            // legacy thumbnail-broken flags survive and keep wearing a false "Needs
+            // re-stash" chip. Name it rather than letting the chip look like real state.
+            _logOnce('migrate-legacy', 'legacy broken-flag migration failed, stale re-stash chips may persist: ' + (e && e.message || e), 'warn');
             state.migratedThumbBroken = true; // never loop on a corrupt entry
         }
         return state;
@@ -164,7 +358,13 @@
     function _saveState(state) {
         try {
             localStorage.setItem(STATE_KEY, JSON.stringify(state));
-        } catch (e) { /* quota exceeded */ }
+        } catch (e) {
+            // Quota exceeded. The mirror ledger stops persisting from here on: synced
+            // templates read as pending after a reload, sync re-downloads what is
+            // already on disk, and broken flags never stick. Every later symptom is a
+            // misdirection, so this is an ERROR even though nothing visibly breaks yet.
+            _logOnce('save-quota', 'could not persist sync state (localStorage full?), the mirror ledger is no longer being saved: ' + (e && e.message || e), 'error');
+        }
     }
 
     /** Convert a storage path like "Category/FolderName" to a local filesystem path. */
@@ -172,6 +372,36 @@
         var lib = _getLibraryPath();
         if (!lib) return '';
         return lib + '/' + storagePath;
+    }
+
+    /**
+     * Stamp the ownership marker into a library root through the host.
+     *
+     * blitzLocalWipeLibrary refuses to empty a root that has no marker, so a root
+     * this panel manages has to carry one or "Delete local copy" is dead on arrival.
+     *
+     * allowAdopt is for the roots that predate the marker: the host only adopts a
+     * folder that already holds Blitzkrieg's own <Category>/<Template>/metadata.json
+     * shape, so adoption can never turn an ordinary folder into a wipe target.
+     *
+     * Never rejects. Callers branch on the answer, they do not catch it.
+     * @param {string} rawPath
+     * @param {boolean} allowAdopt
+     * @returns {Promise<{ok:boolean, reason:string}>}
+     */
+    function _markLibraryRoot(rawPath, allowAdopt) {
+        if (!rawPath) return Promise.resolve({ ok: false, reason: 'no library path' });
+        var safe = rawPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+        var adopt = allowAdopt ? 'true' : 'false';
+        return _callExtendScript('blitzLocalEnsureLibraryMarker("' + safe + '",' + adopt + ')').then(function (r) {
+            if (!r || r.error || r.ok !== true) {
+                var why = (r && (r.error || r.reason)) ? String(r.error || r.reason) : 'the host did not confirm the marker';
+                return { ok: false, reason: why };
+            }
+            return { ok: true, reason: '' };
+        }, function (err) {
+            return { ok: false, reason: (err && err.message) ? err.message : String(err) };
+        });
     }
 
     /** Resolve the library root, creating it if needed. Returns Promise<string>. */
@@ -274,7 +504,17 @@
                 var state = _loadState();
                 state.libraryPath = rawPath;
                 _saveState(state);
-                return rawPath;
+                // Stamp the ownership marker so a later wipe is provably scoped to a
+                // folder this panel manages. Never fatal: the path is already usable
+                // for sync, and resetAllLocal self-heals an unmarked root by adopting
+                // it. Failing the whole call here would block configuring a library
+                // over a marker write nobody has asked for yet.
+                return _markLibraryRoot(rawPath, false).then(function (mark) {
+                    if (!mark.ok) {
+                        _log('setLibraryPath: could not mark ' + rawPath + ' as a Blitzkrieg library (' + mark.reason + '); the wipe will try to adopt it later', 'warn');
+                    }
+                    return rawPath;
+                });
             });
         },
 
@@ -369,15 +609,29 @@
                 // fall back to scanning the folder for any .aep. Without this scan the
                 // import fast path never resolves an aepPath and a fully-synced
                 // template is needlessly re-downloaded on every import.
+                //
+                // SIZE-GATE: a 0-byte template.aep must never win the fast path. The host
+                // returns {exists, size}; taking `exists` alone hands the import a file AE
+                // cannot open, which fails with no cloud retry and no state repair, so the
+                // same dead file is re-chosen on every future import. blitzLocalListAep
+                // already skips 0-byte files, so falling through to the scan is the right
+                // recovery: a real .aep next to a truncated template.aep still imports.
                 var templateAep = local + '/template.aep';
                 return _callExtendScript('blitzLocalExists("' + templateAep.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '")').then(function (aepR) {
-                    if (aepR && aepR.exists) return _mk(templateAep);
+                    if (aepR && aepR.exists && aepR.size > 0) return _mk(templateAep);
+                    if (aepR && aepR.exists) {
+                        _log('checkLocal: ignoring a 0-byte template.aep for ' + storagePath + ', scanning the folder for a real .aep instead', 'warn');
+                    }
                     return _callExtendScript('blitzLocalListAep("' + safe + '")').then(function (listR) {
                         var found = (listR && listR.files && listR.files.length) ? (local + '/' + listR.files[0]) : '';
                         return _mk(found);
                     }, function () { return _mk(''); });
                 });
-            }).catch(function () {
+            }).catch(function (e) {
+                // Every failure collapses to "not present here", including a 120s host
+                // timeout. Downgrading a wedged host to a clean miss silently sends the
+                // import back to the cloud, so name the cause before returning the shape.
+                _log('checkLocal failed for ' + storagePath + ' (' + (e && e.message || e) + '), reporting it as not present locally', 'warn');
                 return { exists: false, complete: false, aepPath: '' };
             });
         },
@@ -654,7 +908,15 @@
                                     return !!localAepPath;
                                 })
                             : Promise.resolve(false);
-                        return verify.then(function (aepOk) {
+                        // Persist WHAT THIS MIRROR CHOSE NOT TO DOWNLOAD alongside it.
+                        // Resolved in parallel with the .aep verify so both land in the
+                        // one state write below: a re-mirror always rewrites the skip
+                        // set (or clears it), so it can never go stale and excuse a
+                        // genuinely missing file on a later import.
+                        var skipScan = _resolveSkippedLarge(storagePath, mirrored);
+                        return Promise.all([verify, skipScan]).then(function (both) {
+                            var aepOk = both[0];
+                            var skippedLarge = both[1];
                             var state = _loadState();
                             if (!state.templates) state.templates = {};
                             // Merge into any existing entry so a prior thumbComplete/
@@ -665,6 +927,11 @@
                             _prevEntry.bytes = mirroredBytes;
                             _prevEntry.complete = aepOk;
                             _prevEntry.contentVersion = contentVersion || '';
+                            // Rewrite (never merge) the skip set for this mirror. Absent
+                            // key = nothing was skipped, which is the common case and
+                            // keeps the state blob small.
+                            if (skippedLarge.length) _prevEntry.skippedLarge = skippedLarge;
+                            else if (_prevEntry.skippedLarge) delete _prevEntry.skippedLarge;
                             // A template that DID download and write an .aep is not broken,
                             // even if a prior run flagged it — clear the stale flag and
                             // the transient-failure counter so it starts fresh next time.
@@ -720,7 +987,7 @@
                         return _next();
                     }).catch(function (err) {
                         // Log but continue — one failure doesn't block the rest
-                        console.warn('[local-sync] Failed to sync ' + sp + ': ' + (err && err.message || err));
+                        _log('syncCategory: failed to sync ' + sp + ': ' + (err && err.message || err), 'warn');
                         synced++;
                         return _next();
                     });
@@ -1041,7 +1308,7 @@
                         st3.fullSync.failures[sp] = kind + ': ' + (err && err.message ? err.message : err);
                         _saveState(st3);
                         myRun.doneThisRun++;
-                        console.warn('[local-sync] full-sync ' + kind + ' for ' + sp + ': ' + (err && err.message || err));
+                        _log('full-sync ' + kind + ' for ' + sp + ': ' + (err && err.message || err), 'warn');
                         return step();
                     });
                 }
@@ -1278,12 +1545,18 @@
             _saveState(state);
         },
 
-        /** Clear a broken flag (after a re-stash) so the template syncs again. */
+        /** Clear a broken flag (after a re-stash) so the template syncs again.
+         *  Clears the FULL break record, matching retryTransient/retryBroken. Leaving
+         *  brokenKind behind kept surfacing a stale kind in the dashboard row, and
+         *  leaving failCount at MAX_SYNC_FAILS re-broke the template on its very next
+         *  hiccup - so a "cleared" template was never actually given a fresh start. */
         clearBroken: function (storagePath) {
             var state = _loadState();
             if (state.templates && state.templates[storagePath]) {
                 delete state.templates[storagePath].broken;
                 delete state.templates[storagePath].brokenTs;
+                delete state.templates[storagePath].brokenKind;
+                state.templates[storagePath].failCount = 0;
                 _saveState(state);
             }
         },
@@ -1343,6 +1616,42 @@
         },
 
         /**
+         * The footage the PANEL deliberately left out of this template's local mirror
+         * because it was over the size cap. Read this on the LOCAL fast path before
+         * deciding that host-reported missing footage means a broken template: a
+         * shortfall covered by this list is the panel's own decision, not a source
+         * problem, and must NOT be marked needs-re-stash (markBroken with kind
+         * 'source' is terminal in _pendingFor, so a wrong flag can never clear itself).
+         *
+         * ALWAYS returns an array. Empty means either nothing was skipped or the mirror
+         * predates this record. Entries are a defensive copy, so mutating them cannot
+         * corrupt the stored ledger.
+         *
+         * `path` is the file's BASENAME (e.g. "Raw Cam.mp4"), which is what the host
+         * relink walk indexes by and what a user-facing sentence should name. At most
+         * 20 entries are kept per template.
+         * @param {string} storagePath - "Category/FolderName"
+         * @returns {Array<{path:string, bytes:number}>}
+         */
+        getSkippedFootage: function (storagePath) {
+            if (!storagePath) return [];
+            var state = _loadState();
+            var t = state.templates && state.templates[storagePath];
+            var list = t && t.skippedLarge;
+            if (!_isArray(list) || !list.length) return [];
+            var out = [];
+            for (var i = 0; i < list.length && out.length < MAX_SKIPPED_TRACKED; i++) {
+                var e = list[i];
+                if (!e || !e.path) continue;
+                out.push({
+                    path: String(e.path),
+                    bytes: (typeof e.bytes === 'number' && e.bytes > 0) ? e.bytes : 0
+                });
+            }
+            return out;
+        },
+
+        /**
          * Resolve the local mirror directory for a storagePath (library root +
          * "/Category/Folder"). Returns '' if no library path is configured. Used by
          * the import flow to write a freshly-downloaded bundle straight into the
@@ -1371,8 +1680,17 @@
          * local fast-path and the synced counter reflects it. Verifies the .aep landed
          * non-empty first. Merges into any existing entry so a prior thumbComplete is
          * preserved. Resolves true if marked complete.
+         *
+         * This IS a re-mirror (the import path writes its bundle into the same folder),
+         * so the stored size-capped skip set is rewritten from `skippedLarge` and
+         * CLEARED when the caller passes nothing. A skip set left over from an earlier
+         * mirror would describe a bundle that no longer exists on disk and could excuse
+         * a genuinely missing file forever.
+         * @param {Array<{path:string, bytes:number}>} [skippedLarge] - the footage THIS
+         *        bundle deliberately left out (cloud-library's skippedFootage entries
+         *        are accepted as-is; only reason:'oversize' ones are kept).
          */
-        markTemplateComplete: function (storagePath, aepFsPath, contentVersion) {
+        markTemplateComplete: function (storagePath, aepFsPath, contentVersion, skippedLarge) {
             if (!storagePath || !aepFsPath) return Promise.resolve(false);
             function _mark() {
                 var state = _loadState();
@@ -1381,6 +1699,9 @@
                 prev.ts = Date.now();
                 prev.complete = true;
                 prev.contentVersion = contentVersion || '';
+                var fresh = _normalizeSkipEntries(skippedLarge, null);
+                if (fresh.length) prev.skippedLarge = fresh;
+                else if (prev.skippedLarge) delete prev.skippedLarge;
                 state.templates[storagePath] = prev;
                 _saveState(state);
                 return true;
@@ -1390,10 +1711,14 @@
                 var ok = !!(st && st.exists && st.size > 0);
                 if (!ok) return false;
                 return _mark();
-            }, function () {
-                // Verify CALL errored transiently; the write already succeeded, so
-                // trust the .aep presence and mark complete (best-effort size gate).
-                return _mark();
+            }, function (err) {
+                // The verify CALL failed, so we know NOTHING about the .aep on disk.
+                // Marking complete here writes a lie the import fast path then trusts
+                // forever: AE fails to open it, main.js falls back to the cloud, and
+                // nothing clears the flag - a permanent slow loop. Stay not-complete;
+                // the worst case is one extra download, which self-corrects.
+                _log('markTemplateComplete: could not verify ' + aepFsPath + ' (' + (err && err.message || err) + '), leaving ' + storagePath + ' not complete', 'warn');
+                return false;
             });
         },
 
@@ -1450,7 +1775,7 @@
                             processed++;
                             return next();
                         }).catch(function (err) {
-                            console.warn('[local-sync] syncAll failed for ' + sp + ': ' + (err && err.message || err));
+                            _log('syncAll failed for ' + sp + ': ' + (err && err.message || err), 'warn');
                             processed++;
                             failed++;
                             return next();
@@ -1473,16 +1798,40 @@
 
         /**
          * Remove a template from the local mirror.
+         *
+         * The state entry is dropped ONLY when the host proves the bytes are gone
+         * (remaining === 0) or the folder was never there (notFound). Dropping it on a
+         * failed delete de-registers the template while its folder stays on disk, and
+         * pruneOrphans only walks state.templates - so those bytes could never be found
+         * again. A folder we failed to delete must stay tracked.
          * @param {string} storagePath
          */
         pruneTemplate: function (storagePath) {
             var local = _localPath(storagePath);
             if (!local) return Promise.resolve();
             var safe = local.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-            return _callExtendScript('blitzLocalRemoveDir("' + safe + '")').then(function () {
+            return _callExtendScript('blitzLocalRemoveDir("' + safe + '")').then(function (r) {
+                if (r && r.error) {
+                    _log('pruneTemplate: host could not delete ' + storagePath + ': ' + r.error, 'warn');
+                    return;
+                }
+                var remaining = (r && typeof r.remaining === 'number') ? r.remaining : 0;
+                // remaining === -1 / unreadable: the host deleted, then could not read
+                // the folder back. That is "bytes MAY remain", never a clean delete, and
+                // -1 slips past a `remaining > 0` test. Keep the entry tracked.
+                if (r && (r.unreadable === true || remaining < 0)) {
+                    _log('pruneTemplate: could not read ' + storagePath + ' back after deleting, so bytes may remain, keeping it tracked', 'warn');
+                    return;
+                }
+                if (!(r && r.notFound === true) && remaining > 0) {
+                    _log('pruneTemplate: ' + storagePath + ' still has ' + remaining + ' item(s) on disk, keeping it tracked so the bytes are not orphaned', 'warn');
+                    return;
+                }
                 var state = _loadState();
                 if (state.templates) delete state.templates[storagePath];
                 _saveState(state);
+            }, function (err) {
+                _log('pruneTemplate: delete call failed for ' + storagePath + ': ' + (err && err.message || err), 'warn');
             });
         },
 
@@ -1512,6 +1861,237 @@
                 });
             }
             return _next();
+        },
+
+        // ── Local reset primitives ────────────────────────────────────────
+        // These three touch disk and state only. They cancel NOTHING: an in-flight
+        // template download cannot be aborted, so the caller must sequence
+        // cancelFullSync() -> awaitIdle() -> reset. Deleting under a live worker is
+        // how you get half-written bundles that then verify as "complete".
+
+        /**
+         * Resolve once the full-library sync loop is idle.
+         *
+         * cancelFullSync deliberately does NOT force running=false - workers only notice
+         * at their next step and `running` flips when Promise.all drains. Anything that
+         * touches the mirror on disk has to wait for that drain, so this polls
+         * getFullSyncStatus().running every 500ms.
+         *
+         * Never rejects. A caller must be able to branch on the answer, not catch it.
+         * @param {number} [timeoutMs] — ceiling in ms, default 60000
+         * @returns {Promise<boolean>} true when idle, false when the ceiling was hit
+         */
+        awaitIdle: function (timeoutMs) {
+            var ceiling = (typeof timeoutMs === 'number' && timeoutMs > 0) ? timeoutMs : 60000;
+            var deadline = Date.now() + ceiling;
+            function _poll() {
+                var running;
+                try {
+                    running = !!api.getFullSyncStatus().running;
+                } catch (e) {
+                    // Status is computed from parsed state; if that throws we cannot
+                    // prove workers are alive either way. Report idle so the caller is
+                    // not blocked forever, and say why.
+                    _log('awaitIdle: could not read sync status (' + (e && e.message || e) + '), treating the loop as idle', 'warn');
+                    return Promise.resolve(true);
+                }
+                if (!running) return Promise.resolve(true);
+                if (Date.now() >= deadline) {
+                    _log('awaitIdle: sync was still running after ' + ceiling + 'ms, giving up the wait', 'warn');
+                    return Promise.resolve(false);
+                }
+                return _delay(500).then(_poll);
+            }
+            return _poll();
+        },
+
+        /**
+         * Delete ONE template's local mirror folder and de-register it, so the next sync
+         * pulls it fresh from the cloud.
+         *
+         * Dropping the whole state entry is the clean reset: _pendingFor short-circuits
+         * to "pending" on a missing entry, which clears complete, broken, brokenKind and
+         * failCount in one move - no stale flag can survive to skip it again.
+         *
+         * The entry is dropped ONLY when the host proves the bytes are gone
+         * (remaining === 0), or the folder was never there AND the library root is
+         * still mounted. Never rejects.
+         * @param {string} storagePath — "Category/FolderName"
+         * @returns {Promise<{removed:boolean, remaining:number, error:string}>}
+         */
+        resetTemplate: function (storagePath) {
+            if (!storagePath) {
+                return Promise.resolve({ removed: false, remaining: 0, error: 'storagePath required' });
+            }
+            var local = _localPath(storagePath);
+            if (!local) {
+                return Promise.resolve({ removed: false, remaining: 0, error: 'Library path not configured' });
+            }
+
+            function _dropEntry() {
+                var state = _loadState();
+                if (state.templates) delete state.templates[storagePath];
+                if (state.fullSync && state.fullSync.failures) delete state.fullSync.failures[storagePath];
+                _saveState(state);
+                return { removed: true, remaining: 0, error: '' };
+            }
+
+            var safe = local.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+            return _callExtendScript('blitzLocalRemoveDir("' + safe + '")').then(function (r) {
+                if (!r || r.error) {
+                    var why = (r && r.error) ? String(r.error) : 'no result from the host';
+                    _log('resetTemplate: host could not delete ' + storagePath + ': ' + why, 'warn');
+                    return { removed: false, remaining: 0, error: why };
+                }
+                var remaining = (typeof r.remaining === 'number') ? r.remaining : 0;
+                // remaining === -1 / unreadable: the host deleted, then could not read the
+                // folder back. Bytes MAY still be there, and -1 slips past `remaining > 0`.
+                // Dropping the entry here de-registers a folder that is still on disk, and
+                // pruneOrphans only walks state.templates, so nothing would ever find it.
+                if (r.unreadable === true || remaining < 0) {
+                    _log('resetTemplate: could not read ' + storagePath + ' back after deleting, so bytes may remain, keeping it tracked', 'error');
+                    return {
+                        removed: false, remaining: -1,
+                        error: 'Could not confirm the folder was deleted, so files may still be there. Quit After Effects, then try again.'
+                    };
+                }
+                // notFound normally means there is nothing left to reclaim, so the entry is
+                // safe to drop and the template requeues. But when the library root itself
+                // is gone (drive unplugged) EVERY path reads notFound while the bytes sit
+                // on the disconnected disk, so prove the root is there before de-registering.
+                if (r.notFound === true) {
+                    return api.checkLibraryRoot().then(function (root) {
+                        if (root && root.configured && !root.exists) {
+                            _log('resetTemplate: the library folder at ' + root.path + ' is not there, refusing to drop ' + storagePath + ' from the ledger', 'error');
+                            return { removed: false, remaining: 0, error: MISSING_ROOT_MSG };
+                        }
+                        return _dropEntry();
+                    });
+                }
+                if (remaining > 0) {
+                    _log('resetTemplate: ' + storagePath + ' still has ' + remaining + ' item(s) on disk, keeping it tracked so the bytes are not orphaned', 'warn');
+                    return { removed: false, remaining: remaining, error: 'folder not fully deleted' };
+                }
+                return _dropEntry();
+            }, function (err) {
+                var msg = (err && err.message) ? err.message : String(err);
+                _log('resetTemplate: delete call failed for ' + storagePath + ': ' + msg, 'warn');
+                return { removed: false, remaining: 0, error: msg };
+            });
+        },
+
+        /**
+         * Empty the whole local library and reset the mirror ledger.
+         *
+         * The host deletes the CHILDREN of the library root and keeps the root itself,
+         * so every byte is reclaimed while the configured path stays valid. State is
+         * REWRITTEN, never removed: removeItem would take libraryPath with it and force
+         * the user to re-pick his folder. localStorage keys owned by main.js (thumbnail
+         * blacklists, version cache) are not touched here - the caller clears those.
+         *
+         * State is only reset once the host reports zero remaining items on a root that
+         * ACTUALLY EXISTED. A partial wipe, an unreadable folder, or a missing root that
+         * still cleared the ledger would leave untracked bytes on disk forever.
+         * Never rejects.
+         * @param {{keepCancelled?: boolean}} [opts] — keepCancelled defaults to TRUE.
+         *   True writes fullSync:{cancelled:true}, preserving the flag cancelFullSync
+         *   just set. Pass keepCancelled:false only when the caller is about to start a
+         *   fresh download (wipeAndRedownload).
+         * @returns {Promise<{removed:number, remaining:number, error:string, refused:boolean}>}
+         */
+        resetAllLocal: function (opts) {
+            // The DEFAULT is the safe one. An empty fullSync throws away `cancelled`,
+            // which is exactly the flag main.js's auto-resume gate reads: after a plain
+            // "Delete local copy" that would let the next loadLibrary silently
+            // re-download the whole library the user just deleted.
+            var keepCancelled = !(opts && opts.keepCancelled === false);
+            var lib = _getLibraryPath();
+            if (!lib) {
+                return Promise.resolve({ removed: 0, remaining: 0, error: 'Library path not configured', refused: false });
+            }
+            var safe = lib.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+
+            // Self-heal the ownership marker BEFORE the wipe. Libraries configured
+            // before the marker existed carry no marker, and the host refuses to empty
+            // an unmarked root - so without this every existing install's Delete button
+            // fails. Adoption only succeeds on a folder that already holds Blitzkrieg's
+            // own <Category>/<Template>/metadata.json shape, so it cannot promote an
+            // arbitrary folder into a wipe target.
+            return _markLibraryRoot(lib, true).then(function (mark) {
+                if (!mark.ok) {
+                    // A missing root is the unplugged-drive case, not a refusal to trust
+                    // the folder, so report it as its own condition.
+                    if (mark.reason === 'root missing') {
+                        _log('resetAllLocal: the library folder at ' + lib + ' is not there, so nothing was deleted and the ledger is left intact', 'error');
+                        return { removed: 0, remaining: 0, error: MISSING_ROOT_MSG, refused: false };
+                    }
+                    _log('resetAllLocal: ' + lib + ' is not a marked Blitzkrieg library and could not be adopted (' + mark.reason + '), nothing was deleted', 'error');
+                    return {
+                        removed: 0, remaining: 0,
+                        error: 'This folder is not a Blitzkrieg library, so nothing was deleted. Set the library folder again from the sidebar and retry.',
+                        refused: true, noMarker: true
+                    };
+                }
+                return _callExtendScript('blitzLocalWipeLibrary("' + safe + '")', WIPE_TIMEOUT_MS).then(function (r) {
+                    if (!r || r.error) {
+                        var why = (r && r.error) ? String(r.error) : 'no result from the host';
+                        _log('resetAllLocal: could not empty ' + lib + ': ' + why, 'error');
+                        return {
+                            removed: 0, remaining: 0, error: why,
+                            refused: !!(r && r.refused), noMarker: !!(r && r.noMarker)
+                        };
+                    }
+                    // The root is not there. The host reports that as a clean, empty,
+                    // ok:true result and it is indistinguishable from a successful wipe -
+                    // but nothing was deleted. Clearing the ledger here would forget every
+                    // template while every byte still sits on the disconnected drive, with
+                    // nothing left that knows to clean them up. Abort, touch no state.
+                    if (r.notFound === true || r.rootExists === false) {
+                        _log('resetAllLocal: the library folder at ' + lib + ' is not there, so nothing was deleted and the ledger is left intact', 'error');
+                        return { removed: 0, remaining: 0, error: MISSING_ROOT_MSG, refused: false };
+                    }
+                    var removed = (typeof r.removed === 'number') ? r.removed : 0;
+                    var remaining = (typeof r.remaining === 'number') ? r.remaining : 0;
+                    // remaining === -1 / unreadable: deleted, then the re-stat failed.
+                    // Bytes may remain and -1 slips past a `remaining > 0` test.
+                    if (r.unreadable === true || remaining < 0) {
+                        _log('resetAllLocal: could not read ' + lib + ' back after the wipe, so files may remain, leaving the ledger intact', 'error');
+                        return {
+                            removed: removed, remaining: -1,
+                            error: 'Could not confirm the library folder was emptied, so files may still be there. Quit After Effects, then try again.',
+                            refused: false
+                        };
+                    }
+                    if (remaining > 0) {
+                        _log('resetAllLocal: ' + remaining + ' item(s) left in ' + lib + ' after the wipe, leaving the ledger intact so they stay tracked', 'error');
+                        return { removed: removed, remaining: remaining, error: 'library not fully emptied', refused: false };
+                    }
+                    var prev = _loadState();
+                    _saveState({
+                        libraryPath: (prev && prev.libraryPath) || lib,
+                        templates: {},
+                        fullSync: keepCancelled ? { cancelled: true } : {},
+                        lastFullSync: 0
+                    });
+                    _log('resetAllLocal: emptied the local library at ' + lib + ' (' + removed + ' item(s) removed, cancelled flag ' + (keepCancelled ? 'kept' : 'cleared') + ')', 'info');
+                    return { removed: removed, remaining: 0, error: '', refused: false };
+                }, function (err) {
+                    var msg = (err && err.message) ? err.message : String(err);
+                    // A timeout is the bridge giving up, NOT the host stopping. The delete
+                    // is probably still emptying the disk, so never report it as a failure
+                    // that changed nothing, and never touch the ledger on the way out.
+                    if (err && err.timedOut) {
+                        _log('resetAllLocal: the host did not answer within ' + Math.round(WIPE_TIMEOUT_MS / 60000) + ' minutes for ' + lib + ', the delete may still be running, ledger left intact', 'error');
+                        return {
+                            removed: 0, remaining: 0,
+                            error: 'The delete is taking longer than expected and may still be running. Close and reopen the panel to check before starting another one.',
+                            refused: false
+                        };
+                    }
+                    _log('resetAllLocal: wipe call failed for ' + lib + ': ' + msg, 'error');
+                    return { removed: 0, remaining: 0, error: msg, refused: false };
+                });
+            });
         }
     };
 
