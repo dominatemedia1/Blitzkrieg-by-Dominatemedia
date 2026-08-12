@@ -13,6 +13,42 @@
     var _hasCepBridge = !!(window.__adobe_cep__ && typeof window.__adobe_cep__.evalScript === 'function');
     var CEP_ACTION_HINT = 'Open from After Effects > Window > Extensions > Blitzkrieg for import/generate.';
 
+    // Host version, resolved once at startup. Every remote bug report needs it and
+    // it used to live only in a debug-log line the editor never sends, so both the
+    // copied diagnostics block and the session_start analytics row read it here.
+    var _aeVersionString = 'unknown';
+    var _aeVersionResolved = false;
+    var _aeVersionWaiters = [];
+
+    function _resolveAeVersion(value) {
+        if (_aeVersionResolved) return;
+        _aeVersionResolved = true;
+        _aeVersionString = value || 'unknown';
+        window.__blitzAEVersion = _aeVersionString;
+        var waiters = _aeVersionWaiters;
+        _aeVersionWaiters = [];
+        for (var i = 0; i < waiters.length; i++) {
+            try { waiters[i](); } catch (e) {}
+        }
+    }
+
+    function probeAeVersion() {
+        if (_aeVersionResolved) return;
+        if (!_hasCepBridge) { _resolveAeVersion('no CEP bridge'); return; }
+        safeEvalScript('typeof AE_VERSION_INFO !== "undefined" ? AE_VERSION_INFO.versionString : "unknown"', function(r) {
+            _resolveAeVersion((r && r !== 'EvalScript error.') ? r : 'unknown');
+        });
+    }
+
+    /** Run cb once the AE version is known, or after timeoutMs, whichever is first. */
+    function whenAeVersionReady(cb, timeoutMs) {
+        if (_aeVersionResolved) { cb(); return; }
+        var fired = false;
+        function once() { if (fired) return; fired = true; cb(); }
+        _aeVersionWaiters.push(once);
+        setTimeout(once, timeoutMs || 3000);
+    }
+
     function refreshCepBridgeState() {
         var nextState = !!(window.__adobe_cep__ && typeof window.__adobe_cep__.evalScript === 'function');
         if (_hasCepBridge !== nextState) {
@@ -108,6 +144,61 @@
 
     // Expose safeEvalScript for other modules (telemetry.js)
     window.safeEvalScript = safeEvalScript;
+
+    /* --------- Bounded host round-trips ---------
+     * safeEvalScript only guards a MISSING bridge and a SYNCHRONOUS throw. When
+     * After Effects is busy behind a native modal (the missing-footage dialog is
+     * the common one) the evalScript callback never fires at all, so any promise
+     * wrapping it hangs forever with no error, no toast and no log line. That is
+     * the shape of the reported import hang. js/local-sync.js already bounds its
+     * own copy of this bridge at 120s; these are the main.js equivalents.
+     *
+     * Bounds are deliberately generous. Killing a legitimately slow large write
+     * would be a NEW failure, so probes get a ceiling no tighter than the host
+     * latency the rest of the panel already tolerates, and whole-file transfers
+     * get a size-scaled ceiling.
+     *
+     * The probe ceiling was 60s, which is BELOW this panel's own accepted worst
+     * case for a single host call: local-sync bounds its bridge at 120s and
+     * IMPORT_EVAL_TIMEOUT_MS is 180s. ExtendScript is single threaded, so a
+     * mkdir/exists queued behind a slow import waits for that import. At 60s a
+     * probe hard-failed in exactly the contended case it was meant to survive.
+     * It matches IMPORT_EVAL_TIMEOUT_MS now: nothing in the panel makes the host
+     * wait longer than that, so a probe that passes 180s really is wedged.
+     */
+    var HOST_PROBE_TIMEOUT_MS = 180000;   // exists / mkdir / temp dir
+    var HOST_FILE_TIMEOUT_MS = 300000;    // one file across the bridge, floor
+    var HOST_CHUNK_TIMEOUT_MS = 60000;    // one 500KB base64 chunk append
+
+    /**
+     * Size-scaled ceiling for a whole-file bridge transfer. 3s per MB on top of the
+     * 300s floor, so a 1GB write gets ~50 min rather than being cut off at 5.
+     */
+    function hostFileTimeoutFor(bytes) {
+        var scaled = Math.ceil((bytes || 0) / 1048576) * 3000;
+        return Math.max(HOST_FILE_TIMEOUT_MS, scaled);
+    }
+
+    /**
+     * safeEvalScript with a wall-clock bound. Exactly one of onResult / onTimeout
+     * runs. Logs at error on expiry - never swallowed into a "not found" result.
+     * @param {string} label - what to name in the log and the error message
+     */
+    function evalScriptBounded(label, script, timeoutMs, onResult, onTimeout) {
+        var settled = false;
+        var timer = setTimeout(function() {
+            if (settled) return;
+            settled = true;
+            debugLog('HOST TIMEOUT: ' + label + ' got no answer from After Effects after ' + Math.round(timeoutMs / 1000) + 's', 'error');
+            onTimeout(new Error('After Effects did not respond to ' + label + ' within ' + Math.round(timeoutMs / 1000) + 's'));
+        }, timeoutMs);
+        safeEvalScript(script, function(r) {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            onResult(r);
+        });
+    }
 
     // File-backed backstop for cloud-library's localStorage metadata cache.
     // cloud-library.js has no CEP bridge of its own, so it reaches the jsx host
@@ -258,6 +349,18 @@
     var compToDeleteName = document.getElementById('comp-to-delete-name');
     var confirmDeleteBtn = document.getElementById('confirm-delete-btn');
     var cancelDeleteBtn = document.getElementById('cancel-delete-btn');
+
+    // Local mirror reset. Two confirms, same wipe underneath: one stops after the
+    // delete, one pulls the whole library back down straight afterwards.
+    var localResetModal = document.getElementById('local-reset-modal');
+    var localResetPathEl = document.getElementById('local-reset-path');
+    var confirmLocalResetBtn = document.getElementById('confirm-local-reset-btn');
+    var cancelLocalResetBtn = document.getElementById('cancel-local-reset-btn');
+
+    var localRedownloadModal = document.getElementById('local-redownload-modal');
+    var localRedownloadPathEl = document.getElementById('local-redownload-path');
+    var confirmLocalRedownloadBtn = document.getElementById('confirm-local-redownload-btn');
+    var cancelLocalRedownloadBtn = document.getElementById('cancel-local-redownload-btn');
 
     var addCompModal = document.getElementById('add-comp-modal');
     var existingCategorySelect = document.getElementById('existing-category-select');
@@ -414,31 +517,59 @@
     // collected asset back as base64 and uploads each — easily minutes on a
     // heavy template. A 90s clear used to fire mid-upload and let a focus
     // reload race the in-flight upload, so stash now gets a 5-minute budget.
-    var _stashWatchdogTimer = null;
+    //
+    // PER-OPERATION watchdogs. There used to be ONE module-scope timer for every
+    // op, so a second concurrent operation cancelled the first one's watchdog on
+    // acquire, and whichever operation finished first cleared stashInProgress for
+    // BOTH - leaving the still-running one unguarded and the panel free to fire a
+    // focus-triggered loadLibrary straight into it. Each op label now owns its own
+    // record and its own timer: re-arming the same label (the Generate batch does
+    // this per comp) restarts only that label's timer, and the flag stays true
+    // until every outstanding label has released.
+    var _stashOps = {};      // label -> { timer }
+    var _stashOpCount = 0;
     var _STASH_WATCHDOG_BY_OP = {
         'import': 600000,                // 10 min — large AEP imports
         'generatePreviewFrames': 120000, // 2 min — frame render
         'stash': 300000,                 // 5 min — stash + read-back + upload
         'batch': 900000,                 // 15 min — Generate Missing batch; RE-ARMED per comp in processNext so it only fires if the whole batch is truly wedged (not mid-healthy-run)
+        // Single-card Generate. It used to run under the 90s 'unknown' budget while
+        // its own per-comp render ceiling is 300s, so the watchdog routinely cleared
+        // the guard mid-render - exactly the race the guard exists to prevent.
+        'generateCloudThumbnail': 360000, // 6 min — PER_COMP_GEN_TIMEOUT_MS + slack
         'unknown': 90000
     };
+    /**
+     * Acquire or release the focus-suppression guard for one operation.
+     * @param {boolean} val - true to acquire, false to release
+     * @param {string} label - the SAME op label on acquire and release (e.g. 'import').
+     *        Release without a matching outstanding label is ignored rather than
+     *        clearing somebody else's op; that label's own watchdog still bounds it.
+     */
     function setStashInProgress(val, label) {
-        stashInProgress = !!val;
-        if (_stashWatchdogTimer) {
-            clearTimeout(_stashWatchdogTimer);
-            _stashWatchdogTimer = null;
-        }
+        var key = label || 'unknown';
         if (val) {
-            var key = label || 'unknown';
             var timeoutMs = _STASH_WATCHDOG_BY_OP[key] || _STASH_WATCHDOG_BY_OP['unknown'];
-            _stashWatchdogTimer = setTimeout(function () {
-                if (stashInProgress) {
-                    debugLog('stashInProgress watchdog fired — clearing flag (op: ' + key + ' did not return after ' + Math.round(timeoutMs / 1000) + 's)', 'warn');
-                    setStashInProgress(false);
-                }
-                _stashWatchdogTimer = null;
+            if (_stashOps[key]) clearTimeout(_stashOps[key].timer);
+            else { _stashOps[key] = { timer: null }; _stashOpCount++; }
+            _stashOps[key].timer = setTimeout(function () {
+                if (!_stashOps[key]) return;
+                debugLog('stashInProgress watchdog fired - clearing flag (op: ' + key + ' did not return after ' + Math.round(timeoutMs / 1000) + 's)', 'warn');
+                // The spinner is armed alongside this flag on every op that sets it,
+                // and the watchdog used to leave it spinning forever on a wedge.
+                hideSpinner();
+                setStashInProgress(false, key);
             }, timeoutMs);
+            stashInProgress = true;
+            return;
         }
+        if (_stashOps[key]) {
+            clearTimeout(_stashOps[key].timer);
+            delete _stashOps[key];
+            _stashOpCount--;
+            if (_stashOpCount < 0) _stashOpCount = 0;
+        }
+        stashInProgress = _stashOpCount > 0;
     }
     // Hard ceiling for a single file read back over the CEP bridge during upload.
     // A file is read as ONE base64 string, which materializes ~4-5 full copies of
@@ -537,6 +668,102 @@
         }
     }
 
+    /**
+     * Header prepended to the copied bug log. Everything here answers a question
+     * we currently have to ask the editor over chat, one round-trip at a time:
+     * which build, which host, where his mirror lives, what the sync actually
+     * thinks, and whether localStorage is full (a full quota silently stops the
+     * mirror ledger from persisting, and every symptom after that is a
+     * misdirection). Best-effort by design - one unreadable field must never stop
+     * the rest of the report from being copied.
+     */
+    function buildDiagnosticsBlock() {
+        var L = [];
+        function line(k, v) { L.push(k + ': ' + v); }
+        function safe(fn, fallbackText) {
+            try {
+                var v = fn();
+                return (v === undefined || v === null || v === '') ? (fallbackText || 'none') : v;
+            } catch (e) { return 'ERROR (' + (e && e.message || e) + ')'; }
+        }
+        function asJson(fn) {
+            try { return JSON.stringify(fn()); } catch (e) { return 'ERROR (' + (e && e.message || e) + ')'; }
+        }
+
+        L.push('=== DIAGNOSTICS ===');
+        line('Captured', new Date().toISOString());
+        line('Panel version', safe(function() { return BLITZKRIEG_LOCAL_VERSION; }, 'unknown'));
+        line('AE version', safe(function() { return _aeVersionString; }, 'unknown'));
+        line('Platform', safe(function() { return navigator.platform + ' / ' + navigator.userAgent; }, 'unknown'));
+        line('CEP bridge', _hasCepBridge ? 'available' : 'NOT available');
+        line('Templates loaded', allComps.length);
+
+        // Local mirror
+        if (window.localSync) {
+            line('Library path', safe(function() { return window.localSync.getLibraryPath(); }, 'not set'));
+            line('Full sync status', asJson(function() { return window.localSync.getFullSyncStatus(); }));
+        } else {
+            line('Local mirror', 'localSync module not loaded');
+        }
+
+        // Sync failures, most recently recorded last. The ledger stores a flat
+        // storagePath -> reason map with no timestamps, so this is the tail of the
+        // map in insertion order, not a true time sort. Labelled honestly.
+        try {
+            var rawState = localStorage.getItem('blitzkrieg_local_sync');
+            var st = rawState ? JSON.parse(rawState) : null;
+            var fails = (st && st.fullSync && st.fullSync.failures) || {};
+            var fKeys = Object.keys(fails);
+            line('Sync failures', fKeys.length + ' recorded');
+            var start = fKeys.length > 20 ? fKeys.length - 20 : 0;
+            for (var fi = start; fi < fKeys.length; fi++) {
+                L.push('  ' + fKeys[fi] + ' -> ' + fails[fKeys[fi]]);
+            }
+            if (start > 0) L.push('  (showing the last 20 of ' + fKeys.length + ')');
+        } catch (e) {
+            line('Sync failures', 'ERROR reading blitzkrieg_local_sync (' + (e && e.message || e) + ')');
+        }
+
+        // localStorage footprint. Quota pressure is invisible today: once the 5MB
+        // budget is gone every setItem throws, the mirror ledger stops persisting,
+        // and nothing anywhere says so.
+        try {
+            var total = 0;
+            var owned = [];
+            for (var si = 0; si < localStorage.length; si++) {
+                var k = localStorage.key(si);
+                if (!k) continue;
+                var v = localStorage.getItem(k);
+                var len = v ? v.length : 0;
+                total += len;
+                if (k.indexOf('blitzkrieg_') === 0 || k === 'ae_asset_stash_path') owned.push({ k: k, len: len });
+            }
+            owned.sort(function(a, b) { return b.len - a.len; });
+            line('localStorage total', total + ' chars across ' + localStorage.length + ' keys');
+            for (var oi = 0; oi < owned.length; oi++) {
+                L.push('  ' + owned[oi].k + ': ' + owned[oi].len + ' chars');
+            }
+        } catch (e) {
+            line('localStorage', 'ERROR enumerating (' + (e && e.message || e) + ')');
+        }
+
+        // Durable queue depths. A growing queue means inserts are failing, so the
+        // server-side error log is NOT the full picture.
+        function queueDepth(key) {
+            try {
+                var raw = localStorage.getItem(key);
+                if (!raw) return 0;
+                var parsed = JSON.parse(raw);
+                return parsed && parsed.length ? parsed.length : 0;
+            } catch (e) { return 'unreadable'; }
+        }
+        line('Telemetry queue', queueDepth('blitzkrieg_telemetry_queue') + ' pending');
+        line('Analytics queue', queueDepth('blitzkrieg_analytics_queue') + ' pending');
+
+        L.push('=== LOG ===');
+        return L.join('\n') + '\n';
+    }
+
     function toggleDebugLog() {
         if (!debugLogPanel) return; // defensive — #debug-log-panel missing from DOM
         if (debugLogPanel.style.display === 'none') {
@@ -570,9 +797,15 @@
             if (debugLogContent) debugLogContent.innerHTML = '';
         });
         if (copyBtn) copyBtn.addEventListener('click', function() {
-            var text = debugLogEntries.map(function(e) { return e.time + ' [' + e.level.toUpperCase() + '] ' + e.message; }).join('\n');
-            copyToClipboard(text);
-            showToast('Bug log copied to clipboard.');
+            var text = buildDiagnosticsBlock() +
+                debugLogEntries.map(function(e) { return e.time + ' [' + e.level.toUpperCase() + '] ' + e.message; }).join('\n');
+            copyToClipboard(text).then(function(copied) {
+                if (copied) {
+                    showToast('Bug log copied to clipboard.');
+                } else {
+                    showToast('Could not copy to the clipboard. Select the log text and copy it manually.', true);
+                }
+            });
         });
 
         // Keyboard shortcut: Ctrl+Shift+D or Cmd+Shift+D to toggle debug log
@@ -788,7 +1021,6 @@
         var changeBtn = document.getElementById('sync-path-change');
         var setActions = document.getElementById('sync-path-set-actions');
         var editor = document.getElementById('sync-path-editor');
-        var forceBtn = document.getElementById('sync-force-all');
         var resolvedEl = document.getElementById('sync-path-resolved');
         var capacityEl = document.getElementById('sync-path-capacity');
         var statusEl = document.getElementById('sync-path-status');
@@ -911,15 +1143,39 @@
                 var paths = [];
                 for (var bsi = 0; bsi < allComps.length; bsi++) if (allComps[bsi].storagePath) paths.push(allComps[bsi].storagePath);
                 var st = window.localSync.getFullSyncStatus(paths);
-                if (!st.running && !st.paused && st.pending > 0) _startFullLibrarySync();
+                // Same gate as the loadLibrary auto-resume, cancelled included.
+                // Opening a view is navigation, not consent to pull the library: after
+                // a Stop or a Delete local copy the flag is set, and without this test
+                // a click just to LOOK at the dashboard restarted the whole 67GB
+                // download the user deliberately stopped. Download all and Resume are
+                // the two places that clear it, both explicit.
+                if (!st.running && !st.paused && !st.cancelled && st.pending > 0) _startFullLibrarySync();
                 _syncDashTick();
             });
+
+            // Keep the library self-contained in a named subfolder so pointing at a
+            // drive root (e.g. /Volumes/LaCie) or at an ordinary working folder does
+            // not scatter category folders across it - and so the configured root is
+            // always a folder dedicated to Blitzkrieg, which is what "Delete local
+            // copy" wipes. Shared by Browse and by a hand-typed path: a typed path
+            // used to skip this entirely and could point the wipe at any folder.
+            var _normalizeLibraryFolder = function (raw) {
+                var tail = String(raw || '').replace(/[\/\\]+$/, '');
+                if (!tail) return tail;
+                if (tail.toLowerCase().indexOf('blitzkrieg library') !== -1) return tail;
+                return tail + '/Blitzkrieg Library';
+            };
 
             // Save path button — inline status, no toast (house rule).
             if (saveBtn) {
                 saveBtn.addEventListener('click', function() {
-                    var path = (pathInput && pathInput.value.trim()) || (pathInput && pathInput.placeholder);
-                    if (!path) { _setPathStatus('Enter a library path first.', 'warn'); return; }
+                    var typed = (pathInput && pathInput.value.trim()) || (pathInput && pathInput.placeholder);
+                    if (!typed) { _setPathStatus('Enter a library path first.', 'warn'); return; }
+                    // Re-saving the folder that is already configured must never nest a
+                    // second library inside it. Only a NEW path gets normalized.
+                    var current = window.localSync.getLibraryPath && window.localSync.getLibraryPath();
+                    var path = (current && typed === current) ? typed : _normalizeLibraryFolder(typed);
+                    if (path !== typed && pathInput) { pathInput.value = path; pathInput.title = path; }
                     // Soft writability/capacity check BEFORE committing (never blocks).
                     var _commit = function () {
                         window.localSync.setLibraryPath(path).then(function(savedPath) {
@@ -973,13 +1229,7 @@
                             if (picked.charAt(0) === '"' && picked.charAt(picked.length - 1) === '"') {
                                 picked = picked.substring(1, picked.length - 1);
                             }
-                            // Keep the library self-contained in a named subfolder so
-                            // picking a drive root (e.g. /Volumes/LaCie) does not scatter
-                            // category folders across the drive.
-                            var tail = picked.replace(/[\/\\]+$/, '');
-                            if (tail.toLowerCase().indexOf('blitzkrieg library') === -1) {
-                                picked = tail + '/Blitzkrieg Library';
-                            }
+                            picked = _normalizeLibraryFolder(picked);
                             if (pathInput) { pathInput.value = picked; pathInput.title = picked; }
                             // Preview the picked drive's capacity before the user commits.
                             _renderPathInfo(picked);
@@ -989,26 +1239,14 @@
                 });
             }
 
-            // "Open Sync Manager" button — routes to the Sync & Analytics view which
-            // shows live ETA, per-template status, and pause/resume for the full
-            // background mirror. (Replaces the old blind syncAll that gave no feedback.)
-            if (forceBtn) {
-                forceBtn.addEventListener('click', function() {
-                    if (!window.localSync.getLibraryPath()) {
-                        showToast('Set a library path first', true);
-                        return;
-                    }
-                    activeCategory = '__sync';
-                    updateNavActiveState();
-                    renderSyncDashboard();
-                    // Kick the background mirror if it is idle with work pending.
-                    var paths = [];
-                    for (var fsi = 0; fsi < allComps.length; fsi++) if (allComps[fsi].storagePath) paths.push(allComps[fsi].storagePath);
-                    var s = window.localSync.getFullSyncStatus(paths);
-                    if (!s.running && !s.paused && s.pending > 0) _startFullLibrarySync();
-                    _syncDashTick();
-                });
-            }
+            // NOTE: an "Open Sync Manager" handler used to live here, bound to
+            // #sync-force-all. No such element exists in index.html and none ever
+            // did, so it could never fire. Removed rather than given an element:
+            // the sidebar Library Sync row already opens this view, and every
+            // download control (Download everything, Pause, Resume, Stop, Delete
+            // local copy, Delete and redownload everything) lives in the dashboard
+            // itself. A second entry point in the settings panel would be a fourth
+            // way to start the same sync.
         }
     }
 
@@ -1207,6 +1445,7 @@
 
         // CEP bridge diagnostic — critical for generation/import
         refreshCepBridgeState();
+        probeAeVersion();
         debugLog('CEP bridge (window.__adobe_cep__): ' + (_hasCepBridge ? 'AVAILABLE' : 'NOT AVAILABLE'), _hasCepBridge ? 'success' : 'error');
         if (!_hasCepBridge) {
             debugLog('window.__adobe_cep__ = ' + typeof window.__adobe_cep__, 'error');
@@ -1228,8 +1467,14 @@
             });
         }
 
-        // Global error handler — catches uncaught exceptions
+        // Global error handler — catches uncaught exceptions.
+        // Must call debugLog too, not just analytics: the UI tells the user to open
+        // the Bug Log when something breaks, and a hard throw used to be the one
+        // class of failure that never appeared there. Kept symmetric with the
+        // unhandledrejection handler below.
         window.onerror = function(msg, url, line, col, err) {
+            var _where = (url ? String(url).split('/').pop() : '?') + ':' + (line || '?') + ':' + (col || '?');
+            try { debugLog('Uncaught error: ' + String(msg) + ' (' + _where + ')', 'error'); } catch (logErr) {}
             if (window.blitzkriegAnalytics && window.blitzkriegAnalytics.reportError) {
                 window.blitzkriegAnalytics.reportError(
                     String(msg),
@@ -1403,24 +1648,40 @@
     }
 
     /* --------- Utility Functions --------- */
+    /**
+     * Copy text to the clipboard.
+     * @returns {Promise<boolean>} true only if a copy actually happened. Both
+     *   failure modes (the Clipboard API rejecting, execCommand returning false or
+     *   throwing) used to be swallowed, so the caller told the user "copied" over
+     *   an empty clipboard and the bug report never arrived.
+     */
     function copyToClipboard(text) {
         // CEP's Chromium often lacks Clipboard API permissions, so navigator.clipboard.writeText
         // returns a rejected Promise. Always fall back to execCommand on failure.
         var fallback = function() {
-            var textarea = document.createElement('textarea');
-            textarea.value = text;
-            textarea.style.position = 'fixed';
-            textarea.style.opacity = '0';
-            document.body.appendChild(textarea);
-            textarea.select();
-            document.execCommand('copy');
-            document.body.removeChild(textarea);
+            try {
+                var textarea = document.createElement('textarea');
+                textarea.value = text;
+                textarea.style.position = 'fixed';
+                textarea.style.opacity = '0';
+                document.body.appendChild(textarea);
+                textarea.select();
+                var ok = document.execCommand('copy');
+                document.body.removeChild(textarea);
+                if (!ok) debugLog('Clipboard: execCommand("copy") returned false', 'warn');
+                return !!ok;
+            } catch (e) {
+                debugLog('Clipboard: execCommand fallback threw: ' + (e && e.message || e), 'warn');
+                return false;
+            }
         };
         if (navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(text).then(function() {}, fallback);
-        } else {
-            fallback();
+            return navigator.clipboard.writeText(text).then(function() { return true; }, function(err) {
+                debugLog('Clipboard: navigator.clipboard rejected (' + (err && err.message || err) + '), trying execCommand', 'warn');
+                return fallback();
+            });
         }
+        return Promise.resolve(fallback());
     }
 
     /* --------- Dropdown Menu Functions --------- */
@@ -1578,6 +1839,18 @@
 
         cancelDeleteBtn.addEventListener('click', function () { deleteModal.style.display = 'none'; });
         confirmDeleteBtn.addEventListener('click', executeDelete);
+
+        // Local mirror reset modals. Same three-part pattern as the delete confirm
+        // above: lookup at module scope, listener here, prompt/execute pair below.
+        if (cancelLocalResetBtn) cancelLocalResetBtn.addEventListener('click', function () {
+            if (localResetModal) localResetModal.style.display = 'none';
+        });
+        if (confirmLocalResetBtn) confirmLocalResetBtn.addEventListener('click', executeLocalReset);
+
+        if (cancelLocalRedownloadBtn) cancelLocalRedownloadBtn.addEventListener('click', function () {
+            if (localRedownloadModal) localRedownloadModal.style.display = 'none';
+        });
+        if (confirmLocalRedownloadBtn) confirmLocalRedownloadBtn.addEventListener('click', executeLocalRedownload);
 
         cancelAddBtn.addEventListener('click', function () { addCompModal.style.display = 'none'; });
         confirmAddBtn.addEventListener('click', executeAddComp);
@@ -3524,7 +3797,7 @@
         var safePath = escapeForExtendScript(aepPath);
         setStashInProgress(true, 'generatePreviewFrames');
         safeEvalScript('generatePreviewFrames("' + safePath + '")', function(result) {
-            setStashInProgress(false);
+            setStashInProgress(false, 'generatePreviewFrames');
             hideSpinner();
             if (!result) {
                 showToast('Unexpected error generating preview.', true);
@@ -3570,18 +3843,18 @@
         if (!comp) { comp = { storagePath: storagePath, name: compName }; }
 
         showSpinner();
-        setStashInProgress(true);
+        setStashInProgress(true, 'generateCloudThumbnail');
         showToast('Generating thumbnail + preview for "' + compName + '"...');
 
         generateCloudThumbnail(comp).then(function() {
-            setStashInProgress(false);
+            setStashInProgress(false, 'generateCloudThumbnail');
             hideSpinner();
             showToast('Thumbnail + preview generated for "' + compName + '"!');
             // Invalidate cache and reload to pick up new thumb + preview frames
             window.cloudLibrary.invalidateCache();
             loadLibrary();
         }).catch(function(err) {
-            setStashInProgress(false);
+            setStashInProgress(false, 'generateCloudThumbnail');
             hideSpinner();
             showToast('Failed to generate: ' + err.message, true);
         });
@@ -3751,7 +4024,7 @@
                 var gbOver = estBytes / (1024 * 1024 * 1024);
                 showToast('This composition bundles about ' + gbOver.toFixed(1) + ' GB of footage, over the ' + formatBytesShort(MAX_UPLOAD_TOTAL_BYTES) + ' limit. It cannot be submitted, and collecting it may make After Effects unresponsive. Reduce or relink the footage, or add it via the offline library.', true);
                 _fireSubmitEnd('blocked_oversize', estBytes + ' bytes');
-                setStashInProgress(false);
+                setStashInProgress(false, 'stash');
                 hideSpinner();
                 return;
             }
@@ -3783,7 +4056,7 @@
                     var parsed = JSON.parse(result);
                     if (parsed.result && parsed.result.indexOf('Error') === 0) {
                         showToast(parsed.result, true);
-                        setStashInProgress(false);
+                        setStashInProgress(false, 'stash');
                         hideSpinner();
                         return;
                     }
@@ -3984,7 +4257,7 @@
                                 totalBytes
                             );
                         }
-                        setStashInProgress(false);
+                        setStashInProgress(false, 'stash');
                         hideSpinner();
                         loadSubmissionCounts();
 
@@ -4026,7 +4299,7 @@
                     // (submit_end 'failed') from an AE crash during export (submit_start
                     // with NO submit_end for this trace).
                     _fireSubmitEnd('failed', err && err.message);
-                    setStashInProgress(false);
+                    setStashInProgress(false, 'stash');
                     hideSpinner();
                     // With insert-first, a submission row was (usually) already created
                     // BEFORE the failing upload, so the editor's work is NOT silently
@@ -4836,26 +5109,70 @@
     }
 
     /**
+     * One sentence naming the footage the PANEL left out of this import.
+     * Empty string when nothing was skipped.
+     */
+    function _skippedFootageSentence(info) {
+        if (!info || !info.count) return '';
+        var shown = info.names.slice(0, 3).join(', ');
+        var more = info.names.length > 3 ? ' and ' + (info.names.length - 3) + ' more' : '';
+        var why;
+        if (info.failed === 0) why = 'They are over the size limit for an automatic download.';
+        else if (info.oversize === 0) why = 'They failed to download.';
+        else why = 'Some are over the size limit for an automatic download; the rest failed to download.';
+        return 'Some source files were not downloaded: ' + shown + more + '. ' + why +
+            ' Relink them from the cloud folder if you need them.';
+    }
+
+    /**
      * Show the right toast for an importComp result. The host appends a
      * [BLITZ_MISSING:N] marker plus a human-readable warning when N source files
      * could not be relinked from the (Footage)/ bundle — surface that to the user
-     * (alert styling) instead of a plain success, so a partially-broken import is
-     * never presented as fully clean.
+     * instead of a plain success, so a partially-broken import is never presented
+     * as fully clean.
+     *
+     * skipInfo is the _skippedFootageSummary of the download that fed this import
+     * (null when nothing was downloaded, e.g. the local fast path). The panel caps
+     * import footage at IMPORT_MAX_FOOTAGE_BYTES, so a HEALTHY template holding one
+     * oversized source arrives without it and the host then reports missing footage.
+     * That shortfall is the panel's own doing. Subtract it before deciding anything
+     * is broken: markBroken(..., 'source') is terminal in _pendingFor, so the
+     * template would be skipped by background sync forever behind a red chip that no
+     * retry can clear, because the cap decides the same way every time.
+     * @param {?{count:number, oversize:number, failed:number, names:string[]}} skipInfo
      */
-    function _showImportResultToast(result, successMsg, storagePath) {
+    function _showImportResultToast(result, successMsg, storagePath, skipInfo) {
         var res = result || '';
+        var panelSkipped = (skipInfo && skipInfo.count) || 0;
+        var skipNote = panelSkipped > 0 ? ' ' + _skippedFootageSentence(skipInfo) : '';
         var m = /\[BLITZ_MISSING:(\d+)\]\s*/.exec(res);
         if (m && parseInt(m[1], 10) > 0) {
+            var missing = parseInt(m[1], 10);
             var warn = res.substring(m.index + m[0].length).replace(/^Warning:\s*/i, '').trim();
+            // Everything the host could not relink is accounted for by what the panel
+            // declined to download. The template is fine: say so plainly, name the
+            // files, and leave the sync state completely alone.
+            if (missing - panelSkipped <= 0) {
+                debugLog('IMPORT: host reported ' + missing + ' missing source file(s) for ' + storagePath +
+                    ' and the panel skipped ' + panelSkipped + ' - shortfall is the import size cap, NOT a broken template. Sync state untouched.', 'warn');
+                showToast(successMsg + skipNote);
+                return;
+            }
             // The .aep references footage that is not in the bundle (and, per the storage
             // audit, not in the cloud either) — the template was stashed incomplete.
             // Flag it broken so the Sync view surfaces it as "needs re-stash" and full
             // sync stops trying to "complete" a bundle that can never be complete.
+            var unexplained = missing - panelSkipped;
             if (storagePath && window.localSync && window.localSync.markBroken) {
                 // Kind 'source': genuine missing footage surfaced at import. The mirror
                 // may still be complete (imports from its .aep) so this shows as a muted
                 // "re-stash to fix footage" advisory, not a hard broken state.
-                window.localSync.markBroken(storagePath, (warn || (m[1] + ' source file(s) missing')), 'source');
+                // With skips in play the host's own sentence names files the panel
+                // chose to leave out, so it would misreport what needs re-stashing.
+                var reason = panelSkipped > 0
+                    ? unexplained + ' source file(s) missing beyond the ' + panelSkipped + ' the panel did not download'
+                    : (warn || (unexplained + ' source file(s) missing'));
+                window.localSync.markBroken(storagePath, reason, 'source');
                 _updateSyncNavCount();
             }
             // Calm, non-alarming note (NOT the red error style). The comp imported
@@ -4863,16 +5180,16 @@
             // stashed incomplete. The actionable "needs re-stash" detail now lives
             // only on the Sync and Analytics chip (markBroken above), so imports do
             // not nag with a red toast every time.
-            showToast(successMsg + ' Some bundled footage is missing; this template is flagged for re-stash in Sync and Analytics.');
+            showToast(successMsg + ' Some bundled footage is missing; this template is flagged for re-stash in Sync and Analytics.' + skipNote);
         } else {
             // Image-only missing: decorative, non-critical. Do NOT flag re-stash;
             // just add a calm one-liner so the user has accurate info.
             var im = /\[BLITZ_IMG_MISSING:(\d+)\]/.exec(res);
             if (im && parseInt(im[1], 10) > 0) {
                 var n = parseInt(im[1], 10);
-                showToast(successMsg + ' ' + n + ' decorative image' + (n === 1 ? '' : 's') + ' not found (safe to ignore).');
+                showToast(successMsg + ' ' + n + ' decorative image' + (n === 1 ? '' : 's') + ' not found (safe to ignore).' + skipNote);
             } else {
-                showToast(successMsg);
+                showToast(successMsg + skipNote);
             }
         }
     }
@@ -4889,27 +5206,73 @@
     // primitive), so we do NOT auto-retry — that would just queue behind the wedge.
     var IMPORT_EVAL_TIMEOUT_MS = 180000; // 3 min
 
-    function _doImportLocalAep(aepPath, uniqueId, _trackComp, storagePath) {
+    /**
+     * Drop the local mirror's record of a template whose mirrored .aep just failed
+     * to import, so the fast path stops serving the same bad copy on every future
+     * import. Without this the entry stays complete:true forever and the editor
+     * repeats the full fail-then-cloud cycle every single time.
+     * Never rejects - a repair that cannot run must not break the import.
+     * @returns {Promise<boolean>} true if the entry was actually reset
+     */
+    function _repairLocalMirrorEntry(storagePath) {
+        try {
+            if (window.localSync && typeof window.localSync.resetTemplate === 'function') {
+                return window.localSync.resetTemplate(storagePath).then(function(res) {
+                    var rem = (res && typeof res.remaining === 'number') ? res.remaining : '?';
+                    var rErr = res && res.error;
+                    if (rErr) {
+                        debugLog('IMPORT: resetTemplate reported an error for ' + storagePath + ': ' + rErr, 'warn');
+                        return false;
+                    }
+                    debugLog('IMPORT: reset local mirror entry for ' + storagePath + ' (remaining on disk: ' + rem + ')', 'info');
+                    return true;
+                }, function(err) {
+                    debugLog('IMPORT: resetTemplate failed for ' + storagePath + ' (' + (err && err.message || err) + ')', 'warn');
+                    return false;
+                });
+            }
+            if (window.localSync && typeof window.localSync.markBroken === 'function') {
+                window.localSync.markBroken(storagePath, 'local .aep failed to import', 'transient');
+                debugLog('IMPORT: marked ' + storagePath + ' broken (transient) - resetTemplate unavailable', 'warn');
+            }
+        } catch (e) {
+            debugLog('IMPORT: local mirror repair threw for ' + storagePath + ' (' + (e && e.message || e) + ')', 'warn');
+        }
+        return Promise.resolve(false);
+    }
+
+    /**
+     * @param {boolean} noRepair - set by callers that just downloaded this .aep.
+     *        Caps the repair-and-re-pull path at ONE attempt per import, so a
+     *        template that is genuinely broken in the cloud cannot loop.
+     * @param {?Object} skipInfo - _skippedFootageSummary of the download that
+     *        produced this .aep, null on the local fast path (nothing downloaded).
+     * @param {number} [guardToken] - the import-guard token this pipeline was
+     *        started with. Releases from a superseded pipeline are ignored.
+     */
+    function _doImportLocalAep(aepPath, uniqueId, _trackComp, storagePath, noRepair, skipInfo, guardToken) {
         showSpinner();
-        setStashInProgress(true, 'import');
+        _setImportStash(true, guardToken);
         var safePath = escapeForExtendScript(aepPath);
         var safeDisplayName = _trackComp ? escapeForExtendScript(_trackComp.name) : '';
         var _settled = false;
         var _timer = setTimeout(function() {
             if (_settled) return;
             _settled = true;
-            setStashInProgress(false);
+            _setImportStash(false, guardToken);
             hideSpinner();
+            debugLog('IMPORT: host did not answer importComp within ' + Math.round(IMPORT_EVAL_TIMEOUT_MS / 1000) + 's for ' + aepPath, 'error');
             showToast('Import is taking too long. If After Effects is showing a dialog, dismiss it in AE, then try again.', true);
+            _releaseImportGuard(guardToken);
         }, IMPORT_EVAL_TIMEOUT_MS);
         safeEvalScript('importComp("' + safePath + '","' + safeDisplayName + '")', function(result) {
             if (_settled) return;
             _settled = true;
             clearTimeout(_timer);
-            setStashInProgress(false);
+            _setImportStash(false, guardToken);
             hideSpinner();
             if (result && result.indexOf('Success') === 0) {
-                _showImportResultToast(result, 'Imported from local library!', storagePath);
+                _showImportResultToast(result, 'Imported from local library!', storagePath, skipInfo);
                 if (uniqueId) addToRecent(uniqueId);
                 if (window.blitzkriegAnalytics && _trackComp) {
                     window.blitzkriegAnalytics.trackImport(_trackComp.name, _trackComp.category, storagePath);
@@ -4917,18 +5280,33 @@
                 if (window.blitzkriegTelemetry && _trackComp) {
                     window.blitzkriegTelemetry.trackTemplateImport(_trackComp.name, _trackComp.category, storagePath, _trackComp);
                 }
-            } else {
-                // LOCAL-3: the local mirror copy failed to import (e.g. a corrupt
-                // or 0-byte mirrored .aep). Fall back to a fresh cloud download +
-                // import instead of dead-ending on a toast, so the user still gets
-                // the template. _doCloudImport manages its own spinner lifecycle.
+                _releaseImportGuard(guardToken);
+            } else if (storagePath && window.cloudLibrary && !noRepair) {
+                // LOCAL-3 repair: the mirrored .aep is bad (corrupt, 0-byte, or a
+                // stale entry marked complete when verification could not run). Drop
+                // the poisoned state entry FIRST, then re-pull the bundle into the
+                // mirror. Going straight to the temp cloud import (what this used to
+                // do) got the user their template but left the lie in state, so the
+                // next import repeated the whole cycle. _doMirrorImport imports with
+                // noRepair set, so a second failure falls through to the cloud.
+                debugLog('IMPORT: local import failed (' + (result || 'unknown') + ') - repairing the mirror entry and re-pulling ' + storagePath, 'warn');
+                showToast('Local copy is damaged. Downloading a fresh one...');
+                _repairLocalMirrorEntry(storagePath).then(function() {
+                    _doMirrorImport(storagePath, uniqueId, _trackComp, (_trackComp && _trackComp.contentVersion) || '', guardToken);
+                }, function() {
+                    _doMirrorImport(storagePath, uniqueId, _trackComp, (_trackComp && _trackComp.contentVersion) || '', guardToken);
+                });
+            } else if (storagePath && window.cloudLibrary) {
+                // Already repaired once this import (or a freshly downloaded copy
+                // still failed). Fall back to the temp cloud import so the user
+                // still gets the template. It manages its own spinner lifecycle.
                 debugLog('IMPORT: local import failed (' + (result || 'unknown') + ') - falling back to cloud', 'warn');
-                if (storagePath && window.cloudLibrary) {
-                    showToast('Local copy unavailable, downloading...');
-                    _doCloudImport(storagePath, uniqueId, _trackComp);
-                } else {
-                    showToast('Import failed: ' + (result || 'Unknown error'), true);
-                }
+                showToast('Local copy unavailable, downloading...');
+                _doCloudImport(storagePath, uniqueId, _trackComp, guardToken);
+            } else {
+                debugLog('IMPORT: local import failed (' + (result || 'unknown') + ') and there is no cloud copy to fall back to', 'error');
+                showToast('Import failed: ' + (result || 'Unknown error'), true);
+                _releaseImportGuard(guardToken);
             }
         });
     }
@@ -4942,20 +5320,121 @@
      * reflects it. Falls back to the legacy temp cloud import if the mirror write
      * fails for any reason, so the user always gets the template.
      */
-    function _doMirrorImport(storagePath, uniqueId, _trackComp, impVer) {
+    // Wall-clock ceiling for the WHOLE mirror-import chain (ensure dir -> download
+    // -> write bundle -> mark complete). This was the only import branch in the
+    // panel with no ceiling, no settle flag and no hideSpinner of its own: it
+    // delegated the hide entirely to _doImportLocalAep on success or _doCloudImport
+    // on rejection, so a chain that never settled left the spinner turning and the
+    // focus guard pinned until a full panel reload. That is the reported hang.
+    // Matches the 'import' watchdog budget above.
+    var MIRROR_IMPORT_CEILING_MS = 600000; // 10 min
+
+    /**
+     * Summarize the skippedFootage contract from cloud-library's downloadTemplate:
+     * files it refused to pull because they were over IMPORT_MAX_FOOTAGE_BYTES
+     * (reason 'oversize'), or that errored/timed out (reason 'failed'). AE
+     * substitutes placeholder footage for those, so the comp opens with visibly
+     * missing sources.
+     *
+     * This only LOGS. The user-facing sentence is deferred to the import result
+     * (_showImportResultToast), which is the one place that knows whether those
+     * files actually turned into missing sources in the comp, and which must
+     * subtract this count before it decides the template is broken.
+     * skippedFootage is always an array, never undefined, per the contract.
+     * @returns {?{count:number, oversize:number, failed:number, bytes:number, names:string[]}}
+     */
+    function _skippedFootageSummary(downloaded, storagePath) {
+        var skipped = (downloaded && downloaded.skippedFootage) || [];
+        if (!skipped.length) return null;
+        var info = { count: skipped.length, oversize: 0, failed: 0, bytes: 0, names: [] };
+        var detail = [];
+        for (var i = 0; i < skipped.length; i++) {
+            var s = skipped[i] || {};
+            var nm = s.name || s.path || 'unnamed file';
+            info.names.push(nm);
+            if (s.reason === 'oversize') info.oversize++; else info.failed++;
+            if (typeof s.bytes === 'number' && isFinite(s.bytes)) info.bytes += s.bytes;
+            detail.push(nm + ' (' + (s.reason || 'skipped') + ')');
+        }
+        info.bytes = (downloaded && typeof downloaded.skippedFootageBytes === 'number') ? downloaded.skippedFootageBytes : info.bytes;
+        debugLog('IMPORT: ' + info.count + ' footage file(s) not included for ' + storagePath + ' (' +
+            info.oversize + ' over the size cap, ' + info.failed + ' failed, ' +
+            Math.round(info.bytes / (1024 * 1024)) + 'MB): ' + detail.join(', '), 'warn');
+        return info;
+    }
+
+    /**
+     * The same summary shape as _skippedFootageSummary, for an import that downloads
+     * NOTHING (the local fast path). local-sync persists, next to each mirror, the
+     * heavy footage it deliberately did not download; this reads that back so the
+     * import result can subtract it.
+     *
+     * Without this the fast path reported skipInfo null, so every source file the
+     * PANEL chose to leave out came back from the host as unexplained missing footage
+     * and markBroken(..., 'source') flagged a healthy template for re-stash. That is
+     * terminal in _pendingFor: the cap decides the same way every time, so no retry
+     * could ever clear the chip.
+     *
+     * Every entry is an oversize skip by construction (failed downloads are filtered
+     * out on the write side), hence failed:0. An empty list means "no skip record",
+     * which for a mirror written before this existed is the old behavior, unchanged.
+     * @returns {?{count:number, oversize:number, failed:number, bytes:number, names:string[]}}
+     */
+    function _localSkipInfo(storagePath) {
+        if (!storagePath || !window.localSync || typeof window.localSync.getSkippedFootage !== 'function') return null;
+        var list;
+        try {
+            list = window.localSync.getSkippedFootage(storagePath);
+        } catch (e) {
+            debugLog('IMPORT: getSkippedFootage threw for ' + storagePath + ' (' + (e && e.message || e) + ')', 'warn');
+            return null;
+        }
+        if (!list || !list.length) return null;
+        var info = { count: list.length, oversize: list.length, failed: 0, bytes: 0, names: [] };
+        for (var i = 0; i < list.length; i++) {
+            var s = list[i] || {};
+            info.names.push(s.path || 'unnamed file');
+            if (typeof s.bytes === 'number' && isFinite(s.bytes) && s.bytes > 0) info.bytes += s.bytes;
+        }
+        debugLog('IMPORT: local fast path for ' + storagePath + ' - the mirror left out ' + info.count +
+            ' heavy source file(s) (' + Math.round(info.bytes / (1024 * 1024)) + 'MB): ' + info.names.join(', '), 'warn');
+        return info;
+    }
+
+    function _doMirrorImport(storagePath, uniqueId, _trackComp, impVer, guardToken) {
         showSpinner();
-        setStashInProgress(true, 'import');
+        _setImportStash(true, guardToken);
         showToast('Downloading template...');
         debugLog('IMPORT: mirror import starting for ' + storagePath);
         var mirrorDir = null;
+        var _skipInfo = null;
+        // The RAW skip list, kept alongside the display summary. It has to be handed
+        // to markTemplateComplete or the record is not just missing, it is DELETED:
+        // markTemplateComplete rewrites skippedLarge from its 4th argument, so calling
+        // it without one wipes whatever the background sync recorded. The next import
+        // then takes the local fast path with no skip information and blames the
+        // template for footage the panel itself chose not to download.
+        var _skippedRaw = null;
+        var _settled = false;
+        var _ceiling = setTimeout(function() {
+            if (_settled) return;
+            _settled = true;
+            hideSpinner();
+            _setImportStash(false, guardToken);
+            debugLog('IMPORT: mirror import for ' + storagePath + ' passed the ' + Math.round(MIRROR_IMPORT_CEILING_MS / 1000) + 's ceiling with no result - falling back to the cloud import', 'error');
+            showToast('Local download stalled. Importing from the cloud instead.');
+            _doCloudImport(storagePath, uniqueId, _trackComp, guardToken);
+        }, MIRROR_IMPORT_CEILING_MS);
         window.localSync.ensureTemplateMirrorDir(storagePath).then(function(dir) {
             mirrorDir = dir;
             return window.cloudLibrary.downloadTemplate(storagePath);
         }).then(function(downloaded) {
             debugLog('IMPORT: downloaded ' + downloaded.fileName + ' (' + (downloaded.blob.size / 1024).toFixed(0) + 'KB, assets: ' + ((downloaded.extraFiles && downloaded.extraFiles.length) || 0) + ') -> mirror');
+            _skipInfo = _skippedFootageSummary(downloaded, storagePath);
+            _skippedRaw = (downloaded && downloaded.skippedFootage) || [];
             return writeDownloadedTemplateBundle(downloaded, mirrorDir);
         }).then(function(aepDiskPath) {
-            return window.localSync.markTemplateComplete(storagePath, aepDiskPath, impVer).then(function() {
+            return window.localSync.markTemplateComplete(storagePath, aepDiskPath, impVer, _skippedRaw).then(function() {
                 // The import bundle excludes comp.png (downloadTemplate skips it), but
                 // marking the template complete makes the grid serve file://.../comp.png
                 // as its thumbnail. Cache the thumbnail into the mirror too so that file
@@ -4966,21 +5445,38 @@
                         window.localSync.syncThumbnail(storagePath, impVer).then(function() {
                             _applyLocalAssetCache(allComps);
                             _updateSyncBadge();
-                        }, function() {});
+                        }, function(thumbErr) {
+                            debugLog('IMPORT: thumbnail cache failed for ' + storagePath + ' (' + (thumbErr && thumbErr.message || thumbErr) + ') - grid will use the cloud thumbnail', 'warn');
+                        });
                     }
-                } catch (e) {}
+                } catch (e) {
+                    debugLog('IMPORT: syncThumbnail threw for ' + storagePath + ' (' + (e && e.message || e) + ') - grid will use the cloud thumbnail', 'warn');
+                }
                 return aepDiskPath;
-            }, function() { return aepDiskPath; });
+            }, function(markErr) {
+                debugLog('IMPORT: markTemplateComplete failed for ' + storagePath + ' (' + (markErr && markErr.message || markErr) + ') - importing the downloaded copy anyway', 'warn');
+                return aepDiskPath;
+            });
         }).then(function(aepDiskPath) {
-            setStashInProgress(false);
+            if (_settled) return;
+            _settled = true;
+            clearTimeout(_ceiling);
+            _setImportStash(false, guardToken);
             _updateSyncBadge();
             // Import from the persistent mirror — _doImportLocalAep re-arms the
             // spinner/guard and never deletes the footage it relinks against.
-            _doImportLocalAep(aepDiskPath, uniqueId, _trackComp, storagePath);
+            // noRepair: this .aep was downloaded seconds ago, so a repair-and-re-pull
+            // would just fetch the same bytes again. Fall to the cloud import instead.
+            // _skipInfo travels with it: the host will report the skipped sources as
+            // missing, and that shortfall must not be read as a broken template.
+            _doImportLocalAep(aepDiskPath, uniqueId, _trackComp, storagePath, true, _skipInfo, guardToken);
         }, function(err) {
-            setStashInProgress(false);
+            if (_settled) return;
+            _settled = true;
+            clearTimeout(_ceiling);
+            _setImportStash(false, guardToken);
             debugLog('IMPORT: mirror import failed (' + (err && err.message || err) + ') - falling back to temp cloud import', 'warn');
-            _doCloudImport(storagePath, uniqueId, _trackComp);
+            _doCloudImport(storagePath, uniqueId, _trackComp, guardToken);
         });
     }
 
@@ -4988,19 +5484,21 @@
      * Cloud download + import — the original path. Downloads AEP + footage
      * from Supabase to a temp directory, imports from there, cleans up.
      */
-    function _doCloudImport(storagePath, uniqueId, _trackComp) {
+    function _doCloudImport(storagePath, uniqueId, _trackComp, guardToken) {
         showSpinner();
-        setStashInProgress(true, 'import');
+        _setImportStash(true, guardToken);
         showToast('Downloading template...');
         debugLog('IMPORT: starting cloud import for ' + storagePath);
 
         var importTempDir = null;
+        var _skipInfo = null;
         return getTempDir().then(function(sysTempDir) {
             debugLog('IMPORT: temp dir = ' + sysTempDir);
             importTempDir = sysTempDir + '/blitzkrieg_import_' + Date.now() + '_' + Math.floor(Math.random() * 0x7fffffff).toString(36);
             return window.cloudLibrary.downloadTemplate(storagePath);
         }).then(function(downloaded) {
             debugLog('IMPORT: downloaded ' + downloaded.fileName + ' (' + (downloaded.blob.size / 1024).toFixed(0) + 'KB, assets: ' + ((downloaded.extraFiles && downloaded.extraFiles.length) || 0) + ')');
+            _skipInfo = _skippedFootageSummary(downloaded, storagePath);
             return writeDownloadedTemplateBundle(downloaded, importTempDir).then(function(aepDiskPath) {
                 debugLog('IMPORT: written to disk, calling importComp...');
                 return new Promise(function(resolve, reject) {
@@ -5026,7 +5524,7 @@
                         clearTimeout(_timer);
                         if (result && result.indexOf('Success') === 0) {
                             hideSpinner();
-                            _showImportResultToast(result, 'Imported full bundle and opened in timeline!', storagePath);
+                            _showImportResultToast(result, 'Imported full bundle and opened in timeline!', storagePath, _skipInfo);
                             if (uniqueId) addToRecent(uniqueId);
                             if (window.blitzkriegAnalytics && _trackComp) {
                                 window.blitzkriegAnalytics.trackImport(_trackComp.name, _trackComp.category, storagePath);
@@ -5042,12 +5540,14 @@
                 });
             });
         }).then(function() {
-            setStashInProgress(false);
+            _setImportStash(false, guardToken);
+            _releaseImportGuard(guardToken);
             return true; // import succeeded
         }, function (err) {
-            setStashInProgress(false);
+            _setImportStash(false, guardToken);
             hideSpinner();
-            debugLog('IMPORT FAIL: ' + err.message, 'error');
+            _releaseImportGuard(guardToken);
+            debugLog('IMPORT FAIL: ' + (err && err.message || err), 'error');
             if (err && err._wedge) {
                 // Host wedged: do NOT delete the temp bundle (a partial import may
                 // still reference its footage) and do NOT queue more host calls
@@ -5055,7 +5555,7 @@
                 showToast('Import is taking too long. If After Effects is showing a dialog, dismiss it in AE, then try again.', true);
                 return false;
             }
-            showToast('Import failed: ' + err.message, true);
+            showToast('Import failed: ' + (err && err.message || err), true);
             if (importTempDir) {
                 safeEvalScript('cleanupTempStash("' + escapeForExtendScript(importTempDir) + '")', function(cleanResult) {
                     if (cleanResult && cleanResult.indexOf('Error') === 0) {
@@ -5067,6 +5567,96 @@
         });
     }
 
+    /* --------- Import re-entrancy guard ---------
+     * The grid dispatches importComp on click and on double-click, and the only
+     * feedback is a 32px spinner with no backdrop, so the tiles stay clickable
+     * through a multi-minute import. A second click used to launch a whole second
+     * pipeline against the same single-threaded host.
+     *
+     * The guard is held across the WHOLE pipeline, including the internal handoffs
+     * (mirror -> local, local -> repair -> mirror, anything -> cloud), and released
+     * only at a real terminal state. Because a stuck flag would block every future
+     * import - strictly worse than the bug it fixes - it also carries a hard
+     * auto-release longer than any inner ceiling, so a missed release path degrades
+     * to a logged one-time delay instead of a dead Import button.
+     *
+     * TOKEN. That hard auto-release can fire while a real pipeline is still alive:
+     * _doMirrorImport hands off to _doCloudImport at 10 min keeping the same guard,
+     * and the 15 min backstop releases while that cloud import is still running. The
+     * user starts import #2, then the stale #1 finishes and clears the guard and the
+     * focus flag out from under #2. So every acquire mints a token, every pipeline
+     * carries the token it was started with, and a release (guard AND the 'import'
+     * focus flag) from a token that is no longer the current one is ignored.
+     */
+    var _importInFlight = false;
+    var _importGuardTimer = null;
+    var _importingTileEl = null;
+    var _importGuardToken = 0;
+    // > the mirror ceiling (10 min) + a full 3 min host import behind it.
+    var IMPORT_GUARD_MAX_MS = 900000; // 15 min
+
+    function _findStashTile(uniqueId) {
+        if (!uniqueId) return null;
+        try {
+            var tiles = document.querySelectorAll('.stash-item');
+            for (var i = 0; i < tiles.length; i++) {
+                if (tiles[i].dataset && tiles[i].dataset.uniqueId === uniqueId) return tiles[i];
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    /**
+     * Take the guard for a new import.
+     * @returns {number} the token for this pipeline, or 0 when an import is already
+     *          running (the caller must not start).
+     */
+    function _acquireImportGuard(uniqueId) {
+        if (_importInFlight) return 0;
+        _importInFlight = true;
+        _importGuardToken++;
+        var myToken = _importGuardToken;
+        _importingTileEl = _findStashTile(uniqueId);
+        if (_importingTileEl) _importingTileEl.classList.add('importing');
+        if (_importGuardTimer) clearTimeout(_importGuardTimer);
+        _importGuardTimer = setTimeout(function() {
+            if (!_importInFlight || _importGuardToken !== myToken) return;
+            debugLog('IMPORT: guard auto-released after ' + Math.round(IMPORT_GUARD_MAX_MS / 1000) + 's - no terminal path reported back. Imports are unblocked again.', 'error');
+            _releaseImportGuard(myToken);
+        }, IMPORT_GUARD_MAX_MS);
+        return myToken;
+    }
+
+    /**
+     * Release the guard. A token from a superseded pipeline is ignored so a stale
+     * import finishing late cannot unlock an import that is running right now.
+     * @param {number} [token] - omit only from code that has no pipeline of its own.
+     */
+    function _releaseImportGuard(token) {
+        if (token && token !== _importGuardToken) {
+            debugLog('IMPORT: ignored a guard release from a superseded import (token ' + token + ', current ' + _importGuardToken + ')', 'warn');
+            return;
+        }
+        _importInFlight = false;
+        if (_importGuardTimer) { clearTimeout(_importGuardTimer); _importGuardTimer = null; }
+        if (_importingTileEl) {
+            try { _importingTileEl.classList.remove('importing'); } catch (e) {}
+            _importingTileEl = null;
+        }
+    }
+
+    /**
+     * setStashInProgress for the 'import' label, token-gated the same way. A stale
+     * pipeline clearing this flag would re-enable focus-triggered loadLibrary in the
+     * middle of the import that superseded it.
+     * @param {boolean} on
+     * @param {number} [token]
+     */
+    function _setImportStash(on, token) {
+        if (token && token !== _importGuardToken) return;
+        setStashInProgress(on, 'import');
+    }
+
     /**
      * Import a composition and track it as recent
      * @param {string} aepPath - Path to the AEP file
@@ -5075,6 +5665,37 @@
     function importComp(aepPath, uniqueId, storagePath) {
         // Check if we're in a CEP environment with ExtendScript support
         if (!ensureCepBridgeForAction('Import')) return;
+
+        // The wipe guard runs BOTH ways. Both reset surfaces refuse to start while an
+        // import is in flight; this is the reverse. A wipe of a 67GB library takes
+        // minutes, and for all of them the grid stays clickable: an import started
+        // now reads (fast path) or writes (mirror import) the very folder tree the
+        // host is deleting, so it either imports a half-deleted bundle or re-creates
+        // one the wipe already passed. Refuse before the import guard is acquired, so
+        // nothing has to be released on this path.
+        if (_localResetInProgress ||
+            !!(window.localReset && typeof window.localReset.isRunning === 'function' && window.localReset.isRunning())) {
+            debugLog('IMPORT: refused - a local reset is deleting the mirror right now', 'warn');
+            showToast('Deleting the local copy. Wait for it to finish, then import.');
+            return;
+        }
+        // Same hazard, one folder wide: the row Redownload deletes this template's
+        // mirror and then pulls it back, and the fast path would import out of that
+        // folder mid-delete.
+        if (_rowResetInProgress) {
+            debugLog('IMPORT: refused - a per-row redownload owns the mirror right now', 'warn');
+            showToast('A template is being downloaded again. Wait for it to finish, then import.');
+            return;
+        }
+
+        // Token identifies THIS pipeline for the whole run, so a stale one that
+        // finishes after the 15 min backstop cannot release a newer import's guard.
+        var _guardToken = _acquireImportGuard(uniqueId);
+        if (!_guardToken) {
+            debugLog('IMPORT: ignored - an import is already running', 'warn');
+            showToast('An import is already running. Wait for it to finish.');
+            return;
+        }
 
         // Resolve comp info for analytics tracking
         var _trackComp = null;
@@ -5102,7 +5723,12 @@
                     if (info.exists && info.complete && info.aepPath && _mirrorCurrent) {
                         // Fast path: template already in local mirror and content-current
                         debugLog('IMPORT: local fast path - ' + info.aepPath);
-                        _doImportLocalAep(info.aepPath, uniqueId, _trackComp, storagePath);
+                        // Nothing is downloaded for this import, but the mirror that
+                        // WAS downloaded recorded which heavy sources it left behind.
+                        // Carry that record in, or the host's missing-footage count
+                        // gets read as a broken template and markBroken puts a chip on
+                        // a template that is exactly as complete as the panel made it.
+                        _doImportLocalAep(info.aepPath, uniqueId, _trackComp, storagePath, false, _localSkipInfo(storagePath), _guardToken);
                         return;
                     }
                     // Template not synced or stale. Download the import bundle (AEP +
@@ -5116,34 +5742,41 @@
                     // synced counter honestly. Always fetches FRESH from cloud, so the
                     // stale-mirror case re-pulls correctly too.
                     debugLog('IMPORT: mirror import (miss/stale) - ' + storagePath);
-                    _doMirrorImport(storagePath, uniqueId, _trackComp, _impVer);
-                }).catch(function() {
-                    // localSync failed — fall back to cloud download path
-                    _doCloudImport(storagePath, uniqueId, _trackComp);
+                    _doMirrorImport(storagePath, uniqueId, _trackComp, _impVer, _guardToken);
+                }).catch(function(e) {
+                    // localSync failed — fall back to cloud download path.
+                    // This used to be an EMPTY catch, which is why a mirror that was
+                    // failing (bad library path, wedged host, quota-full state blob)
+                    // produced a slow cloud import and literally no error anywhere.
+                    debugLog('IMPORT: localSync check failed for ' + storagePath + ' (' + (e && e.message || e) + ') - using cloud', 'warn');
+                    _doCloudImport(storagePath, uniqueId, _trackComp, _guardToken);
                 });
                 return;
             }
 
             // No localSync available — traditional cloud download
-            _doCloudImport(storagePath, uniqueId, _trackComp);
+            _doCloudImport(storagePath, uniqueId, _trackComp, _guardToken);
             return;
         }
 
         // Legacy local import path
         if (!isValidPath(aepPath)) {
             showToast('Invalid file path.', true);
+            _releaseImportGuard(_guardToken);
             return;
         }
 
         showSpinner();
-        setStashInProgress(true, 'import'); // Block focus-triggered loadLibrary during import
+        _setImportStash(true, _guardToken); // Block focus-triggered loadLibrary during import
         var safePath = escapeForExtendScript(aepPath);
         var safeDisplayName = _trackComp ? escapeForExtendScript(_trackComp.name) : '';
 
         safeEvalScript('importComp("' + safePath + '","' + safeDisplayName + '")', function (result) {
-            setStashInProgress(false);
+            _setImportStash(false, _guardToken);
             hideSpinner();
+            _releaseImportGuard(_guardToken);
             if (!result) {
+                debugLog('IMPORT: legacy local import returned nothing for ' + aepPath, 'error');
                 showToast('Unexpected error importing.', true);
                 return;
             }
@@ -7143,12 +7776,197 @@
         el.textContent = (s.complete + s.empty) + '/' + s.total;
     }
 
+    /* ── Local mirror reset ────────────────────────────────────────────────────
+     *
+     * Set for the whole blocking wipe. _startFullLibrarySync returns early while it
+     * is set, so the auto-resume that runs after every loadLibrary cannot re-arm a
+     * download into the folder that is being deleted. It is cleared on EVERY exit
+     * path of _runLocalReset, both success and both failure branches: a stuck flag
+     * kills background sync silently for the rest of the session, which is a worse
+     * bug than the one it prevents.
+     */
+    var _localResetInProgress = false;
+
+    /**
+     * Set for the per-row Redownload, which deletes ONE template folder. Same
+     * reason as the flag above, narrower blast radius: it also cancels and drains
+     * the sync loop first, so nothing may start another mirror write while it runs.
+     */
+    var _rowResetInProgress = false;
+
+    /**
+     * True while ANYTHING may still be writing into the local mirror.
+     *
+     * status.running is NOT sufficient on its own. getFullSyncStatus computes it as
+     * (_fsRun && _fsRun.running) && !paused, and a worker only tests the paused flag
+     * at the TOP of step(): a worker already inside syncTemplate downloads and writes
+     * the whole bundle before it looks at that flag again. So for the seconds after
+     * Pause, up to CONCURRENCY templates are still writing while running reads false.
+     * paused therefore counts as busy. The user is never stuck: Stop stays visible
+     * whenever running or paused is set, and cancel plus drain clears both.
+     *
+     * An in-flight import writes into the same mirror and is not covered by the sync
+     * drain at all, so it counts too.
+     * @param {Object} s - a getFullSyncStatus() result
+     */
+    function _mirrorWriteInFlight(s) {
+        return !!(s && (s.running || s.paused)) ||
+            _importInFlight || _localResetInProgress || _rowResetInProgress ||
+            !!(window.localReset && window.localReset.isRunning());
+    }
+
+    // Sticky line for #sd-eta after a wipe finishes. The dashboard tick fires every
+    // 1500ms and would otherwise overwrite the outcome with the idle sync summary
+    // before the user has read it.
+    var _localResetNotice = '';
+    var _localResetNoticeUntil = 0;
+    var LOCAL_RESET_NOTICE_MS = 20000;
+
+    /** True when a library path is configured. */
+    function _syncHasPath() {
+        return !!(window.localSync && window.localSync.getLibraryPath && window.localSync.getLibraryPath());
+    }
+
+    /** Inline progress for the wipe. Written straight into the dashboard ETA line, never a toast. */
+    function _setLocalResetStatus(text) {
+        var el = document.getElementById('sd-eta');
+        if (el) el.textContent = text;
+    }
+
+    /** Hold `text` on the ETA line for a while after the wipe returns. */
+    function _holdLocalResetNotice(text) {
+        _localResetNotice = text;
+        _localResetNoticeUntil = Date.now() + LOCAL_RESET_NOTICE_MS;
+        _setLocalResetStatus(text);
+    }
+
+    /**
+     * Open the confirm for one of the two destructive flows.
+     * @param {boolean} redownload — true for "delete and redownload everything"
+     */
+    function _promptLocalReset(redownload) {
+        if (!window.localReset) {
+            showToast('Local reset is unavailable. Close and reopen the panel.', true);
+            return;
+        }
+        var path = _syncHasPath() ? window.localSync.getLibraryPath() : '';
+        if (!path) { showToast('Set a library path first', true); return; }
+        if (_localResetInProgress || _rowResetInProgress || window.localReset.isRunning()) {
+            showToast('A local reset is already running.', true);
+            return;
+        }
+        // An import writes into the same mirror the wipe is about to delete, and it
+        // is not covered by the sync drain.
+        if (_importInFlight) {
+            showToast('An import is running. Wait for it to finish, then try again.', true);
+            return;
+        }
+        var modal = redownload ? localRedownloadModal : localResetModal;
+        var pathEl = redownload ? localRedownloadPathEl : localResetPathEl;
+        if (!modal) return;
+        if (pathEl) pathEl.textContent = path;
+        modal.style.display = 'flex';
+    }
+
+    function executeLocalReset() {
+        if (localResetModal) localResetModal.style.display = 'none';
+        _runLocalReset(false);
+    }
+
+    function executeLocalRedownload() {
+        if (localRedownloadModal) localRedownloadModal.style.display = 'none';
+        _runLocalReset(true);
+    }
+
+    /**
+     * Run the wipe. local-reset.js owns the order of operations (cancel, drain,
+     * delete, clear state); this only drives the UI and starts the re-download.
+     * @param {boolean} redownload
+     */
+    function _runLocalReset(redownload) {
+        if (!window.localReset) {
+            showToast('Local reset is unavailable. Close and reopen the panel.', true);
+            return;
+        }
+        if (_localResetInProgress) return;
+
+        // OTA ships each JS file on its own, so main.js and local-reset.js can be at
+        // different versions on a real machine. Check the method is actually there
+        // BEFORE the flag goes up: a missing method would otherwise throw past every
+        // handler below and strand _localResetInProgress true for the session, which
+        // silently kills background sync and hides both wipe buttons.
+        var _method = redownload ? 'wipeAndRedownload' : 'wipeLocal';
+        if (typeof window.localReset[_method] !== 'function') {
+            debugLog('Local reset: window.localReset.' + _method + ' is missing - panel files are out of step', 'error');
+            showToast('Local reset is unavailable. Close and reopen the panel.', true);
+            return;
+        }
+
+        _localResetInProgress = true;
+        _localResetNotice = '';
+        _setLocalResetStatus('Stopping the current download...');
+        // Repaint the controls now so the wipe buttons and Pause/Stop disappear the
+        // moment the delete starts, instead of one tick later.
+        if (activeCategory === '__sync') _syncDashTick();
+
+        var _done = function (ok, message) {
+            _localResetInProgress = false;
+            _holdLocalResetNotice(message);
+            _updateSyncNavCount();
+            _updateSyncBadge();
+            if (activeCategory === '__sync') renderSyncDashboard();
+            if (ok && redownload) _startFullLibrarySync();
+        };
+
+        var opts = { onStatus: _setLocalResetStatus };
+        var run;
+        try {
+            run = redownload
+                ? window.localReset.wipeAndRedownload(opts)
+                : window.localReset.wipeLocal(opts);
+        } catch (e) {
+            // A SYNCHRONOUS throw never reaches the rejection handler below, so the
+            // done path has to run here too. Without it the flag stays true for the
+            // rest of the session.
+            var _em = (e && e.message) ? e.message : String(e);
+            debugLog('Local reset threw synchronously: ' + _em, 'error');
+            _done(false, 'The local copy could not be deleted. ' + _em);
+            return;
+        }
+        if (!run || typeof run.then !== 'function') {
+            debugLog('Local reset returned no promise - panel files are out of step', 'error');
+            _done(false, 'The local copy could not be deleted. Close and reopen the panel.');
+            return;
+        }
+
+        run.then(function (res) {
+            if (res && res.ok) {
+                var n = (res.removed || 0);
+                debugLog('Local reset: emptied the local library (' + n + ' item(s) removed)', 'success');
+                _done(true, redownload
+                    ? 'Deleted ' + n + ' item(s). Starting download.'
+                    : 'Local copy deleted. Imports come straight from the cloud until you download again.');
+            } else {
+                var msg = (res && res.error) || 'The local copy could not be deleted.';
+                debugLog('Local reset did not complete: ' + msg, 'error');
+                _done(false, msg);
+            }
+        }, function (err) {
+            var m = (err && err.message) ? err.message : String(err);
+            debugLog('Local reset threw: ' + m, 'error');
+            _done(false, 'The local copy could not be deleted. ' + m);
+        });
+    }
+
     /**
      * Begin (or resume) the full-library background mirror. Safe to call on every
      * load — if nothing is pending it resolves immediately; if a run is already live
      * it just adopts the tick. Petter opted into "download all"; this is the engine.
      */
     function _startFullLibrarySync() {
+        // Never re-arm a download into a folder that is being deleted. loadLibrary's
+        // auto-resume calls straight into here.
+        if (_localResetInProgress) return;
         if (!window.localSync || !window.localSync.startFullSync) return;
         if (!window.localSync.getLibraryPath || !window.localSync.getLibraryPath()) return; // no path yet
         var paths = [];
@@ -7178,6 +7996,106 @@
             }
         }, function (err) {
             debugLog('Full library sync error: ' + (err && err.message || err), 'warn');
+        });
+    }
+
+    // Wall-clock ceiling for a single-row redownload. Matches the import guard.
+    // syncTemplate has no cancellation token, so this only releases the ROW (button
+    // and _rowResetInProgress) - a download still running underneath finishes and
+    // writes its own state. Without it a wedged download would leave the flag set for
+    // the session, which hides both wipe buttons, disables every row button and, since
+    // the import guard reads the same flag, blocks importing anything at all.
+    var ROW_SYNC_CEILING_MS = 900000; // 15 min
+
+    /**
+     * Download ONE template back into the mirror, for the per-row Redownload after
+     * its local copy has just been deleted.
+     *
+     * This is deliberately NOT _startFullLibrarySync. That builds its queue from every
+     * entry in allComps, so on a library whose default state is "not downloading" it
+     * turned a one-row button into a 67GB pull. syncTemplate touches this path only,
+     * and it writes nothing into state.fullSync - so a Stop the user meant stays
+     * stopped, and the sync loop is not resurrected behind a row action.
+     * @param {string} sp - storagePath of the row
+     * @param {HTMLElement} btn - the row button (its own progress surface)
+     * @param {function(string)} label - writes the button text
+     * @param {function} restore - clears _rowResetInProgress and resets the button
+     */
+    function _redownloadOneRow(sp, btn, label, restore) {
+        if (!window.localSync || typeof window.localSync.syncTemplate !== 'function') {
+            debugLog('Redownload: localSync.syncTemplate is missing - panel files are out of step', 'error');
+            restore();
+            showToast('Local copy deleted. Open Sync and Analytics and press Download all to get it back.', true);
+            if (activeCategory === '__sync') renderSyncDashboard();
+            return;
+        }
+        var pv = _buildSyncPathsAndVersions();
+        var ver = pv.versionMap[sp] || '';
+        var settled = false;
+        var ceiling = null;
+        var bytes = 0;
+
+        var finish = function (message, isErr) {
+            if (settled) return;
+            settled = true;
+            if (ceiling) { clearTimeout(ceiling); ceiling = null; }
+            restore();
+            if (message) showToast(message, !!isErr);
+            _updateSyncNavCount();
+            _updateSyncBadge();
+            // Re-point the freshly mirrored template at its disk bundle so the next
+            // import takes the instant local path.
+            _applyLocalAssetCache(allComps);
+            if (activeCategory === '__sync') renderSyncDashboard();
+        };
+
+        ceiling = setTimeout(function () {
+            debugLog('Redownload: ' + sp + ' passed the ' + Math.round(ROW_SYNC_CEILING_MS / 1000) +
+                's ceiling with no result - releasing the row', 'error');
+            finish('The download is taking too long. Open Sync and Analytics and press Download all.', true);
+        }, ROW_SYNC_CEILING_MS);
+
+        label('Downloading...');
+        // The local copy is gone and on its way back. Repaint just this row's chip:
+        // a full renderSyncDashboard would replace the button that is showing the
+        // progress, and the 1500ms tick never touches row chips, so without this the
+        // row would keep claiming "Synced" for the whole download.
+        try {
+            var chip = (btn && btn.parentNode && btn.parentNode.querySelector)
+                ? btn.parentNode.querySelector('.sd-chip') : null;
+            if (chip) { chip.className = 'sd-chip sd-chip-syncing'; chip.textContent = 'Syncing'; }
+        } catch (e) {}
+        var run;
+        try {
+            run = window.localSync.syncTemplate(sp, ver, function (b) {
+                if (typeof b === 'number' && isFinite(b) && b > 0) bytes += b;
+                if (!settled) label('Downloading ' + formatBytesShort(bytes) + '...');
+            });
+        } catch (e) {
+            var em = (e && e.message) ? e.message : String(e);
+            debugLog('Redownload: syncTemplate threw synchronously for ' + sp + ' (' + em + ')', 'error');
+            finish('Local copy deleted, but the download did not start. ' + em, true);
+            return;
+        }
+        if (!run || typeof run.then !== 'function') {
+            debugLog('Redownload: syncTemplate returned no promise for ' + sp, 'error');
+            finish('Local copy deleted, but the download did not start. Close and reopen the panel.', true);
+            return;
+        }
+        run.then(function (r) {
+            if (r && r.localAepPath) {
+                debugLog('Redownload: ' + sp + ' downloaded again (' + (r.fileCount || 0) + ' file(s))', 'success');
+                finish('Downloaded again.');
+                return;
+            }
+            // Files landed but the .aep did not verify, so syncTemplate left the
+            // template not complete. Say so instead of showing a false success.
+            debugLog('Redownload: ' + sp + ' downloaded but the project file did not verify', 'warn');
+            finish('Downloaded, but the project file did not verify. Try Download all in Sync and Analytics.', true);
+        }, function (err) {
+            var m = (err && err.message) ? err.message : String(err);
+            debugLog('Redownload: download failed for ' + sp + ' (' + m + ')', 'error');
+            finish('Local copy deleted, but the download failed. ' + m, true);
         });
     }
 
@@ -7231,6 +8149,15 @@
         }
 
         var etaEl = document.getElementById('sd-eta');
+        // While a wipe is running it owns this line (local-reset.js writes its phase
+        // through onStatus), and for a short window afterwards the outcome holds.
+        // Either way the idle sync summary must not paint over it.
+        if (etaEl && _localResetInProgress) {
+            etaEl = null;
+        } else if (etaEl && _localResetNotice && Date.now() < _localResetNoticeUntil) {
+            etaEl.textContent = _localResetNotice;
+            etaEl = null;
+        }
         if (etaEl) {
             if (s.running && s.pending > 0) {
                 var rate = s.bytesPerSec > 0 ? ' · ' + formatBytesShort(s.bytesPerSec) + '/s' : '';
@@ -7259,6 +8186,33 @@
         show('sd-pause', s.running);
         show('sd-resume', s.paused && s.pending > 0);
         show('sd-cancel', s.running || s.paused);
+
+        // Destructive local-mirror actions. Shown only with a configured path and
+        // only while nothing is writing to the mirror: deleting under live writers
+        // leaves half-written bundles that then verify as complete. _mirrorWriteInFlight
+        // covers the paused-masks-running case and the in-flight import, neither of
+        // which the old `!s.running` test caught.
+        var wipeOk = _syncHasPath() && !_mirrorWriteInFlight(s);
+        show('sd-delete-local', wipeOk);
+        show('sd-force-redownload', wipeOk);
+
+        // Per-row Redownload. It cancels and drains the sync loop itself, so a
+        // running or paused loop does NOT disable it. What does disable it is
+        // another operation that already owns the mirror and that this one cannot
+        // sequence around: an import, a full wipe, or another row reset.
+        var rowsBlocked = _importInFlight || _localResetInProgress || _rowResetInProgress ||
+            !!(window.localReset && window.localReset.isRunning());
+        var rowBtns = document.querySelectorAll('.sd-row-redownload');
+        for (var rb = 0; rb < rowBtns.length; rb++) {
+            var rowBtn = rowBtns[rb];
+            // The button mid-run paints its own label and disabled state.
+            if (rowBtn.getAttribute('data-busy') === '1') continue;
+            rowBtn.disabled = rowsBlocked;
+            rowBtn.style.opacity = rowsBlocked ? '0.5' : '';
+            rowBtn.title = rowsBlocked
+                ? 'Not available while another download or delete is using the local library'
+                : 'Delete this template\'s local copy and download it again';
+        }
     }
 
     /** Short display name from a storagePath, preferring the loaded comp's name. */
@@ -7314,6 +8268,10 @@
         html += '<button id="sd-pause" class="button-secondary" style="display:none;">Pause</button>';
         html += '<button id="sd-resume" class="button-primary" style="display:none;">Resume</button>';
         html += '<button id="sd-cancel" class="button-secondary" style="display:none;">Stop</button>';
+        // Destructive pair. sd- prefixed so .sync-dash-actions button already sizes
+        // them (13px / 6px 14px) with no new CSS. Visibility is owned by _syncDashTick.
+        html += '<button id="sd-delete-local" class="button-secondary" style="display:none;">Delete local copy</button>';
+        html += '<button id="sd-force-redownload" class="button-danger" style="display:none;">Delete and redownload everything</button>';
         html += '</div>';
         html += '</div>'; // header
 
@@ -7361,6 +8319,12 @@
                 html += '<span class="sd-row-note" title="Imports fine; re-stash to bundle its missing footage">re-stash to fix footage</span>';
             }
             html += _syncStatusChip(st.status);
+            // Per-row escape hatch: delete this one template's local copy and pull it
+            // again. Inline sizing because .sd-row has no button rule and CSS/style.css
+            // is not this file's to change.
+            html += '<button class="button-secondary sd-row-redownload" data-sp="' + escapeHTML(st.storagePath) +
+                '" style="height:22px;padding:0 10px;font-size:11px;" ' +
+                'title="Delete this template\'s local copy and download it again">Redownload</button>';
             html += '</div>';
             html += '</div>';
         }
@@ -7410,6 +8374,153 @@
         if (cancelB) cancelB.addEventListener('click', function () {
             window.localSync.cancelFullSync();
             _syncDashTick();
+        });
+
+        var delLocalB = document.getElementById('sd-delete-local');
+        if (delLocalB) delLocalB.addEventListener('click', function () { _promptLocalReset(false); });
+        var forceReB = document.getElementById('sd-force-redownload');
+        if (forceReB) forceReB.addEventListener('click', function () { _promptLocalReset(true); });
+
+        // Per-row Redownload, wired by DELEGATION on the list container. Every filter
+        // click re-renders the whole dashboard, so listeners bound to the row buttons
+        // themselves would be thrown away with the nodes.
+        var sdList = document.getElementById('sd-list');
+        if (sdList) sdList.addEventListener('click', function (ev) {
+            var btn = ev.target;
+            if (!btn || !btn.classList || !btn.classList.contains('sd-row-redownload')) return;
+            if (btn.disabled) return;
+            var sp = btn.getAttribute('data-sp');
+            if (!sp) return;
+            if (!window.localReset) {
+                showToast('Local reset is unavailable. Close and reopen the panel.', true);
+                return;
+            }
+            if (_localResetInProgress || _rowResetInProgress || window.localReset.isRunning()) {
+                showToast('A local reset is already running.', true);
+                return;
+            }
+            // An import writes into the same mirror this deletes, and it is NOT
+            // covered by the sync drain below. Same reason the full wipe refuses.
+            if (_importInFlight) {
+                showToast('An import is running. Wait for it to finish, then try again.', true);
+                return;
+            }
+
+            var restore = function () {
+                _rowResetInProgress = false;
+                btn.removeAttribute('data-busy');
+                btn.disabled = false;
+                btn.style.opacity = '';
+                btn.textContent = 'Redownload';
+            };
+            var label = function (text) {
+                btn.textContent = text;
+            };
+            _rowResetInProgress = true;
+            btn.setAttribute('data-busy', '1');
+            btn.disabled = true;
+            btn.style.opacity = '0.5';
+
+            // resetOne cancels NOTHING, so deleting a folder a worker is writing into
+            // is on this caller. Do exactly what the full wipe does: cancel, then wait
+            // for the workers to actually drain, then delete. Reading status.running
+            // instead is not enough - it is masked by the paused flag, and a worker
+            // already inside syncTemplate writes its whole bundle before it re-reads
+            // that flag, so "not running" can still mean "writing right now".
+            var pv = _buildSyncPathsAndVersions();
+            var st = window.localSync.getFullSyncStatus(pv.paths, pv.versionMap);
+            var loopAlive = !!(st.running || st.paused);
+            // A paused loop is the user's explicit state. Cancelling to drain would
+            // erase it, so put it back afterwards instead of quietly resuming the
+            // whole library download behind a one-row action.
+            var wasPaused = !!st.paused;
+            // Same idea for a loop that was actively downloading: the drain below
+            // cancels it, so the full run has to be handed back afterwards. In every
+            // OTHER state (idle, stopped, never started - the documented default) the
+            // library is NOT downloading, and this button must not turn into one.
+            // cancelled excluded on purpose: right after Stop the workers are still
+            // draining, so running can read true for a few seconds while the user's
+            // actual instruction was to stop.
+            var wasRunning = !!st.running && !st.cancelled;
+
+            var drain = function () {
+                if (!loopAlive) return Promise.resolve(true);
+                label('Stopping download...');
+                try {
+                    window.localSync.cancelFullSync();
+                } catch (e) {
+                    debugLog('Redownload: cancelFullSync threw (' + (e && e.message || e) + ')', 'warn');
+                }
+                _syncDashTick();
+                if (typeof window.localSync.awaitIdle !== 'function') return Promise.resolve(true);
+                return window.localSync.awaitIdle(60000);
+            };
+
+            drain().then(function (idle) {
+                if (idle === false) {
+                    debugLog('Redownload: the sync loop did not drain for ' + sp + ' - refusing to delete under a live writer', 'error');
+                    showToast('The download did not stop. Close and reopen the panel, then try again.', true);
+                    restore();
+                    _syncDashTick();
+                    return null;
+                }
+                label('Deleting...');
+                return window.localReset.resetOne(sp).then(function (res) {
+                    if (res && res.ok) {
+                        debugLog('Redownload: cleared the local copy of ' + sp, 'info');
+                        if (wasPaused) {
+                            // Left cancelled by the drain; re-arm the pause so the
+                            // dashboard shows Paused with Resume, as the user left it.
+                            _rowResetInProgress = false;
+                            btn.removeAttribute('data-busy');
+                            try { window.localSync.pauseFullSync(); } catch (e) {}
+                            showToast('Local copy deleted. It downloads again when you resume the sync.');
+                            _updateSyncNavCount();
+                            _updateSyncBadge();
+                            if (activeCategory === '__sync') renderSyncDashboard();
+                            return null;
+                        }
+                        if (wasRunning) {
+                            // The library WAS downloading until the drain above stopped
+                            // it. Hand that run straight back - it picks this row up as
+                            // pending along with everything else it had left.
+                            _rowResetInProgress = false;
+                            btn.removeAttribute('data-busy');
+                            _startFullLibrarySync();
+                            _updateSyncNavCount();
+                            _updateSyncBadge();
+                            if (activeCategory === '__sync') renderSyncDashboard();
+                            return null;
+                        }
+                        // Nothing was downloading. Pull back exactly the one template
+                        // this button names and nothing else. _rowResetInProgress stays
+                        // set for the download (it is the only thing marking this write
+                        // as in flight - syncTemplate runs outside the full-sync loop, so
+                        // getFullSyncStatus().running reads false throughout).
+                        _redownloadOneRow(sp, btn, label, restore);
+                        return null;
+                    }
+                    var msg = (res && res.error) || 'Could not delete the local copy.';
+                    debugLog('Redownload failed for ' + sp + ': ' + msg, 'error');
+                    showToast(msg, true);
+                    restore();
+                    return null;
+                }, function (err) {
+                    var m = (err && err.message) ? err.message : String(err);
+                    debugLog('Redownload threw for ' + sp + ': ' + m, 'error');
+                    showToast('Could not delete the local copy. ' + m, true);
+                    restore();
+                    return null;
+                });
+            }).then(null, function (err) {
+                // Trailing net for the whole chain: a throw in any handler above must
+                // not leave _rowResetInProgress set, which would hide the wipe buttons
+                // and disable every row button for the rest of the session.
+                var m2 = (err && err.message) ? err.message : String(err);
+                debugLog('Redownload chain failed for ' + sp + ': ' + m2, 'error');
+                showToast('Could not delete the local copy. ' + m2, true);
+                restore();
+            });
         });
 
         _syncDashTick();
@@ -9627,7 +10738,7 @@
     function getTempDir() {
         return new Promise(function(resolve, reject) {
             if (_cachedTempDir) { resolve(_cachedTempDir); return; }
-            safeEvalScript('getSafeTempFolder().fsName', function(r) {
+            evalScriptBounded('getSafeTempFolder', 'getSafeTempFolder().fsName', HOST_PROBE_TIMEOUT_MS, function(r) {
                 // Reject the literal "undefined" string (ExtendScript stringifies undefined
                 // to the literal word when evaluating non-existent symbols). Also reject
                 // EvalScript bridge failures and empty responses.
@@ -9637,7 +10748,7 @@
                 }
                 _cachedTempDir = r;
                 resolve(r);
-            });
+            }, reject);
         });
     }
 
@@ -9677,56 +10788,84 @@
     function writeBlobToFile(blob, filePath) {
         initDiskIo();
         return new Promise(function(resolve, reject) {
+            // One wall-clock ceiling over the WHOLE write, covering both the
+            // FileReader (which on a multi-GB blob can fire neither onload nor
+            // onerror) and whichever disk branch runs. Scaled by size so a big but
+            // healthy write is never cut off. Without it the cep.fs branch had no
+            // bound at all, because its only async step is the reader.
+            var _settled = false;
+            var _ceilingMs = hostFileTimeoutFor(blob && blob.size);
+            var _ceiling = setTimeout(function() {
+                if (_settled) return;
+                _settled = true;
+                debugLog('HOST TIMEOUT: writing ' + filePath + ' (' + ((blob && blob.size) || 0) + ' bytes) got no result after ' + Math.round(_ceilingMs / 1000) + 's', 'error');
+                reject(new Error('Writing ' + filePath + ' did not finish within ' + Math.round(_ceilingMs / 1000) + 's'));
+            }, _ceilingMs);
+            function _ok(v) { if (_settled) return; _settled = true; clearTimeout(_ceiling); resolve(v); }
+            function _fail(e) { if (_settled) return; _settled = true; clearTimeout(_ceiling); reject(e); }
+
             var reader = new FileReader();
-            reader.onerror = function() { reject(new Error('FileReader error')); };
+            reader.onerror = function() { _fail(new Error('FileReader error')); };
             reader.onload = function() {
                 var b64 = reader.result.split(',')[1];
-                if (!b64 || b64.length === 0) { reject(new Error('Empty base64 from blob')); return; }
+                if (!b64 || b64.length === 0) { _fail(new Error('Empty base64 from blob')); return; }
 
                 if (_diskIo.type === 'cep') {
                     try {
                         var res = cep.fs.writeFile(filePath, b64, cep.encoding.Base64);
-                        if (res && res.err === 0) { resolve(filePath); }
-                        else { reject(new Error('cep.fs write err ' + (res ? res.err : 'null result'))); }
-                    } catch (e) { reject(new Error('cep.fs throw: ' + e.message)); }
+                        if (res && res.err === 0) { _ok(filePath); }
+                        else { _fail(new Error('cep.fs write err ' + (res ? res.err : 'null result'))); }
+                    } catch (e) { _fail(new Error('cep.fs throw: ' + e.message)); }
                 } else {
-                    // Chunked evalScript: write base64 in 500KB pieces, then decode to binary
+                    // Chunked evalScript: write base64 in 500KB pieces, then decode to binary.
+                    // The temp name carries a timestamp + random suffix. It used to be a bare
+                    // `<filePath>.b64`, derived identically in js/local-sync.js, so a panel
+                    // import and a background mirror write could interleave their chunks into
+                    // ONE temp file (appendToTextFile opens 'w' on the first chunk and 'a'
+                    // after). decodeBase64FileToBinary then strips the invalid characters and
+                    // writes a corrupt-but-nonzero .aep, reported as a success.
                     var CHUNK = 500000;
-                    var safeTmpB64 = escapeForExtendScript(filePath + '.b64');
+                    var tmpB64Path = filePath + '.' + Date.now().toString(36) + Math.floor(Math.random() * 0x7fffffff).toString(36) + '.b64';
+                    var safeTmpB64 = escapeForExtendScript(tmpB64Path);
                     var safeOut = escapeForExtendScript(filePath);
                     var idx = 0;
                     var totalChunks = Math.ceil(b64.length / CHUNK);
-                    debugLog('writeBlobToFile: ' + b64.length + ' bytes b64, ' + totalChunks + ' chunks → ' + filePath);
+                    debugLog('writeBlobToFile: ' + b64.length + ' bytes b64, ' + totalChunks + ' chunks -> ' + filePath);
                     function writeChunk() {
+                        if (_settled) return;
                         if (idx >= b64.length) {
                             // All chunks written — decode to binary
-                            safeEvalScript('decodeBase64FileToBinary("' + safeTmpB64 + '", "' + safeOut + '")', function(r) {
-                                if (!r || r.indexOf('ERROR') === 0) {
-                                    debugLog('decodeBase64FileToBinary failed: ' + r, 'error');
-                                    reject(new Error(r || 'Decode failed'));
-                                } else {
-                                    debugLog('writeBlobToFile: decode OK → ' + r);
-                                    resolve(r);
-                                }
-                            });
+                            evalScriptBounded('decodeBase64FileToBinary(' + filePath + ')',
+                                'decodeBase64FileToBinary("' + safeTmpB64 + '", "' + safeOut + '")',
+                                _ceilingMs, function(r) {
+                                    if (!r || r.indexOf('ERROR') === 0) {
+                                        debugLog('decodeBase64FileToBinary failed: ' + r, 'error');
+                                        _fail(new Error(r || 'Decode failed'));
+                                    } else {
+                                        debugLog('writeBlobToFile: decode OK -> ' + r);
+                                        _ok(r);
+                                    }
+                                }, _fail);
                             return;
                         }
                         var chunk = b64.substring(idx, idx + CHUNK);
                         // Validate chunk contains only valid base64 characters
                         if (!/^[A-Za-z0-9+/=]*$/.test(chunk)) {
-                            reject(new Error('Invalid base64 data detected'));
+                            _fail(new Error('Invalid base64 data detected'));
                             return;
                         }
                         var isFirst = idx === 0 ? 'true' : 'false';
-                        safeEvalScript('appendToTextFile("' + safeTmpB64 + '", "' + chunk + '", ' + isFirst + ')', function(r) {
-                            if (r !== 'ok') {
-                                debugLog('appendToTextFile chunk failed: ' + r, 'error');
-                                reject(new Error('Chunk write failed: ' + r));
-                                return;
-                            }
-                            idx += CHUNK;
-                            writeChunk();
-                        });
+                        evalScriptBounded('appendToTextFile chunk ' + (Math.floor(idx / CHUNK) + 1) + '/' + totalChunks,
+                            'appendToTextFile("' + safeTmpB64 + '", "' + chunk + '", ' + isFirst + ')',
+                            HOST_CHUNK_TIMEOUT_MS, function(r) {
+                                if (r !== 'ok') {
+                                    debugLog('appendToTextFile chunk failed: ' + r, 'error');
+                                    _fail(new Error('Chunk write failed: ' + r));
+                                    return;
+                                }
+                                idx += CHUNK;
+                                writeChunk();
+                            }, _fail);
                     }
                     writeChunk();
                 }
@@ -9790,12 +10929,14 @@
         return new Promise(function(resolve, reject) {
             if (!dirPath) { resolve(); return; }
             var safePath = escapeForExtendScript(dirPath);
-            safeEvalScript(
+            evalScriptBounded('mkdir ' + dirPath,
                 '(function(){ function mk(p){ var f = new Folder(p); if (f.exists) return true; var parent = f.parent; if (parent && !parent.exists && !mk(parent.fsName)) return false; return f.create(); } var target = new Folder("' + safePath + '"); if (target.exists || mk(target.fsName)) return "ok"; return "ERROR: Could not create " + target.fsName; })()',
+                HOST_PROBE_TIMEOUT_MS,
                 function(result) {
                     if (result === 'ok') resolve();
                     else reject(new Error(result || 'Could not create folder'));
-                }
+                },
+                reject
             );
         });
     }
@@ -9849,13 +10990,18 @@
         // evalScript path: read file as base64 in ExtendScript
         return new Promise(function(resolve, reject) {
             var safePath = escapeForExtendScript(filePath);
-            safeEvalScript('readFileAsBase64(new File("' + safePath + '"))', function(b64) {
-                if (!b64 || b64 === 'EvalScript error.' || b64 === 'undefined' || b64.length < 4) {
-                    reject(new Error('Failed to read: ' + filePath));
-                } else {
-                    resolve(base64ToBlob(b64, contentType || 'application/octet-stream'));
-                }
-            });
+            evalScriptBounded('readFileAsBase64(' + filePath + ')',
+                'readFileAsBase64(new File("' + safePath + '"))',
+                HOST_FILE_TIMEOUT_MS,
+                function(b64) {
+                    if (!b64 || b64 === 'EvalScript error.' || b64 === 'undefined' || b64.length < 4) {
+                        reject(new Error('Failed to read: ' + filePath));
+                    } else {
+                        resolve(base64ToBlob(b64, contentType || 'application/octet-stream'));
+                    }
+                },
+                reject
+            );
         });
     }
 
@@ -9881,12 +11027,18 @@
         return bytes + ' B';
     }
 
-    /** Check file existence via evalScript (always works). */
+    /** Check file existence via evalScript (always works).
+     *  A wedged host REJECTS here rather than resolving false: "the host never
+     *  answered" and "the file is not there" are different facts, and collapsing
+     *  them is how a hang turns into a silently wrong result. */
     function fileExistsAsync(filePath) {
-        return new Promise(function(resolve) {
-            safeEvalScript('(new File("' + escapeForExtendScript(filePath) + '")).exists', function(r) {
-                resolve(r === 'true');
-            });
+        return new Promise(function(resolve, reject) {
+            evalScriptBounded('exists ' + filePath,
+                '(new File("' + escapeForExtendScript(filePath) + '")).exists',
+                HOST_PROBE_TIMEOUT_MS,
+                function(r) { resolve(r === 'true'); },
+                reject
+            );
         });
     }
 
@@ -10420,7 +11572,7 @@
             if (_finished) return;
             _finished = true;
             if (_batchHeartbeat) { clearTimeout(_batchHeartbeat); _batchHeartbeat = null; }
-            setStashInProgress(false);
+            setStashInProgress(false, 'batch');
             generateAllMissingThumbnails._running = false;
             generateAllMissingThumbnails._cancel = null;
             hideSpinner();
@@ -10574,9 +11726,18 @@
         } catch (e) {}
         // Auto OTA: install on detection + recheck every 30 min (non-blocking)
         startUpdateChecker();
-        // Track session start
+        // Track session start. Waits (briefly) for the AE version probe so the row
+        // carries the build + host it came from - session_start used to write only
+        // geo, so there was no way to tell which panel version a remote editor was
+        // running when he reported a problem.
         if (window.blitzkriegAnalytics) {
-            window.blitzkriegAnalytics.trackSessionStart();
+            whenAeVersionReady(function() {
+                window.blitzkriegAnalytics.trackSessionStart({
+                    panelVersion: BLITZKRIEG_LOCAL_VERSION,
+                    aeVersion: _aeVersionString,
+                    platform: navigator.platform || ''
+                });
+            }, 3000);
         }
         // Start telemetry session
         if (window.blitzkriegTelemetry) {

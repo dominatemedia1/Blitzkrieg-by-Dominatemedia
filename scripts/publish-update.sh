@@ -42,6 +42,8 @@ FILES=(
   "js/auth.js"
   "js/analytics.js"
   "js/telemetry.js"
+  "js/local-reset.js"
+  "js/local-sync.js"
   "jsx/hostscript.jsx"
   "CSS/style.css"
   "index.html"

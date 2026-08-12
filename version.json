@@ -7,20 +7,24 @@
     "js/auth.js",
     "js/analytics.js",
     "js/telemetry.js",
+    "js/local-reset.js",
+    "js/local-sync.js",
     "jsx/hostscript.jsx",
     "CSS/style.css",
     "index.html",
     "version.json"
   ],
   "integrity": {
-    "js/main.js": "sha256-9065d28972a3da795fa3555ed294e7fe415ea884c94e49342ad8d7891e36c707",
-    "js/cloud-library.js": "sha256-3d2efe5939ad7d6a3180058d199f841f99e29eee634014982dd6671cf5cc1916",
+    "js/main.js": "sha256-54a365bfedf45595d55f6176507a00c0eada360a4baf58ccd61c181a8e6dbcec",
+    "js/cloud-library.js": "sha256-c67c8523b3623fd66612eaa35f06158f2df6ca86c591f5c8fd37f131aa564b3b",
     "js/supabase-config.js": "sha256-356b184ca681f88d07d5a4fe5c22c959bc07cff2f053bdce1576cf6949bc1640",
     "js/auth.js": "sha256-ffd76b1ae1804df0fdc3340547232b984868cf98cc6243021b5ef8225eabff67",
-    "js/analytics.js": "sha256-152acb6203cdfdb580961c80487b2bd70c7e37c9265cfc669d76161fe63c1031",
+    "js/analytics.js": "sha256-2ab2168f7da42cd42ba7efd60f6fb845c3c4297b0f6e399fda63f25894e28497",
     "js/telemetry.js": "sha256-2638e39b4ac12800c61c53eaad888da97b800d2af2972db376d09e9395f64a01",
-    "jsx/hostscript.jsx": "sha256-0cd3195920e80f5b286e04aff411856c8ae289412b60262479d900d8b9c7fd6a",
+    "js/local-reset.js": "sha256-a90da0d07a49df53f6f54849f030d22c051a7b5b7fea836c58222776ad4418c5",
+    "js/local-sync.js": "sha256-911e3ae9b6827f4ace676931228396609698179627f5ef30f82fbb408e6398a3",
+    "jsx/hostscript.jsx": "sha256-25fdaf9433d6f71808086f99c722a23c5ccba1d2bfbcd76b3224b928335e73cb",
     "CSS/style.css": "sha256-fd81edd4c18c438f30f1a589ed51458afdbc47b8c3fbc61f6d38ced40f1fbf6c",
-    "index.html": "sha256-2805b5653bb697647068424b55608441b7d727d5ed6b80f3761deb427f05cc93"
+    "index.html": "sha256-3477e92af248e7c069e9f69aa02a126c72f3f806c3fbcd0ffb35b9bd8a4840c1"
   }
 }

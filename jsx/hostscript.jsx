@@ -4205,6 +4205,97 @@ function getActiveCompInfo() {
 // Called by js/local-sync.js via safeEvalScript. All functions return
 // a JSON string: {ok:true} on success, {error:"message"} on failure.
 
+/** Filename Blitzkrieg drops in a library root to prove it owns that folder.
+ *  blitzLocalWipeLibrary refuses to empty a root without it, so the recursive
+ *  delete can never run against an ordinary folder the user happened to type
+ *  into the library path field. */
+var BLITZ_LIBRARY_MARKER = '.blitzkrieg-library';
+
+/**
+ * Write the ownership marker into a library root, so a later wipe is provably
+ * scoped to a folder this panel manages.
+ *
+ * Adoption rule for libraries created before the marker existed: a root already
+ * holding Blitzkrieg's own <Category>/<Template>/metadata.json shape is adopted
+ * and marked. An ordinary user folder never has that shape, so adoption cannot
+ * turn someone's Documents folder into a wipe target.
+ *
+ * Returns JSON {ok, marked, adopted, reason}.
+ */
+function blitzLocalEnsureLibraryMarker(rawRootPath, allowAdopt) {
+    try {
+        if (!isValidPath(rawRootPath)) return JSON.stringify({ error: 'Invalid path' });
+        var root = folderFromPath(rawRootPath);
+        if (!root.exists) return JSON.stringify({ ok: false, marked: false, reason: 'root missing' });
+
+        var markerFile = new File(buildPath(root.fsName, BLITZ_LIBRARY_MARKER));
+        if (markerFile.exists) return JSON.stringify({ ok: true, marked: true, adopted: false });
+
+        var adopted = false;
+        if (!allowAdopt) {
+            // Marking without adoption is only safe for a folder this panel just
+            // created. Stamping an EXISTING folder full of the user's own files
+            // would hand the recursive wipe a target it must never have, which is
+            // exactly what the marker exists to prevent. An empty folder has
+            // nothing to lose, so it can be marked freely.
+            var existing = root.getFiles();
+            if (existing === null) return JSON.stringify({ ok: false, marked: false, reason: 'cannot read root' });
+            if (existing.length > 0) {
+                return JSON.stringify({
+                    ok: false, marked: false, adopted: false,
+                    reason: 'folder is not empty, adoption required'
+                });
+            }
+        }
+        if (allowAdopt) {
+            // Containing Blitzkrieg content is NOT proof the folder is OURS to empty.
+            // A legacy install could have a hand-typed library path pointing at a
+            // working folder that holds the editor's own projects alongside the
+            // synced categories, and adopting that would hand the recursive wipe a
+            // target full of files we never downloaded. Require the folder to be
+            // NAMED as a Blitzkrieg library as well. Every path the panel has ever
+            // produced satisfies this: the "~/Blitzkrieg Library" default, the
+            // Browse suffix, and the Save-path normalization. Only a hand-typed
+            // shared folder fails, which is exactly the case we must refuse.
+            var leafName = '';
+            try { leafName = root.name ? safeDecodeURI(root.name) : ''; } catch (eLeaf) { leafName = ''; }
+            if (String(leafName).toLowerCase().indexOf('blitzkrieg library') === -1) {
+                return JSON.stringify({
+                    ok: false, marked: false, adopted: false,
+                    reason: 'folder is not named as a Blitzkrieg library'
+                });
+            }
+            // Look two levels down for a metadata.json. Bail out early - this runs
+            // on a library that can hold hundreds of folders.
+            var cats = root.getFiles();
+            if (cats) {
+                for (var c = 0; c < cats.length && !adopted; c++) {
+                    if (!(cats[c] instanceof Folder)) continue;
+                    var tpls = cats[c].getFiles();
+                    if (!tpls) continue;
+                    for (var t = 0; t < tpls.length && t < 40; t++) {
+                        if (!(tpls[t] instanceof Folder)) continue;
+                        var meta = new File(buildPath(tpls[t].fsName, 'metadata.json'));
+                        if (meta.exists) { adopted = true; break; }
+                    }
+                }
+            }
+            if (!adopted) {
+                return JSON.stringify({
+                    ok: false, marked: false, adopted: false,
+                    reason: 'no Blitzkrieg content found to adopt'
+                });
+            }
+        }
+
+        markerFile.encoding = 'UTF-8';
+        if (!markerFile.open('w')) return JSON.stringify({ ok: false, marked: false, reason: 'cannot open marker' });
+        markerFile.write('Blitzkrieg local library. Blitzkrieg may delete the contents of this folder.');
+        markerFile.close();
+        return JSON.stringify({ ok: true, marked: true, adopted: adopted });
+    } catch (e) { return JSON.stringify({ error: e + '' }); }
+}
+
 /** Create a directory and any missing parents. Returns JSON. */
 function blitzLocalMkdir(rawPath) {
     try {
@@ -4304,16 +4395,235 @@ function blitzLocalExists(rawPath) {
     } catch (e) { return JSON.stringify({ exists: false, size: 0 }); }
 }
 
-/** Delete a folder and its contents recursively. Returns JSON.
+/** Delete a folder and its contents recursively. Returns JSON {ok, remaining, notFound}.
  *  Caller (local-sync.js) MUST validate that rawPath stays inside the library
- *  root before calling - this is a recursive delete primitive. */
+ *  root before calling - this is a recursive delete primitive.
+ *
+ *  Folder.remove() only removes an EMPTY folder, so the old bare-remove() form
+ *  never deleted a real template folder. removeFolderRecursive is the primitive
+ *  the rest of this file uses. It swallows per-entry failures and returns nothing,
+ *  so we re-stat afterwards and report `remaining` - callers must gate any
+ *  "deleted" claim on remaining === 0, never on ok alone. */
 function blitzLocalRemoveDir(rawPath) {
     try {
+        if (!isValidPath(rawPath)) return JSON.stringify({ error: 'Invalid path' });
         var f = folderFromPath(rawPath);
-        if (f.exists) {
-            if (!f.remove()) return JSON.stringify({ error: 'Cannot delete: ' + rawPath });
+        if (!f.exists) return JSON.stringify({ ok: true, remaining: 0, notFound: true });
+        removeFolderRecursive(f);
+        // Re-stat through a FRESH Folder object; the old handle can cache existence.
+        var after = folderFromPath(rawPath);
+        if (!after.exists) return JSON.stringify({ ok: true, remaining: 0, notFound: false });
+        var left = after.getFiles();
+        if (left === null) {
+            // getFiles() returns null on macOS for a malformed Folder URI. That is
+            // UNREADABLE, not empty. Collapsing it to 0 would tell the caller the
+            // delete succeeded and let it drop the state entry, orphaning the bytes
+            // with nothing left that knows to look for them.
+            return JSON.stringify({
+                ok: false,
+                unreadable: true,
+                remaining: -1,
+                folderRemains: true,
+                notFound: false,
+                error: 'Could not read the folder after deleting'
+            });
         }
-        return JSON.stringify({ ok: true });
+        return JSON.stringify({
+            ok: left.length === 0,
+            remaining: left.length,
+            folderRemains: true,
+            notFound: false
+        });
+    } catch (e) { return JSON.stringify({ error: e + '' }); }
+}
+
+/**
+ * Structural refusal list for the library wipe. Returns a reason string when the
+ * path must NEVER be wiped, or '' when it is acceptable.
+ *
+ * This runs BEFORE any containment logic on purpose. Containment answers "is the
+ * child inside the root"; it says nothing about whether the ROOT is a sane thing
+ * to empty. An empty or half-built library path (local-sync builds paths by bare
+ * string concat) can resolve to the home folder or to '/', and a recursive delete
+ * there is unrecoverable.
+ *
+ * ES3: no Array.prototype.forEach / indexOf on arrays, no Array.isArray.
+ */
+function _blitzWipeRefusalReason(rawRootPath) {
+    if (!rawRootPath || typeof rawRootPath !== 'string') return 'Empty path';
+    var p = rawRootPath.replace(/\\/g, '/');
+    while (p.length > 1 && p.charAt(p.length - 1) === '/') p = p.substring(0, p.length - 1);
+    if (!p) return 'Empty path';
+    if (p === '/' || p === '~' || p === '.' || p === '..') return 'Refusing to wipe ' + p;
+    if (!isValidPath(rawRootPath)) return 'Invalid path';
+
+    var isWindowsPath = /^[A-Za-z]:/.test(p);
+
+    // Segment-count floor. A library root must be nested, never a volume root or a
+    // single top-level folder. macOS "/Users/x/Blitzkrieg Library" is 3 segments;
+    // Windows "C:/Blitz Library" is 2 (drive counts as one).
+    var segs = [];
+    var rawSegs = p.split('/');
+    for (var s = 0; s < rawSegs.length; s++) {
+        if (rawSegs[s] !== '') segs.push(rawSegs[s]);
+    }
+    var minSegs = isWindowsPath ? 2 : 3;
+    if (segs.length < minSegs) return 'Path is too close to the drive root: ' + p;
+    if (isWindowsPath && segs.length === 1) return 'Refusing to wipe a drive root';
+
+    // Never the well-known user folders themselves. Compare case-folded, matching
+    // _normalizeForRootCheck's platform behaviour.
+    var target = _normalizeForRootCheck(p);
+    var forbidden = [];
+    function _push(v) { if (v) forbidden.push(_normalizeForRootCheck(v)); }
+    try { _push(blitzGetHomeDir()); } catch (e1) {}
+    try { _push(Folder.myDocuments.fsName); } catch (e2) {}
+    try { _push(Folder.desktop.fsName); } catch (e3) {}
+    try { _push(Folder.userData.fsName); } catch (e4) {}
+    try { _push(Folder.system.fsName); } catch (e5) {}
+    try { _push(Folder.startup.fsName); } catch (e6) {}
+    try { _push(Folder.temp.fsName); } catch (e7) {}
+    for (var f = 0; f < forbidden.length; f++) {
+        if (forbidden[f] && target === forbidden[f]) return 'Refusing to wipe a system folder: ' + p;
+    }
+    return '';
+}
+
+/**
+ * Empty the Blitzkrieg local library: delete every CHILD of the library root,
+ * keeping the root folder itself. Returns JSON
+ * {ok, removed, remaining, rootExists, notFound, refused}.
+ *
+ * Deleting children rather than the root reclaims every byte while keeping the
+ * user's configured path valid (he never has to re-pick a folder), and means the
+ * containment check never needs allowExact - the one flag that would turn the
+ * guard into permission to delete the root itself.
+ *
+ * `remaining` is authoritative. removeFolderRecursive swallows per-entry errors,
+ * so a partial wipe is invisible without the re-stat.
+ */
+function blitzLocalWipeLibrary(rawRootPath) {
+    try {
+        var refusal = _blitzWipeRefusalReason(rawRootPath);
+        if (refusal) return JSON.stringify({ error: refusal, refused: true });
+
+        // Pass the RAW path. folderFromPath normalizes internally and
+        // normalizeFsPath is deliberately non-idempotent, so pre-normalizing here
+        // double-encodes and silently targets a folder that does not exist.
+        var root = folderFromPath(rawRootPath);
+        if (!root.exists) {
+            return JSON.stringify({ ok: true, removed: 0, remaining: 0, rootExists: false, notFound: true });
+        }
+
+        var rootFs = root.fsName;
+        // Re-check the RESOLVED path. A path can pass the string checks and still
+        // resolve somewhere else entirely through the normalize/fallback ladder.
+        var resolvedRefusal = _blitzWipeRefusalReason(rootFs);
+        if (resolvedRefusal) return JSON.stringify({ error: resolvedRefusal, refused: true });
+
+        // Ownership marker. The refusal list blocks the well-known system folders,
+        // but nothing stops a user typing an ordinary folder of his own into the
+        // library path field. Requiring a marker this panel wrote means the wipe can
+        // only ever empty a folder Blitzkrieg created, which is exactly what the
+        // confirm dialog promises the user.
+        var marker = new File(buildPath(rootFs, BLITZ_LIBRARY_MARKER));
+        if (!marker.exists) {
+            return JSON.stringify({
+                error: 'This folder is not a Blitzkrieg library, so nothing was deleted. Set the library folder again from the sidebar and retry.',
+                refused: true,
+                noMarker: true
+            });
+        }
+
+        // getFiles() returns null on macOS when the Folder URI is malformed.
+        var entries = root.getFiles();
+        if (!entries) {
+            return JSON.stringify({ error: 'Cannot read the library folder', rootExists: true });
+        }
+
+        var removed = 0;
+        var skipped = 0;
+        // Names we deliberately left alone. They must NOT count as "bytes we failed
+        // to delete" in the re-stat below, or the wipe reports ok:false forever and
+        // the UI tells the user to quit After Effects over a shortcut we chose to
+        // preserve.
+        // Keys are PREFIXED because a bare object is not a safe map in ES3: a file
+        // legitimately named "constructor", "toString", "valueOf", "hasOwnProperty"
+        // or "__proto__" would inherit a truthy value from Object.prototype and be
+        // silently treated as preserved, so a file we failed to delete would vanish
+        // from the remaining count and the wipe would report a false success.
+        var preserved = {};
+        preserved['k:' + BLITZ_LIBRARY_MARKER] = true;
+        for (var i = 0; i < entries.length; i++) {
+            var entry = entries[i];
+            var entryPath = '';
+            var entryName = '';
+            try { entryPath = entry.fsName; } catch (eName) { entryPath = ''; }
+            try { entryName = entry.name; } catch (eNm) { entryName = ''; }
+            // Never delete our own ownership marker. The wipe requires it to run, so
+            // deleting it here would make the SECOND wipe refuse with "not a
+            // Blitzkrieg library" on a library this panel plainly owns.
+            if (entryName === BLITZ_LIBRARY_MARKER) { continue; }
+            // allowExact = false: an entry that resolves to the root itself (a
+            // symlink loop, a '.' entry) is skipped, never deleted.
+            if (!entryPath || !_isPathInsideRoot(entryPath, rootFs, false)) {
+                skipped++; if (entryName) preserved['k:' + entryName] = true; continue;
+            }
+            // An alias/symlink's fsName is the LINK's path, which is always inside
+            // the root, so the containment check above passes while
+            // removeFolderRecursive would walk the RESOLVED target and delete files
+            // outside the library. Never follow a link: skip it entirely.
+            var isLink = false;
+            try { isLink = !!entry.alias; } catch (eAl) { isLink = false; }
+            if (isLink) {
+                skipped++; if (entryName) preserved['k:' + entryName] = true; continue;
+            }
+            try {
+                if (entry instanceof Folder) {
+                    removeFolderRecursive(entry);
+                } else {
+                    entry.remove();
+                }
+                removed++;
+            } catch (eRm) { skipped++; }
+        }
+
+        // Re-stat. The marker is ours and is expected to survive, so it does not
+        // count toward `remaining`.
+        var after = folderFromPath(rawRootPath);
+        if (!after.exists) {
+            return JSON.stringify({
+                ok: true, removed: removed, skipped: skipped,
+                remaining: 0, rootExists: false, notFound: false
+            });
+        }
+        var left = after.getFiles();
+        if (left === null) {
+            return JSON.stringify({
+                ok: false, unreadable: true, removed: removed, skipped: skipped,
+                remaining: -1, rootExists: true, notFound: false,
+                error: 'Could not read the library folder after deleting'
+            });
+        }
+        var remaining = 0;
+        for (var j = 0; j < left.length; j++) {
+            var leftName = '';
+            try { leftName = left[j].name; } catch (eLn) { leftName = ''; }
+            // preserved holds the marker plus anything we intentionally left alone
+            // (out-of-root entries, aliases). remaining must mean "we tried to delete
+            // this and could not", nothing else.
+            if (leftName && preserved['k:' + leftName]) continue;
+            remaining++;
+        }
+
+        return JSON.stringify({
+            ok: remaining === 0,
+            removed: removed,
+            skipped: skipped,
+            remaining: remaining,
+            rootExists: true,
+            notFound: false
+        });
     } catch (e) { return JSON.stringify({ error: e + '' }); }
 }
 

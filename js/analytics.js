@@ -296,7 +296,11 @@
         track('category_browse', { templateCategory: category });
     }
 
-    function trackSessionStart() {
+    // env (optional, from main.js): { panelVersion, aeVersion, platform }. Without
+    // it a session_start row carried geo only, so there was no way to tell which
+    // build or which After Effects a remote editor was running when he reported a
+    // problem. Same event type, three more metadata keys.
+    function trackSessionStart(env) {
         viewedComps = {};
         // Flush anything stranded from a previous session before we start adding
         // new events this session.
@@ -304,7 +308,20 @@
         if (_flushTimer) clearInterval(_flushTimer);
         _flushTimer = setInterval(_flushQueue, FLUSH_INTERVAL_MS);
         fetchGeoData(function(geo) {
-            track('session_start', { metadata: geo });
+            // Copy: geo is the module-level cache and must not be mutated.
+            var meta = {};
+            if (geo) {
+                for (var k in geo) {
+                    if (Object.prototype.hasOwnProperty.call(geo, k)) meta[k] = geo[k];
+                }
+            }
+            meta.panel_version = (env && env.panelVersion) ||
+                (typeof window !== 'undefined' && window.BLITZKRIEG_LOCAL_VERSION) || null;
+            meta.ae_version = (env && env.aeVersion) ||
+                (typeof window !== 'undefined' && window.__blitzAEVersion) || null;
+            meta.platform = (env && env.platform) ||
+                (typeof navigator !== 'undefined' && navigator.platform) || null;
+            track('session_start', { metadata: meta });
         });
     }
 

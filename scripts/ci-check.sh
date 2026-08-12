@@ -65,8 +65,12 @@ echo "== 5. banned modern APIs (Chromium 57/61 ceiling) in panel JS / CSS / HTML
 # loading=lazy (Chrome 76), content-visibility (85). aspect-ratio (88) is allowed
 # ONLY with an @supports fallback, so we do not hard-block it here.
 BANNED_MODERN='loading[[:space:]]*=[[:space:]]*["'"'"']?lazy|content-visibility[[:space:]]*:'
-for f in js/main.js js/auth.js js/cloud-library.js js/local-sync.js js/analytics.js js/telemetry.js index.html CSS/style.css; do
+# Iterate js/*.js rather than a hardcoded list: the old list was written before
+# js/local-reset.js existed and silently skipped it, which is how a new file gets
+# shipped unchecked. Sections 1, 4 and 6 already glob; this one now matches.
+for f in js/*.js index.html CSS/style.css; do
   [ -f "$f" ] || continue
+  is_vendored "$f" && continue
   if grep -nE "$BANNED_MODERN" "$f"; then note "banned modern API (loading=lazy / content-visibility) in $f (above)"; fi
 done
 
@@ -109,6 +113,43 @@ PY
 done
 # index.html is all user-facing markup; flag any occurrence.
 if [ -f index.html ] && grep -nE '(—|–|‘|’|“|”)' index.html; then note "em-dash/curly-quote in index.html (above)"; fi
+
+echo "== 7. OTA manifest is complete and every listed file is tracked by git =="
+# Two failures this catches, both silent and both already shipped once:
+#   a) a script index.html loads that is NOT in version.json files[] -> OTA pushes a
+#      new index.html around a FROZEN module. js/local-sync.js shipped that way from
+#      2026-05-07 until 2026-08-12, so editors ran a months-old mirror subsystem.
+#   b) a file listed in version.json files[] that git does not track -> the
+#      auto-version-bump workflow does readFileSync over that list and dies with
+#      ENOENT, so no bump, no tag, no release, and no visible error.
+if [ -f version.json ] && [ -f index.html ]; then
+  node -e '
+    const fs = require("fs");
+    const v = JSON.parse(fs.readFileSync("version.json", "utf8"));
+    const files = v.files || [];
+    // Vendored third-party bundles are intentionally excluded from OTA.
+    const vendored = ["js/CSInterface.js", "js/supabase.min.js"];
+    const html = fs.readFileSync("index.html", "utf8");
+    const loaded = [];
+    const re = /<script src="\.\/(js\/[^?"]+)/g;
+    let m; while ((m = re.exec(html)) !== null) loaded.push(m[1]);
+    let bad = 0;
+    for (const f of loaded) {
+      if (vendored.indexOf(f) !== -1) continue;
+      if (files.indexOf(f) === -1) { console.log("  loaded by index.html but missing from version.json files[]: " + f); bad = 1; }
+    }
+    for (const f of files) {
+      if (f !== "version.json" && !fs.existsSync(f)) { console.log("  listed in version.json files[] but not on disk: " + f); bad = 1; }
+    }
+    process.exit(bad);
+  ' || note "OTA manifest incomplete (above)"
+  for f in $(node -e 'const v=require("./version.json");console.log((v.files||[]).join(" "))'); do
+    if ! git ls-files --error-unmatch "$f" >/dev/null 2>&1; then
+      note "version.json lists an UNTRACKED file (git add it): $f"
+    fi
+  done
+  echo "  checked $(node -e 'const v=require("./version.json");console.log((v.files||[]).length)') manifest entries"
+fi
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then echo "CI GATE: PASS"; else echo "CI GATE: FAIL (block release)"; fi

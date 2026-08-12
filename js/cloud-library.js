@@ -468,7 +468,7 @@
     // falling through to the 5-30s slow path.
     async function fetchManifest() {
         try {
-            var res = await sb.storage.from(BUCKET).download(MANIFEST_KEY);
+            var res = await _downloadWithTimeout(MANIFEST_KEY);
             if (res.error || !res.data) return null;
             var text = await res.data.text();
             var manifest = JSON.parse(text);
@@ -1236,7 +1236,7 @@
             var entry = allFolderEntries[idx];
             if (!entry) return Promise.resolve();
             var metaPath = entry.categoryName + '/' + entry.folderName + '/metadata.json';
-            return sb.storage.from(BUCKET).download(metaPath).then(function (res) {
+            return _downloadWithTimeout(metaPath).then(function (res) {
                 if (res.error) {
                     _log('fetchAllMetadata: download failed for ' + metaPath + ': ' + (res.error.message || 'unknown'), 'warn');
                     metadataResults[idx] = { categoryName: entry.categoryName, folderName: entry.folderName, metadata: null };
@@ -1741,6 +1741,13 @@
     // skipped so one bad file never blocks the whole template from mirroring.
     // (Was 180s: a single phantom object stalled full-sync ~9 min per template.)
     var DOWNLOAD_TIMEOUT_MS = 90000;
+    // The .aep gets a MORE FORGIVING ceiling than footage. Every other file in a
+    // bundle is substitutable (AE relinks a placeholder), so killing it at 90s costs
+    // a placeholder; the .aep is the one file an import cannot proceed without, so
+    // killing a slow-but-progressing 200MB project file fails the whole import. Still
+    // a hard ceiling, so a stalled socket can never hang the panel forever - which is
+    // the entire point: before this, the .aep was the ONLY file with no bound at all.
+    var AEP_DOWNLOAD_TIMEOUT_MS = 300000;
     // Local-mirror footage size cap. A mirror exists for instant .aep import; a file
     // larger than this is heavy raw source (e.g. a 1.74GB "Raw Cam.mp4") that, buffered
     // whole in the CEP Chromium heap, hangs the download so the template never converges.
@@ -1748,7 +1755,20 @@
     // skipped from the mirror. 300MB comfortably keeps short footage loops while excluding
     // pathological multi-GB raw source. The comp still imports from its .aep.
     var MIRROR_MAX_FOOTAGE_BYTES = 300 * 1024 * 1024;
-    function _downloadWithTimeout(path) {
+    // Import-path footage cap. The import path had NO cap at all, so a single multi-GB
+    // raw source file was buffered whole in the CEP Chromium heap and the import hung
+    // with no error - the reported bug. Capping is right for import too: AE substitutes
+    // placeholder footage, so the comp still opens and the editor can relink from the
+    // cloud folder, whereas an uncapped read gives him nothing at all. The cap is higher
+    // than the mirror's because the mirror is unattended background convergence across
+    // the whole library, while an import is one deliberate action the editor is waiting
+    // on, and footage he is actively working with costs more to lose than a background
+    // mirror miss. Import-essential files (.aep / thumbnail / preview / metadata) are
+    // never skipped - see _isMirrorEssential in collectAllFiles.
+    var IMPORT_MAX_FOOTAGE_BYTES = 600 * 1024 * 1024;
+    // timeoutMs is optional; omit it for the default footage/asset bound.
+    function _downloadWithTimeout(path, timeoutMs) {
+        var ms = timeoutMs || DOWNLOAD_TIMEOUT_MS;
         var controller = null;
         try { if (typeof AbortController === 'function') controller = new AbortController(); } catch (e) { controller = null; }
         var opts = controller ? { signal: controller.signal } : undefined;
@@ -1756,8 +1776,8 @@
         var timeoutPromise = new Promise(function (_, reject) {
             timer = setTimeout(function () {
                 if (controller) { try { controller.abort(); } catch (e) {} }
-                reject(new Error('Download timed out after ' + DOWNLOAD_TIMEOUT_MS + 'ms: ' + path));
-            }, DOWNLOAD_TIMEOUT_MS);
+                reject(new Error('Download timed out after ' + ms + 'ms: ' + path));
+            }, ms);
         });
         var dlPromise = sb.storage.from(BUCKET).download(path, opts).then(function (res) {
             if (timer) { clearTimeout(timer); timer = null; }
@@ -1839,7 +1859,7 @@
     // templates so downloadTemplate can pull their files into the bundle.
     async function getTemplateDependencies(storagePath) {
         try {
-            var res = await sb.storage.from(BUCKET).download(storagePath + '/metadata.json');
+            var res = await _downloadWithTimeout(storagePath + '/metadata.json');
             if (res.error || !res.data) return [];
             var text = await res.data.text();
             if (!text) return [];
@@ -1903,6 +1923,41 @@
 
     // Download a template bundle for import/generation. The returned extraFiles
     // preserve collected footage/assets next to the AEP so AE can relink them.
+    //
+    // RETURN CONTRACT (main.js depends on this - do not change the shape without
+    // updating every caller):
+    //   {
+    //     blob:       Blob,     the .aep
+    //     fileName:   string,
+    //     storagePath:string,   full storage path of the chosen .aep
+    //     extraFiles: Array,    bundle assets, each {path, relativePath, blob, contentType}
+    //     skippedFootage:      Array, ALWAYS present, [] when nothing was skipped,
+    //                          NEVER undefined. Each entry:
+    //                            { path: string, name: string, bytes: number,
+    //                              reason: 'oversize' | 'failed' }
+    //     skippedFootageBytes: number, sum of entry.bytes, 0 when the array is empty
+    //   }
+    //
+    // WHY skippedFootage EXISTS, and why a caller MUST read it before it decides a
+    // template is broken: the import path caps footage at IMPORT_MAX_FOOTAGE_BYTES,
+    // so a healthy template holding one oversized source file comes back WITHOUT
+    // that file. The host import then reports missing footage. That is the PANEL's
+    // own choice, not a broken template. A caller that reads the host's missing
+    // footage as a genuine source break and marks the template terminally broken
+    // ("needs re-stash") is blaming the user for a file the panel declined to
+    // download, and no retry can ever clear it because the cap decides the same way
+    // every time. So: if the host reports missing footage and skippedFootage is
+    // non-empty, the missing sources are explained by this list - report them as
+    // "relink these files" and leave the template healthy and re-syncable.
+    //
+    // reason: 'oversize' means the file was over the import cap and was never
+    // requested. reason: 'failed' means the download was attempted and errored or
+    // timed out. Both mean "not in this bundle"; only 'oversize' is a deliberate
+    // panel decision.
+    //
+    // An empty skippedFootage does NOT prove the bundle is complete: when the
+    // storage listing itself fails, this falls back to an AEP-only bundle and no
+    // per-file record exists to report (see the listing catch below).
     async function downloadTemplate(storagePath) {
         var chosenAepPath = null;
         var aepBlob = null;
@@ -1915,12 +1970,21 @@
         // 15000ms" failure on the per-card Preview/Generate action - the .aep no
         // longer depends on the expensive recursive folder listing.
         try {
-            var fastResult = await sb.storage.from(BUCKET).download(fastPath);
+            var fastResult = await _downloadWithTimeout(fastPath, AEP_DOWNLOAD_TIMEOUT_MS);
             if (!fastResult.error && fastResult.data) {
                 chosenAepPath = fastPath;
                 aepBlob = fastResult.data;
+            } else if (fastResult.error) {
+                // A 403/RLS denial and "the .aep is not at the deterministic path"
+                // used to read identically here (both just fell through silently),
+                // so a permissions problem looked like a legacy folder layout.
+                _log('downloadTemplate: fast path .aep read failed for ' + fastPath + ': '
+                    + (fastResult.error.message || 'unknown') + ' - falling back to folder listing', 'warn');
             }
-        } catch (fastErr) { /* fall through to listing */ }
+        } catch (fastErr) {
+            _log('downloadTemplate: fast path .aep download threw for ' + fastPath + ': '
+                + (fastErr && fastErr.message || fastErr) + ' - falling back to folder listing', 'warn');
+        }
 
         // Collect the rest of the bundle (footage / linked assets). This is the slow
         // part. When we ALREADY have the .aep from the fast path, treat a list
@@ -1928,12 +1992,44 @@
         // placeholders for any un-fetched footage) instead of hard-failing the whole
         // operation. A longer 45s list window also absorbs transient backend slowness.
         var allFiles = [];
+        // skippedFootage is returned to the caller so the UI can name what is missing
+        // instead of the editor discovering offline footage inside AE with no clue why.
+        // See the return contract above: always an array, never undefined, and the
+        // caller uses it to tell "the panel skipped this" apart from "the template is
+        // genuinely broken".
+        var skippedFootage = [];
+        var skippedFootageBytes = 0;
+        var skippedLarge = [];
         try {
-            allFiles = await collectAllFiles(storagePath, { _timeoutMs: 45000 });
+            allFiles = await collectAllFiles(storagePath, {
+                _timeoutMs: 45000,
+                _skipLargerThan: IMPORT_MAX_FOOTAGE_BYTES,
+                _skippedLarge: skippedLarge
+            });
         } catch (listErr) {
             if (!chosenAepPath) throw listErr; // no .aep yet AND cannot list -> real failure
             _log('downloadTemplate: asset listing failed (' + (listErr && listErr.message || listErr) + '); proceeding with AEP-only bundle for ' + storagePath, 'warn');
             allFiles = [chosenAepPath];
+        }
+
+        if (skippedLarge.length > 0) {
+            var _skBytes = 0;
+            for (var sl = 0; sl < skippedLarge.length; sl++) {
+                var _skSize = typeof skippedLarge[sl].size === 'number' ? skippedLarge[sl].size : 0;
+                _skBytes += _skSize;
+                skippedFootage.push({
+                    path: skippedLarge[sl].path,
+                    name: String(skippedLarge[sl].path).split('/').pop(),
+                    bytes: _skSize,
+                    reason: 'oversize'
+                });
+            }
+            skippedFootageBytes += _skBytes;
+            _log('downloadTemplate: ' + storagePath + ' skipped ' + skippedLarge.length
+                + ' oversized footage file(s) (~' + Math.round(_skBytes / (1024 * 1024))
+                + 'MB, cap ' + Math.round(IMPORT_MAX_FOOTAGE_BYTES / (1024 * 1024))
+                + 'MB); the comp still imports from its .aep with placeholder footage. This is a'
+                + ' PANEL decision, not a broken template - do not mark it needs-re-stash', 'warn');
         }
 
         // If the fast path missed (legacy templates whose .aep is not at the
@@ -1969,7 +2065,7 @@
 
         // Download the .aep if the fast path did not already fetch it.
         if (!aepBlob) {
-            var downloadResult = await sb.storage.from(BUCKET).download(chosenAepPath);
+            var downloadResult = await _downloadWithTimeout(chosenAepPath, AEP_DOWNLOAD_TIMEOUT_MS);
             if (downloadResult.error || !downloadResult.data) {
                 throw new Error('Failed to download template: ' + (downloadResult.error && downloadResult.error.message || 'unknown'));
             }
@@ -1985,12 +2081,32 @@
 
         var extras = [];
         if (extraPaths.length > 0) {
+            // skipFailures: one dead or stalled footage object used to throw here and
+            // drop EVERY asset (extras = []), so a single bad file cost the editor all
+            // of his footage. Skip the bad one, keep the rest, and report what was lost.
+            var failedExtras = [];
             try {
-                extras = await downloadStorageFiles(extraPaths, storagePath, 6);
+                extras = await downloadStorageFiles(extraPaths, storagePath, 6, null, { skipFailures: true, skipped: failedExtras });
                 _log('downloadTemplate: downloaded AEP + ' + extras.length + ' bundle asset(s) for ' + storagePath, 'info');
             } catch (exErr) {
                 _log('downloadTemplate: bundle asset download failed (' + (exErr && exErr.message || exErr) + '); proceeding AEP-only for ' + storagePath, 'warn');
                 extras = [];
+                failedExtras = extraPaths.slice(0);
+            }
+            for (var fe = 0; fe < failedExtras.length; fe++) {
+                // bytes is 0 here on purpose: the download never completed, so we have
+                // no trustworthy size. 0 keeps skippedFootageBytes a sum of REAL bytes
+                // the panel chose not to fetch rather than a guess.
+                skippedFootage.push({
+                    path: failedExtras[fe],
+                    name: String(failedExtras[fe]).split('/').pop(),
+                    bytes: 0,
+                    reason: 'failed'
+                });
+            }
+            if (failedExtras.length > 0) {
+                _log('downloadTemplate: ' + storagePath + ' could not download ' + failedExtras.length
+                    + ' bundle asset(s); importing with placeholder footage for those', 'warn');
             }
         }
 
@@ -2005,11 +2121,24 @@
             depExtras = await fetchDependencyExtras(storagePath);
         } catch (depErr) { depExtras = []; }
 
+        if (skippedFootage.length > 0) {
+            _log('downloadTemplate: ' + storagePath + ' returning ' + skippedFootage.length
+                + ' skipped footage file(s), ' + skippedFootageBytes + ' bytes (~'
+                + Math.round(skippedFootageBytes / (1024 * 1024)) + 'MB) not in this bundle;'
+                + ' those sources import as placeholders and are relinkable from the cloud folder', 'warn');
+        }
+
         return {
             blob: aepBlob,
             fileName: chosenAepPath.split('/').pop(),
             storagePath: chosenAepPath,
-            extraFiles: depExtras.length > 0 ? extras.concat(depExtras) : extras
+            extraFiles: depExtras.length > 0 ? extras.concat(depExtras) : extras,
+            // [{path, name, bytes, reason}] - footage that is NOT in this bundle, so the
+            // caller can tell the editor exactly which files import as placeholders, and
+            // can tell a panel-side skip apart from a genuinely broken template. Always
+            // an array; [] when nothing was skipped. See the contract on downloadTemplate.
+            skippedFootage: skippedFootage,
+            skippedFootageBytes: skippedFootageBytes
         };
     }
 
@@ -2094,7 +2223,13 @@
             aepBlob: null,
             fileCount: downloaded.length,
             sizeBytes: totalSize,
-            skippedCount: skippedFiles.length
+            skippedCount: skippedFiles.length,
+            // Oversized footage this function deliberately did NOT download. local-sync
+            // persists it so a later import can tell "the panel chose to skip this"
+            // from "this template is genuinely missing its source". Without it,
+            // local-sync re-derives the list with a second recursive LIST for every
+            // template of every full sync, which roughly doubles the listing cost.
+            skippedLarge: skippedLarge
         };
     }
 
@@ -2119,7 +2254,7 @@
         }
         // metadata.json is optional for a thumbnail cache — best-effort, never fatal.
         try {
-            var metaRes = await sb.storage.from(BUCKET).download(storagePath + '/metadata.json');
+            var metaRes = await _downloadWithTimeout(storagePath + '/metadata.json');
             if (!metaRes.error && metaRes.data) {
                 files.push({
                     path: storagePath + '/metadata.json',
@@ -2204,7 +2339,10 @@
                 var myIdx = idx++;
                 var entry = filesToCopy[myIdx];
                 try {
-                    var dlRes = await sb.storage.from(BUCKET).download(entry.src);
+                    // Generous bound: a copy legitimately moves multi-hundred-MB raw
+                    // footage, and there is no size cap on this path. Still bounded so a
+                    // stalled socket cannot park an admin move/rename forever.
+                    var dlRes = await _downloadWithTimeout(entry.src, AEP_DOWNLOAD_TIMEOUT_MS);
                     if (dlRes.error || !dlRes.data) throw new Error('Download failed: ' + (dlRes.error && dlRes.error.message || 'unknown'));
                     var upRes = await sb.storage.from(BUCKET).upload(entry.dest, dlRes.data, {
                         contentType: contentTypeForPath(entry.dest),
@@ -2466,7 +2604,7 @@
             var trashPath = TRASH_PREFIX + '/' + items[i].name;
             var meta = null;
             try {
-                var d = await sb.storage.from(BUCKET).download(trashPath + '/_trashmeta.json');
+                var d = await _downloadWithTimeout(trashPath + '/_trashmeta.json');
                 if (!d.error && d.data) meta = JSON.parse(await d.data.text());
             } catch (metaErr) { /* fall back to folder name */ }
             var origPath = (meta && meta.originalPath) ? meta.originalPath : '';
@@ -2549,7 +2687,7 @@
     // Rename a template (re-upload metadata with new displayName)
     async function renameTemplate(storagePath, newName) {
         var metadataPath = storagePath + '/metadata.json';
-        var metaDownload = await sb.storage.from(BUCKET).download(metadataPath);
+        var metaDownload = await _downloadWithTimeout(metadataPath);
         if (metaDownload.error) {
             throw new Error('Failed to read metadata: ' + metaDownload.error.message);
         }
@@ -2594,7 +2732,7 @@
         if (!clean.length) throw new Error('at least one non-empty category required');
 
         var metadataPath = storagePath + '/metadata.json';
-        var metaDownload = await sb.storage.from(BUCKET).download(metadataPath);
+        var metaDownload = await _downloadWithTimeout(metadataPath);
         // A download error is NOT "no metadata" — Storage returns an error object for
         // transient 5xx/timeout/network blips too, and treating those as missing would
         // rebuild metadata from {} and clobber the entire file (displayName, dimensions,
