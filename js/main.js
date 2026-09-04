@@ -455,7 +455,9 @@
         'Transitions': 'Transitions'
     };
     function categoryDisplayName(storageName) {
-        return CATEGORY_DISPLAY_NAMES[storageName] || storageName;
+        // User-created categories are stored with dashes (sanitizeCategoryName);
+        // show them with the spaces the user typed instead of "Client-Intros".
+        return CATEGORY_DISPLAY_NAMES[storageName] || String(storageName || '').replace(/-/g, ' ');
     }
 
     // Convert a user-provided category name to a URL-safe storage path name.
@@ -464,6 +466,33 @@
     // 12 classification-plan categories (all use dashes).
     function sanitizeCategoryName(name) {
         return name.replace(/&/g, 'and').replace(/\s+/g, '-');
+    }
+
+    // Names the library treats specially: reserved storage prefixes plus the
+    // legacy editor folders fetchAllMetadata hides. A category with one of these
+    // names uploads fine and then never renders, so refuse it up front.
+    var RESERVED_CATEGORY_NAMES = { 'pending': 1, 'trash': 1, 'sign': 1, 'shaz': 1, 'john ventura': 1, 'usama ahmad': 1, 'dominate media': 1 };
+    // Supabase Storage object keys accept only this character set; anything else
+    // fails at upload with a raw "Invalid key" error after validateName passed.
+    var STORAGE_KEY_SAFE = /^[\w\/!\-.*'() &$@=;:+,?]*$/;
+    function validateCategoryName(name) {
+        var err = validateName(name);
+        if (err) return err;
+        var lower = name.toLowerCase().replace(/-/g, ' ');
+        if (RESERVED_CATEGORY_NAMES[lower] || name.charAt(0) === '_') return 'That name is reserved. Pick a different category name.';
+        if (!STORAGE_KEY_SAFE.test(sanitizeCategoryName(name))) return 'Category names can use letters, numbers, spaces and - _ . & ( ) only.';
+        return null;
+    }
+    // Resolve a typed name to the existing category when only case or spacing
+    // differs. Storage is case-sensitive, so "podcasts" next to "Podcasts" would
+    // silently become two folders.
+    function resolveCategoryName(rawName) {
+        var wanted = sanitizeCategoryName(rawName);
+        var cats = getUniqueCategories();
+        for (var i = 0; i < cats.length; i++) {
+            if (cats[i].toLowerCase() === wanted.toLowerCase()) return cats[i];
+        }
+        return wanted;
     }
 
     function getUniqueCategories() {
@@ -481,6 +510,16 @@
                 var c = list[li];
                 if (c && !seen[c]) { seen[c] = 1; out.push(c); }
             }
+        }
+        // Real category folders from the bucket root, including EMPTY ones (a
+        // just-created category holds only its placeholder marker and has no
+        // template to contribute above). Without this the sidebar, the add-comp
+        // picker and the move/transfer pickers all hid a category until its
+        // first template landed, which read as "I can't add categories".
+        var known = (window.cloudLibrary && window.cloudLibrary.getKnownCategories) ? window.cloudLibrary.getKnownCategories() : [];
+        for (var ki = 0; ki < known.length; ki++) {
+            var kc = known[ki];
+            if (kc && !seen[kc]) { seen[kc] = 1; out.push(kc); }
         }
         out.sort();
         _cachedCategoryList = out;
@@ -1955,7 +1994,7 @@
                 showToast('Category name cannot be empty.', true);
                 return;
             }
-            var nameErr = validateName(rawName);
+            var nameErr = validateCategoryName(rawName);
             if (nameErr) {
                 showToast(nameErr, true);
                 return;
@@ -1963,7 +2002,9 @@
             var name = sanitizeCategoryName(rawName);
             // Check if category already exists — do this BEFORE setting
             // _running so a duplicate name doesn't soft-lock the form.
-            var existing = allComps.some(function(c) { return c.category.toLowerCase() === name.toLowerCase(); });
+            // getUniqueCategories covers multi-category tags AND empty categories,
+            // not just each template's home folder.
+            var existing = getUniqueCategories().some(function(c) { return c.toLowerCase() === name.toLowerCase(); });
             if (existing) {
                 showToast('Category "' + rawName + '" already exists.', true);
                 return;
@@ -1995,7 +2036,13 @@
                 }
                 form.style.display = 'none';
                 toggleBtn.style.display = '';
-                showToast('Category "' + name + '" created!');
+                showToast('Category "' + categoryDisplayName(name) + '" created!');
+                // Render it NOW (empty, count 0) and land the user in it; the
+                // reload below re-lists storage and keeps it via the root listing.
+                window.cloudLibrary.addKnownCategory(name);
+                _invalidateCategoryCache();
+                activeCategory = name;
+                renderUI();
                 window.cloudLibrary.invalidateCache();
                 loadLibrary();
             }).catch(function(err) {
@@ -3221,8 +3268,13 @@
             return matchesCategory && matchesSearch && matchesSubmitter;
         }));
         if (filteredComps.length === 0) {
+            var _isEmptyRealCat = !searchTerm && submitterFilter === 'all' &&
+                activeCategory !== 'All' && activeCategory !== 'Favorites' && activeCategory !== 'Recent' &&
+                activeCategory.indexOf('__') !== 0;
             if (allComps.length === 0) {
                 showPlaceholder("No templates in the cloud library yet.");
+            } else if (_isEmptyRealCat) {
+                showPlaceholder('"' + categoryDisplayName(activeCategory) + '" is empty. Add a comp to it, or move templates here.');
             } else {
                 showPlaceholder("No comps found. Try a different search or category.");
             }
@@ -3958,7 +4010,7 @@
             showToast(selected === ADD_NEW_CATEGORY_VALUE ? 'Type a name for the new category.' : 'Please select a category.', true);
             return;
         }
-        var nameErr = validateName(rawCategory);
+        var nameErr = validateCategoryName(rawCategory);
         if (nameErr) {
             showToast(nameErr, true);
             return;
@@ -3982,7 +4034,7 @@
 
         // Store under URL-safe name so new categories follow the same convention
         // as the 12 classification-plan categories (no &, dashes for spaces).
-        var categoryName = sanitizeCategoryName(rawCategory);
+        var categoryName = resolveCategoryName(rawCategory);
 
         addCompModal.style.display = 'none';
         setStashInProgress(true, 'stash');
@@ -5836,13 +5888,27 @@
             showToast('Please enter a new name.', true);
             return;
         }
-        var catRenameErr = validateName(newName);
+        var catRenameErr = validateCategoryName(newName);
         if (catRenameErr) {
             showToast(catRenameErr, true);
             return;
         }
 
         var safeNewName = sanitizeCategoryName(newName);
+        if (safeNewName === info.category) {
+            renameCategoryModal.style.display = 'none';
+            currentCategoryRenameInfo = null;
+            return;
+        }
+        // Renaming onto an existing name would silently merge two folders (and
+        // partially fail on any template folder-name collision). Refuse it.
+        var renameClash = getUniqueCategories().some(function(c) {
+            return c !== info.category && c.toLowerCase() === safeNewName.toLowerCase();
+        });
+        if (renameClash) {
+            showToast('A category named "' + categoryDisplayName(safeNewName) + '" already exists.', true);
+            return;
+        }
 
         renameCategoryModal.style.display = 'none';
         showSpinner();
@@ -5975,8 +6041,12 @@
             var promise;
             if (selectedAction === 'transfer' && transferTarget && info.compCount > 0) {
                 // Transfer all templates to target category, then delete the empty category
+                // (deleteCategory on the now-empty folder removes its placeholder marker;
+                // without that the old name lingered as an empty ghost category).
                 showToast('Transferring templates to "' + transferTarget + '"...');
-                promise = window.cloudLibrary.moveAllTemplates(info.category, transferTarget);
+                promise = window.cloudLibrary.moveAllTemplates(info.category, transferTarget).then(function() {
+                    return window.cloudLibrary.deleteCategory(info.category);
+                });
             } else {
                 // Permanent delete of everything in the category
                 promise = window.cloudLibrary.deleteCategory(info.category);
@@ -5996,6 +6066,7 @@
                 // Remove deleted category comps from local state immediately
                 // so modals (add comp, move, etc.) don't show stale categories
                 allComps = allComps.filter(function(c) { return c.category !== info.category; });
+                if (window.cloudLibrary.removeKnownCategory) window.cloudLibrary.removeKnownCategory(info.category);
                 _invalidateCategoryCache();
                 renderUI();
                 loadLibrary();
@@ -6145,9 +6216,9 @@
         // Optional new category typed in.
         var rawNew = newInput ? newInput.value.trim() : '';
         if (rawNew) {
-            var nameErr = validateName(rawNew);
+            var nameErr = validateCategoryName(rawNew);
             if (nameErr) { showToast(nameErr, true); return; }
-            var newCat = sanitizeCategoryName(rawNew);
+            var newCat = resolveCategoryName(rawNew);
             if (newCat && checked.indexOf(newCat) === -1) checked.push(newCat);
         }
         if (!checked.length) { showToast('Pick at least one category.', true); return; }
@@ -6206,14 +6277,14 @@
         var existingCategory = moveToCategorySelect.value;
 
         if (rawNewCategory) {
-            var moveNameErr = validateName(rawNewCategory);
+            var moveNameErr = validateCategoryName(rawNewCategory);
             if (moveNameErr) {
                 showToast(moveNameErr, true);
                 return;
             }
         }
 
-        var targetCategory = rawNewCategory ? sanitizeCategoryName(rawNewCategory) : existingCategory;
+        var targetCategory = rawNewCategory ? resolveCategoryName(rawNewCategory) : existingCategory;
 
         if (!targetCategory) {
             showToast('Please select or create a category.', true);

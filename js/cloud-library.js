@@ -348,6 +348,40 @@
     // download is cheap and prevents editors from seeing a visibly partial grid.
     var CACHE_UNDERCOUNT_RESCUE_THRESHOLD = 200;
 
+    // Category folders known to exist in the bucket root (hidden legacy names
+    // excluded), INCLUDING ones that hold nothing but a .emptyFolderPlaceholder.
+    // The UI used to derive the sidebar purely from loaded templates, so a
+    // freshly created (still empty) category never rendered and "Create" looked
+    // broken. Populated by the slow-path root listing, persisted in the local
+    // cache + cloud manifest so every load tier can render empty categories.
+    var _knownCategories = null;
+    function _adoptCategories(src) {
+        if (src && Array.isArray(src.categories)) _knownCategories = src.categories.slice();
+    }
+    function getKnownCategories() {
+        return (_knownCategories || []).slice();
+    }
+    function addKnownCategory(name) {
+        if (!name) return;
+        if (!_knownCategories) _knownCategories = [];
+        for (var i = 0; i < _knownCategories.length; i++) {
+            if (_knownCategories[i].toLowerCase() === name.toLowerCase()) return;
+        }
+        _knownCategories.push(name);
+    }
+    function removeKnownCategory(name) {
+        if (!name || !_knownCategories) return;
+        _knownCategories = _knownCategories.filter(function (c) { return c.toLowerCase() !== name.toLowerCase(); });
+    }
+
+    // Timestamp of this panel's last storage mutation. invalidateManifest() only
+    // deletes the cloud manifest after a 1.5s debounce, but callers reload the
+    // library immediately, so the reload read the manifest that was about to be
+    // deleted and rendered the PRE-mutation list (new comp / new category
+    // missing until the next refresh). Any manifest published before this
+    // timestamp is treated as absent so the post-mutation reload re-lists storage.
+    var _manifestDirtySince = 0;
+
     // Per-attempt list timeout — adaptive. 8s was too aggressive for slow
     // networks (regional editors on high-latency links saw EVERY category
     // time out at exactly 8000ms, manifest never refreshed, new uploads
@@ -489,6 +523,10 @@
                 _log('fetchManifest: manifest version ' + (manifest.version || 1) + ' < supported ' + MANIFEST_VERSION + '; ignoring, slow path will rebuild + republish', 'warn');
                 return null;
             }
+            if (_manifestDirtySince && (manifest.ts || 0) < _manifestDirtySince) {
+                _log('fetchManifest: manifest predates this panel\'s last mutation (' + Math.round((_manifestDirtySince - (manifest.ts || 0)) / 1000) + 's older); ignoring, re-listing storage', 'info');
+                return null;
+            }
             var age = Date.now() - (manifest.ts || 0);
             manifest._age = age;
             manifest._stale = age > MANIFEST_TTL_MS;
@@ -537,7 +575,8 @@
                 version: MANIFEST_VERSION,
                 ts: Date.now(),
                 folders: cleanResults,
-                archives: archives || []
+                archives: archives || [],
+                categories: _knownCategories || []
             };
             var blob = new Blob([JSON.stringify(manifest)], { type: 'application/json' });
             sb.storage.from(BUCKET).upload(MANIFEST_KEY, blob, {
@@ -578,7 +617,12 @@
         for (var i = 0; i < ka.length; i++) { if (!b[ka[i]]) return true; }
         return false;
     }
-    function _maybeNotifyChange(staleFolders, freshFolders) {
+    function _nameSet(list) {
+        var o = {};
+        for (var i = 0; i < (list || []).length; i++) o[list[i]] = 1;
+        return o;
+    }
+    function _maybeNotifyChange(staleFolders, freshFolders, staleCategories) {
         // Backwards-compatible: callers may still pass plain numbers (legacy)
         // but the new contract is two folder arrays so we can compare sets.
         var oldCount, newCount, changed;
@@ -590,6 +634,11 @@
             newCount = (freshFolders || []).length;
             changed = _setsDiffer(_pathSet(staleFolders), _pathSet(freshFolders));
         }
+        // A category that appeared or vanished with no template change (another
+        // editor created or deleted an empty one) is invisible to the path diff.
+        if (!changed && staleCategories) {
+            changed = _setsDiffer(_nameSet(staleCategories), _nameSet(_knownCategories || []));
+        }
         if (!changed) return;
         _log('library changed: ' + oldCount + ' -> ' + newCount + ' (set differs), notifying UI', 'info');
         _dispatchCustom('blitzkrieg-library-changed', { oldCount: oldCount, newCount: newCount });
@@ -599,6 +648,7 @@
     // bulk move) only trigger one delete+rebuild cycle.
     var _manifestInvalidateTimer = null;
     function invalidateManifest() {
+        _manifestDirtySince = Date.now();
         if (_manifestInvalidateTimer) clearTimeout(_manifestInvalidateTimer);
         _manifestInvalidateTimer = setTimeout(function () {
             _manifestInvalidateTimer = null;
@@ -648,6 +698,7 @@
         var payload;
         try {
             var obj = { _v: CACHE_VERSION, ts: Date.now(), folders: metadataResults };
+            if (_knownCategories) obj.categories = _knownCategories.slice();
             if (opts.partialUntilTs) obj.partialUntilTs = opts.partialUntilTs;
             if (opts.failedCategories) obj.failedCategories = opts.failedCategories;
             payload = JSON.stringify(obj);
@@ -1148,6 +1199,9 @@
             return true;
         });
         _log('fetchAllMetadata: ' + categories.length + ' categories found: [' + categories.map(function(c) { return c.name; }).join(', ') + ']', 'info');
+        // Storage truth for the sidebar: every real category folder, even one that
+        // is still empty (placeholder only). Flows into the cache + manifest.
+        _knownCategories = categories.map(function(c) { return c.name; });
 
         // Detect RAR/ZIP archives at root level. Use indexOf-based suffix check
         // because String.prototype.endsWith is ES6 — CEP 8/9 (AE 2018-2019) does
@@ -1433,6 +1487,7 @@
                         rescueManifest.folders.length > cache.folders.length) {
                         _log('listTemplates: cache rescue — local cache has ' + cache.folders.length +
                              ' entries, manifest has ' + rescueManifest.folders.length + '; using manifest before render', 'warn');
+                        _adoptCategories(rescueManifest);
                         setCachedMetadata(rescueManifest.folders);
                         if (rescueManifest.archives) listTemplates._archives = rescueManifest.archives;
                         var rescuedComps = await buildCompsFromMetadata(rescueManifest.folders);
@@ -1452,6 +1507,7 @@
             }
 
             // FAST PATH: Use cached metadata. Media URLs are signed lazily by the UI.
+            _adoptCategories(cache);
             var ageMs = Date.now() - (cache.ts || 0);
             var partialUntilFresh = cache.partialUntilTs && Date.now() < cache.partialUntilTs;
             _log('listTemplates: FAST PATH — using cached metadata (' + cache.folders.length + ' entries, age: ' + Math.round(ageMs / 1000) + 's' + (partialUntilFresh ? ', partial-grace ' + Math.round((cache.partialUntilTs - Date.now()) / 1000) + 's' : '') + ')', 'info');
@@ -1467,6 +1523,7 @@
             // without having to reload the panel.
             var BACKGROUND_REFRESH_TTL = 60 * 1000;
             var staleFolders = cache.folders;
+            var staleCats = getKnownCategories();
 
             // If the local cache contains null-metadata entries (poisoned by a
             // prior transient failure), force a refresh regardless of TTL —
@@ -1490,19 +1547,33 @@
             // — last-write-wins on the cache, redundant network.
             if ((ageMs >= BACKGROUND_REFRESH_TTL || hasNulls) && !partialUntilFresh && !_bgRefreshInFlight) {
                 _bgRefreshInFlight = true;
+                // A refresh that started BEFORE a mutation carries a pre-mutation
+                // snapshot; writing it would clobber the post-mutation cache and
+                // republish a manifest missing the new comp/category.
+                var _bgStartedAt = Date.now();
+                var _bgIsStale = function (stage) {
+                    if (_manifestDirtySince > _bgStartedAt) {
+                        _log('listTemplates: background refresh (' + stage + ') discarded: a mutation happened while it ran', 'info');
+                        return true;
+                    }
+                    return false;
+                };
                 // Prefer the cloud manifest for the refresh too — it's still 1 req
                 // vs hundreds. Fall through to fetchAllMetadata if manifest is missing.
                 fetchManifest().then(function (manifest) {
+                    if (_bgIsStale('manifest')) return null;
                     if (manifest && manifest.folders && !manifest._stale && !hasNulls) {
+                        _adoptCategories(manifest);
                         setCachedMetadata(manifest.folders);
                         if (manifest.archives) listTemplates._archives = manifest.archives;
                         _log('listTemplates: background manifest refresh done (' + manifest.folders.length + ' entries)', 'info');
-                        _maybeNotifyChange(staleFolders, manifest.folders);
+                        _maybeNotifyChange(staleFolders, manifest.folders, staleCats);
                         return null;
                     }
                     // Either no manifest, manifest is stale, or our local cache
                     // had nulls — re-fetch metadata directly to get the latest.
                     return fetchAllMetadata().then(function (freshMeta) {
+                        if (_bgIsStale('storage')) return;
                         if (freshMeta && freshMeta._failedCategories && freshMeta._failedCategories.length > 0) {
                             // PARTIAL fetch: merge fresh non-failed with stale failed
                             // entries, write back with a partial-grace marker so
@@ -1513,13 +1584,13 @@
                                 failedCategories: freshMeta._failedCategories.slice()
                             });
                             _log('listTemplates: background refresh partial — kept ' + merged.length + ' cached entries, failed cats: [' + freshMeta._failedCategories.join(', ') + ']. Manifest left untouched; retry backed off for ' + Math.round(PARTIAL_REFRESH_BACKOFF_MS / 60000) + 'm.', 'warn');
-                            _maybeNotifyChange(staleFolders, merged);
+                            _maybeNotifyChange(staleFolders, merged, staleCats);
                             return;
                         }
                         setCachedMetadata(freshMeta);
                         uploadManifest(freshMeta, listTemplates._archives || []);
                         _log('listTemplates: background full refresh done (' + freshMeta.length + ' entries)', 'info');
-                        _maybeNotifyChange(staleFolders, freshMeta);
+                        _maybeNotifyChange(staleFolders, freshMeta, staleCats);
                     });
                 }).catch(function (err) {
                     _log('listTemplates: background refresh failed: ' + (err && err.message || err), 'warn');
@@ -1547,6 +1618,8 @@
         if (manifest && manifest.folders && manifest.folders.length > 0) {
             var label = manifest._stale ? 'MANIFEST PATH (stale-while-revalidate)' : 'MANIFEST PATH';
             _log('listTemplates: ' + label + ' — ' + manifest.folders.length + ' entries in ' + (Date.now() - t0) + 'ms', 'success');
+            _adoptCategories(manifest);
+            var staleCats2 = getKnownCategories();
             setCachedMetadata(manifest.folders);
             if (manifest.archives) listTemplates._archives = manifest.archives;
             var mComps = await buildCompsFromMetadata(manifest.folders);
@@ -1559,7 +1632,12 @@
             // any other in-flight refresh to avoid duplicate slow-path scans.
             if (manifest._stale && !_bgRefreshInFlight) {
                 _bgRefreshInFlight = true;
+                var _staleRefreshStartedAt = Date.now();
                 fetchAllMetadata().then(function (freshMeta) {
+                    if (_manifestDirtySince > _staleRefreshStartedAt) {
+                        _log('listTemplates: stale-manifest background refresh discarded: a mutation happened while it ran', 'info');
+                        return;
+                    }
                     if (freshMeta && freshMeta._failedCategories && freshMeta._failedCategories.length > 0) {
                         setCachedMetadata(manifest.folders, {
                             partialUntilTs: Date.now() + PARTIAL_REFRESH_BACKOFF_MS,
@@ -1571,7 +1649,7 @@
                     setCachedMetadata(freshMeta);
                     uploadManifest(freshMeta, listTemplates._archives || []);
                     _log('listTemplates: stale-manifest background refresh done (' + freshMeta.length + ' entries)', 'info');
-                    _maybeNotifyChange(manifest.folders, freshMeta);
+                    _maybeNotifyChange(manifest.folders, freshMeta, staleCats2);
                 }).catch(function (err) {
                     _log('listTemplates: stale-manifest background refresh failed: ' + (err && err.message || err), 'warn');
                 }).then(function () {
@@ -1610,6 +1688,11 @@
                 visibleCount: cleanResults.length,
                 freshCount: cleanResults.length
             });
+        } else if (_manifestDirtySince > t0) {
+            // A mutation landed while this scan ran: the snapshot is already
+            // behind. Render it, but do not persist or publish it; the reload the
+            // mutation queued (pendingLibraryReload) re-scans right after this.
+            _log('listTemplates: SLOW PATH result predates a mutation, not cached or published', 'info');
         } else {
             setCachedMetadata(metadataResults);
             uploadManifest(metadataResults, listTemplates._archives || []);
@@ -2786,9 +2869,50 @@
 
         if (failures.length > 0) {
             _log('renameCategory: ' + failures.length + '/' + allFiles.length + ' moves failed — first: ' + failures[0].path + ': ' + failures[0].error, 'warn');
+            // Some files DID move: drop the local cache so the next load shows the
+            // real half-moved state instead of the pre-rename snapshot.
+            invalidateCache();
             throw new Error('Failed to move ' + failures[0].path + ': ' + failures[0].error);
         }
+        // collectAllFiles skips the folder marker, so without this the old name
+        // survives as an empty ghost category (placeholder only). A move is a
+        // storage UPDATE, which every blitzkrieg_access user may do.
+        await _movePlaceholder(oldCategoryName, newCategoryName);
+        removeKnownCategory(oldCategoryName);
+        addKnownCategory(newCategoryName);
         invalidateCache();
+    }
+
+    var PLACEHOLDER_NAME = '.emptyFolderPlaceholder';
+    // Best-effort: the marker only exists for categories created in-panel (or via
+    // the Supabase dashboard). "Not found" is the normal case for legacy folders.
+    async function _movePlaceholder(fromCategory, toCategory) {
+        try {
+            var r = await sb.storage.from(BUCKET).move(fromCategory + '/' + PLACEHOLDER_NAME, toCategory + '/' + PLACEHOLDER_NAME);
+            if (r.error) {
+                if (/not found/i.test(r.error.message || '')) return;
+                // Target already has its own marker (rename-merge into an existing
+                // category): drop the source marker instead so no ghost remains.
+                var rm = await sb.storage.from(BUCKET).remove([fromCategory + '/' + PLACEHOLDER_NAME]);
+                if (rm.error) _log('_movePlaceholder: ' + fromCategory + ' marker left behind: ' + rm.error.message, 'warn');
+            }
+        } catch (e) {
+            _log('_movePlaceholder: ' + (e && e.message || e), 'warn');
+        }
+    }
+    // Admin-only (storage DELETE policy). Returns true when the marker is gone.
+    async function _removePlaceholder(categoryName) {
+        try {
+            var r = await sb.storage.from(BUCKET).remove([categoryName + '/' + PLACEHOLDER_NAME]);
+            if (r.error) {
+                _log('_removePlaceholder: ' + categoryName + ': ' + r.error.message, 'warn');
+                return false;
+            }
+            return true;
+        } catch (e) {
+            _log('_removePlaceholder: ' + (e && e.message || e), 'warn');
+            return false;
+        }
     }
 
     // SOFT-delete an entire category (admin-only). Like deleteTemplate, moves the
@@ -2797,7 +2921,14 @@
     // keeps its internal structure under trash/<stamp>_<category>/.
     async function deleteCategory(categoryName) {
         var allFiles = await collectAllFiles(categoryName);
-        if (allFiles.length === 0) { invalidateCache(); return; }
+        if (allFiles.length === 0) {
+            // Empty category: the folder IS its placeholder marker. Removing it is
+            // what makes the category disappear from the root listing.
+            await _removePlaceholder(categoryName);
+            removeKnownCategory(categoryName);
+            invalidateCache();
+            return;
+        }
 
         var stamp = Date.now();
         var trashBase = TRASH_PREFIX + '/' + stamp + '_' + (_trashSeq++) + '_' + categoryName;
@@ -2818,6 +2949,8 @@
         } catch (metaErr) {
             _log('deleteCategory: trashmeta write failed: ' + (metaErr && metaErr.message || metaErr), 'warn');
         }
+        await _removePlaceholder(categoryName);
+        removeKnownCategory(categoryName);
         invalidateCache();
     }
 
@@ -2849,6 +2982,7 @@
 
         if (failures.length > 0) {
             _log('moveAllTemplates: ' + failures.length + '/' + allFiles.length + ' moves failed — first: ' + failures[0].path + ': ' + failures[0].error, 'warn');
+            invalidateCache();
             throw new Error('Failed to move ' + failures[0].path + ': ' + failures[0].error);
         }
         invalidateCache();
@@ -3079,6 +3213,9 @@
         moveAllTemplates: moveAllTemplates,
         getArchives: getArchives,
         getArchiveDownloadUrl: getArchiveDownloadUrl,
+        getKnownCategories: getKnownCategories,
+        addKnownCategory: addKnownCategory,
+        removeKnownCategory: removeKnownCategory,
         invalidateCache: invalidateCache,
         clearLocalCache: clearLocalCache,
         invalidateCacheForPath: invalidateCacheForPath,
