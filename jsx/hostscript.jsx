@@ -1112,7 +1112,171 @@ function resolveTargetComp() {
     return null;
 }
 
-function stashSelectedComp(libraryPath, categoryName) {
+/**
+ * Basename of a source File for user-facing text and for matching at import.
+ * displayName is the decoded name (File.name is URI-encoded on macOS paths).
+ */
+function _stashFileBasename(file) {
+    var nm = '';
+    try { nm = file.displayName || ''; } catch (dnErr) { nm = ''; }
+    if (!nm) { try { nm = file.name || ''; } catch (fnErr) { nm = ''; } }
+    return String(nm);
+}
+
+/**
+ * Confirmed OS sizes keyed by fsName, shared by estimateStashFootprint (Add
+ * modal open) and stashSelectedComp (Add Template) so each raw clip is read
+ * through the OS once per submit, not once per pass. Only confirmed OS re-reads
+ * land here: a non-negative File.length is free and never cached, and -1 is
+ * never cached so a later read can still succeed. Cleared when the modal-open
+ * estimate starts, so one submit never reads a prior one's sizes.
+ */
+var _sourceFileSizeCache = {};
+
+/**
+ * True byte count of a file, or -1 when it cannot be determined.
+ * File.length is a 32-bit signed value: it reads -1 for any file over 2 GB (the
+ * raw footage the per-file cap exists for) AND on some macOS network mounts for
+ * files of any size. Those two must never be confused, so a negative length is
+ * re-read through the OS (stat on macOS, for %~z on Windows), through the
+ * per-submit cache. Callers treat a file as over the cap only on a confirmed
+ * size; -1 means unknown, copy as before.
+ */
+function _sourceFileSizeBytes(file) {
+    // A symlinked or aliased source reports the link's own few bytes, not the
+    // clip, from both File.length and stat. Size the target instead.
+    try { if (file.alias) { var resolved = file.resolve(); if (resolved) file = resolved; } } catch (aliasErr) {}
+    var len = -1;
+    try { len = Number(file.length); } catch (lenErr) { len = -1; }
+    if (!isNaN(len) && len >= 0) return len;
+    var p = '';
+    try { p = String(file.fsName || ''); } catch (pErr) { p = ''; }
+    if (!p) return -1;
+    if (typeof _sourceFileSizeCache[p] === 'number') return _sourceFileSizeCache[p];
+    var sizes = _osFileSizes([p]);
+    if (sizes[0] >= 0) _sourceFileSizeCache[p] = sizes[0];
+    return sizes[0];
+}
+
+/**
+ * Sizes for a list of fsName paths through the OS, one entry per path in the
+ * same order, -1 where the OS could not say. On Windows this is ONE cmd.exe call
+ * per chunk of paths: callSystem flashes a console window and blocks AE's UI
+ * thread per call, so a per-file call on a 20-clip comp meant 20 flashes per
+ * pass. Each path gets its own for-loop so a missing file prints a non-numeric
+ * line instead of shifting the rest. macOS stat is silent and fast, one per path.
+ */
+function _osFileSizes(paths) {
+    var sizes = [];
+    var pi;
+    for (pi = 0; pi < paths.length; pi++) sizes.push(-1);
+    if (!paths.length) return sizes;
+    try {
+        if (typeof system === 'undefined' || !system.callSystem) return sizes;
+        var isWin = ($.os && $.os.indexOf('Windows') !== -1);
+        if (isWin) {
+            var WIN_CHUNK = 20;
+            for (var start = 0; start < paths.length; start += WIN_CHUNK) {
+                var parts = [];
+                for (pi = start; pi < paths.length && pi < start + WIN_CHUNK; pi++) {
+                    parts.push('(for %I in ("' + paths[pi] + '") do @echo %~zI)');
+                }
+                var out = '';
+                try { out = system.callSystem('cmd.exe /c ' + parts.join(' & ')); } catch (winErr) { out = ''; }
+                var lines = String(out || '').replace(/\r/g, '').split('\n');
+                var cleaned = [];
+                for (var li = 0; li < lines.length; li++) {
+                    var ln = lines[li].replace(/^\s+|\s+$/g, '');
+                    if (ln) cleaned.push(ln);
+                }
+                // One line per path, in order; anything else leaves the chunk at -1.
+                if (cleaned.length !== parts.length) continue;
+                for (var ci = 0; ci < cleaned.length; ci++) {
+                    if (/^\d+$/.test(cleaned[ci])) {
+                        var wn = parseInt(cleaned[ci], 10);
+                        if (!isNaN(wn) && wn >= 0) sizes[start + ci] = wn;
+                    }
+                }
+            }
+        } else {
+            for (pi = 0; pi < paths.length; pi++) {
+                var mo = '';
+                try { mo = system.callSystem("/usr/bin/stat -L -f %z '" + paths[pi].replace(/'/g, "'\\''") + "'"); } catch (macErr) { mo = ''; }
+                var mlines = String(mo || '').split('\n');
+                var last = '';
+                for (var mi = mlines.length - 1; mi >= 0; mi--) {
+                    last = mlines[mi].replace(/^\s+|\s+$/g, '');
+                    if (last) break;
+                }
+                if (/^\d+$/.test(last)) {
+                    var mn = parseInt(last, 10);
+                    if (!isNaN(mn) && mn >= 0) sizes[pi] = mn;
+                }
+            }
+        }
+    } catch (statErr) {}
+    return sizes;
+}
+
+/**
+ * Batch the OS re-read for every File in the list whose File.length is negative
+ * and that is not cached yet, so the per-item loop that follows hits the cache
+ * and never shells out on its own.
+ */
+function _prefetchSourceFileSizes(files) {
+    var paths = [];
+    var seen = {};
+    for (var i = 0; i < files.length; i++) {
+        var f = files[i];
+        if (!f) continue;
+        var len = -1;
+        try { len = Number(f.length); } catch (lenErr) { len = -1; }
+        if (!isNaN(len) && len >= 0) continue;
+        var p = '';
+        try { p = String(f.fsName || ''); } catch (pErr) { p = ''; }
+        if (!p || seen[p] || typeof _sourceFileSizeCache[p] === 'number') continue;
+        seen[p] = true;
+        paths.push(p);
+    }
+    if (!paths.length) return;
+    var sizes = _osFileSizes(paths);
+    for (var si = 0; si < paths.length; si++) {
+        if (sizes[si] >= 0) _sourceFileSizeCache[paths[si]] = sizes[si];
+    }
+}
+
+/** Lowercased, forward-slash form of a path for identity comparison across the stash and the import. */
+function _normalizePathKey(p) {
+    return String(p || '').replace(/\\/g, '/').toLowerCase();
+}
+
+/**
+ * Short byte count for toasts: 3.2 GB, 640 MB, 12 KB. Same rounding as the
+ * panel's formatBytesShort so the cap reads '1.0 GB' on every surface. A
+ * negative count is File.length's -1 (32-bit signed, any file over 2 GB).
+ */
+function _formatGbShort(bytes) {
+    var n = Number(bytes) || 0;
+    if (n < 0) return 'over 2 GB';
+    if (n >= 1073741824) return (n / 1073741824).toFixed(1) + ' GB';
+    if (n >= 1048576) return Math.round(n / 1048576) + ' MB';
+    return Math.round(n / 1024) + ' KB';
+}
+
+function stashSelectedComp(libraryPath, categoryName, maxSourceFileBytes, expectedCompId) {
+    // maxSourceFileBytes: per-file cap handed in by the panel (derived from its
+    // upload ceiling, never a second literal). A single source over it is left OUT
+    // of the bundle instead of failing the whole submission after the export ran.
+    // 0 / absent = no cap, so the local library stash behaves exactly as before.
+    var sourceFileCap = 0;
+    try { sourceFileCap = Number(maxSourceFileBytes) || 0; } catch (capErr) { sourceFileCap = 0; }
+    if (sourceFileCap < 0) sourceFileCap = 0;
+    // expectedCompId: the comp the panel's pre-flight estimate gated (6 GB block,
+    // left-out list). The Add modal does not block AE, so the selection can change
+    // before Add Template; a mismatch refuses rather than exporting an unchecked
+    // comp. 0 / absent = no check (local stash, or the estimate did not run).
+    var expectedId = 0;
+    try { expectedId = Number(expectedCompId) || 0; } catch (idErr) { expectedId = 0; }
     // Validate inputs
     if (!isValidPath(libraryPath)) {
         return "Error: Invalid library path.";
@@ -1136,6 +1300,9 @@ function stashSelectedComp(libraryPath, categoryName) {
         var compToSave = resolveTargetComp();
         if (!compToSave) {
             return "Error: Open a composition, or select one in the Project panel, then click Add Comp.";
+        }
+        if (expectedId > 0 && compToSave.id !== expectedId) {
+            return "Error: The selected composition changed after Add Comp opened. Click Add Comp again.";
         }
         var compToSaveName = compToSave.name;
         // Sanitize for filesystem: keep [a-z0-9], collapse runs, trim underscores.
@@ -1237,10 +1404,9 @@ function stashSelectedComp(libraryPath, categoryName) {
         }
 
         // --- Save Metadata ---
-        var metadataFile = new File(buildPath(compFolder, "metadata.json"));
-        metadataFile.open('w');
-        metadataFile.encoding = 'UTF-8';
-        metadataFile.write(JSON.stringify({
+        // Written now, and rewritten after the footage collect when any source
+        // file was left out, so the record names those files.
+        var stashMetadata = {
             displayName: compToSaveName,
             created: timestamp,
             category: categoryName,
@@ -1255,8 +1421,15 @@ function stashSelectedComp(libraryPath, categoryName) {
             // populates this for legacy split templates; downloadTemplate() reads it.
             dependencies: [],
             aeVersion: AE_VERSION_INFO.versionString
-        }));
-        metadataFile.close();
+        };
+        var _writeStashMetadata = function () {
+            var metadataFile = new File(buildPath(compFolder, "metadata.json"));
+            metadataFile.open('w');
+            metadataFile.encoding = 'UTF-8';
+            metadataFile.write(JSON.stringify(stashMetadata));
+            metadataFile.close();
+        };
+        _writeStashMetadata();
 
         // --- Suppress AE dialogs for the entire stash operation ---
         // app.project.save() and app.open() trigger native "missing files" dialogs
@@ -1369,11 +1542,39 @@ function stashSelectedComp(libraryPath, categoryName) {
         var sequenceItems = [];            // tracked separately for a specific warning
         var totalItems = app.project.numItems;
         var MISSING_DETAIL_CAP = 30;
+        // Source files over sourceFileCap (raw footage). Not copied, not relinked,
+        // not counted as missing: the item keeps its original path, which is valid
+        // on this machine, and the panel names them to the editor and the reviewer.
+        var skippedOversize = [];          // [{name, bytes}], every file (import matches by name)
+        var skippedOversizeCount = 0;
+        var skippedOversizeBytes = 0;
+        var skippedOversizeSeen = {};
 
         function _recordMissing(name, reason) {
             missingTotalCount++;
             if (missingFootageItems.length >= MISSING_DETAIL_CAP) return;
             missingFootageItems.push(name + ' (' + reason + ')');
+        }
+
+        // Size pre-pass: every source File.length cannot size (over 2 GB, or a
+        // network mount) is read through the OS in ONE batch here, so the loop
+        // below never shells out per file. Normally a no-op: the modal-open
+        // estimate already filled the cache for this comp.
+        if (sourceFileCap > 0) {
+            var _prefetchList = [];
+            for (var pfi = 1; pfi <= totalItems; pfi++) {
+                try {
+                    var pfItem = app.project.item(pfi);
+                    if (!(pfItem instanceof FootageItem)) continue;
+                    var pfFile = null;
+                    try { if (pfItem.mainSource && pfItem.mainSource.file) pfFile = pfItem.mainSource.file; } catch (pfErr1) { pfFile = null; }
+                    if (!pfFile) { try { if (pfItem.file) pfFile = pfItem.file; } catch (pfErr2) { pfFile = null; } }
+                    if (pfFile && pfFile.exists) _prefetchList.push(pfFile);
+                } catch (pfErr) {}
+            }
+            try { _prefetchSourceFileSizes(_prefetchList); } catch (pfBatchErr) {
+                $.writeln("Blitzkrieg: size pre-pass failed, sizing per file: " + pfBatchErr.toString());
+            }
         }
 
         for (var i = 1; i <= totalItems; i++) {
@@ -1462,6 +1663,33 @@ function stashSelectedComp(libraryPath, categoryName) {
                 );
                 if (isSystemPath) continue;
 
+                // Step 5b: leave out any single source over the per-file cap. It
+                // could never upload anyway, so the bundle ships without it. No
+                // copy, no replace, and NOT recorded as missing footage.
+                // Only a CONFIRMED size counts (_sourceFileSizeBytes re-reads a
+                // negative File.length through the OS). An unknown size (-1) is
+                // copied as before: a proxy on a network mount must never be
+                // dropped and labelled raw footage.
+                if (sourceFileCap > 0) {
+                    var srcLen = _sourceFileSizeBytes(sourceFile);
+                    if (srcLen > sourceFileCap) {
+                        if (!skippedOversizeSeen[sourceFile.fsName]) {
+                            skippedOversizeSeen[sourceFile.fsName] = true;
+                            skippedOversizeCount++;
+                            skippedOversizeBytes += srcLen;
+                            // path: the ORIGINAL location, which the .aep keeps for
+                            // this item. importComp uses it as the identity test so a
+                            // same-named collected file (a proxy) still relinks.
+                            skippedOversize.push({ name: _stashFileBasename(sourceFile), bytes: srcLen, path: String(sourceFile.fsName || '') });
+                        }
+                        $.writeln("Blitzkrieg: LEFT OUT (over per-file cap): " + sourceFile.fsName + " (" + srcLen + " bytes)");
+                        continue;
+                    }
+                    if (srcLen < 0) {
+                        $.writeln("Blitzkrieg: size unknown, copying anyway: " + sourceFile.fsName);
+                    }
+                }
+
                 // Step 6: compute a unique destination filename inside (Footage).
                 // Hard cap on iterations: a corrupted/read-only (Footage) folder
                 // makes every destFile.exists return true forever, hanging the
@@ -1533,6 +1761,17 @@ function stashSelectedComp(libraryPath, categoryName) {
             }
         }
 
+        // Record what was left out so the submission record and the library
+        // metadata carry it (the panel and the reviewer read these fields).
+        if (skippedOversizeCount > 0) {
+            stashMetadata.skippedSourceFiles = skippedOversize;
+            stashMetadata.skippedSourceCount = skippedOversizeCount;
+            stashMetadata.skippedSourceBytes = skippedOversizeBytes;
+            try { _writeStashMetadata(); } catch (metaRewriteErr) {
+                $.writeln("Blitzkrieg: Could not rewrite metadata.json with left-out files: " + metaRewriteErr.toString());
+            }
+        }
+
         // --- Remove missing footage items before saving ---
         // After reduceProject, any FootageItem with footageMissing or a dead file
         // reference will trigger an AE "file not found" dialog when the AEP is
@@ -1555,7 +1794,9 @@ function stashSelectedComp(libraryPath, categoryName) {
                     }
                 } catch (fmErr) {}
 
-                // Check if file reference exists but file is gone from disk
+                // Check if file reference exists but file is gone from disk.
+                // A source left out over the per-file cap still points at its
+                // original file, which exists here, so it is kept on purpose.
                 if (!shouldRemove) {
                     try {
                         var rmSource = rmItem.mainSource;
@@ -1718,6 +1959,20 @@ function stashSelectedComp(libraryPath, categoryName) {
             }
         }
 
+        // Sentence naming the source files left out over the per-file cap. Goes on
+        // whichever result is returned. The local stash shows it directly; the cloud
+        // path logs it and names the files again on its final toast from metadata.
+        var oversizeNote = '';
+        if (skippedOversizeCount > 0) {
+            var ovNames = [];
+            for (var ovi = 0; ovi < skippedOversize.length && ovi < 5; ovi++) {
+                ovNames.push(skippedOversize[ovi].name + ' (' + _formatGbShort(skippedOversize[ovi].bytes) + ')');
+            }
+            var ovList = ovNames.join(', ');
+            if (skippedOversizeCount > ovNames.length) ovList += ' and ' + (skippedOversizeCount - ovNames.length) + ' more';
+            oversizeNote = ' ' + skippedOversizeCount + ' large file(s) were left out (raw footage over ' + _formatGbShort(sourceFileCap) + '): ' + ovList + '.';
+        }
+
         if (missingTotalCount > 0) {
             var missingList = missingFootageItems.slice(0, 5).join('; ');
             if (missingFootageItems.length > 5) missingList += ' (+' + (missingFootageItems.length - 5) + ' more shown)';
@@ -1726,7 +1981,7 @@ function stashSelectedComp(libraryPath, categoryName) {
                 : (missingTotalCount + ' footage file(s)');
             return "Warning: '" + compToSaveName + "' was added but " + countSuffix +
                    " were not fully collected: " + missingList +
-                   ". Open the bundle in AE, relink the missing files, and re-stash to fix." + restoreNote;
+                   ". Open the bundle in AE, relink the missing files, and re-stash to fix." + oversizeNote + restoreNote;
         }
 
         // Memory-limit warning for stash: thumbnail/preview rendering hit AE's
@@ -1734,7 +1989,13 @@ function stashSelectedComp(libraryPath, categoryName) {
         // uploaded but the previews are incomplete. Muhammad's tip surfaced as
         // actionable guidance for the editor.
         if (stashMemoryErrorHit) {
-            return "Warning: '" + compToSaveName + "' was added but AE hit its memory limit while rendering previews. This usually means Motion Tile (or a similar effect) has very large Output Width/Height values. Lower those values and re-stash to get full preview frames." + restoreNote;
+            return "Warning: '" + compToSaveName + "' was added but AE hit its memory limit while rendering previews. This usually means Motion Tile (or a similar effect) has very large Output Width/Height values. Lower those values and re-stash to get full preview frames." + oversizeNote + restoreNote;
+        }
+
+        // Left-out raw footage is a Warning (the panel strips the prefix, shows it
+        // and still uploads), never a silent Success.
+        if (skippedOversizeCount > 0) {
+            return "Warning: '" + compToSaveName + "' was added to your library." + oversizeNote + restoreNote;
         }
 
         // If the restore failed, return a non-fatal Warning (executeAddComp
@@ -1768,10 +2029,52 @@ function stashSelectedComp(libraryPath, categoryName) {
  * - Streamlined import process
  * - Faster comp discovery
  */
-function importComp(aepPath, displayName) {
+function importComp(aepPath, displayName, leftOutNamesJson) {
     if (!isValidPath(aepPath)) {
         return "Error: Invalid file path.";
     }
+
+    // The sources the stash left out at upload, from the template's metadata via
+    // the panel: [{name, path}] (a plain string entry is a name). The relink pass
+    // below matches missing items by basename only, so a left-out raw clip that
+    // shares its name with a collected file (Proxies/A001.mov next to
+    // Raw/A001.mov) would otherwise be bound to the wrong file with no warning.
+    // Those stay missing so the panel can show its calm left-out note instead.
+    // _leftOutPaths holds the ORIGINAL locations (what the .aep keeps for the
+    // left-out item) so the guard is an identity test, not a basename test.
+    var _leftOutAtUpload = {};
+    var _leftOutPaths = {};
+    if (leftOutNamesJson) {
+        try {
+            var _loList = JSON.parse(leftOutNamesJson);
+            if (_loList && _loList.length) {
+                for (var _loi = 0; _loi < _loList.length; _loi++) {
+                    var _lo = _loList[_loi];
+                    if (!_lo) continue;
+                    var _loName = (typeof _lo === 'string') ? _lo : String(_lo.name || '');
+                    if (_loName) _leftOutAtUpload[_loName.toLowerCase()] = true;
+                    var _loPath = (typeof _lo === 'object' && _lo.path) ? String(_lo.path) : '';
+                    if (_loPath) _leftOutPaths[_normalizePathKey(_loPath)] = true;
+                }
+            }
+        } catch (loErr) { _leftOutAtUpload = {}; _leftOutPaths = {}; }
+    }
+    // Identity test for a missing item whose basename is on the left-out list.
+    // A collected copy was replace()d to <bundle>/(Footage)/<name> at stash time
+    // and the .aep keeps that path even when it is missing here (it names the
+    // submitter's temp dir), so a missing item under a (Footage) folder is a
+    // collected file that belongs to the relink pass. A left-out source kept its
+    // ORIGINAL path: an exact match on the recorded path wins (covers an original
+    // that itself lived in an AE-collected (Footage) folder), otherwise any path
+    // outside a (Footage) folder is the left-out one.
+    var _isLeftOutItem = function (fItem) {
+        var p = '';
+        try { if (fItem.mainSource && fItem.mainSource.file) p = String(fItem.mainSource.file.fsName || ''); } catch (ipErr) { p = ''; }
+        if (!p) return true;
+        var key = _normalizePathKey(p);
+        if (_leftOutPaths[key]) return true;
+        return key.indexOf('/(footage)/') === -1;
+    };
 
     try {
         if (!app.project) return "Error: Please open a project first.";
@@ -1971,7 +2274,7 @@ function importComp(aepPath, displayName) {
         // FootageItem at its collected copy. This is the canonical relink the
         // importer previously lacked — without it, missing footage was simply
         // deleted, producing the "missing element/source files" symptom.
-        var _relinkStats = { relinked: 0, missing: 0, missingNames: [], survivingMissing: 0, survivingNames: [], survivingImages: 0, survivingImageNames: [] };
+        var _relinkStats = { relinked: 0, missing: 0, missingNames: [], survivingMissing: 0, survivingNames: [], survivingFileNames: [], survivingImages: 0, survivingImageNames: [] };
         // A still image (png/jpg/etc.) going missing is almost always a decorative
         // asset that does not break the composition — per Petter, "missing footage is
         // usually just images, nothing important." So we classify surviving-missing
@@ -2070,8 +2373,24 @@ function importComp(aepPath, displayName) {
                         } catch (e) {}
                     }
                     if (!isMissing) continue;
-                    _buildFootageIndex();
                     var base = _basenameOf(rItem);
+                    // The left-out list holds File.displayName (what the stash
+                    // recorded). base is decodeURI(File.name), which leaves the
+                    // URI-reserved set (# & + = , ; $ @ ?) encoded, so key the
+                    // guard on displayName too or 'Take #1.mov' never matches.
+                    var leftOutKey = '';
+                    try { if (rItem.mainSource && rItem.mainSource.file) leftOutKey = _stashFileBasename(rItem.mainSource.file); } catch (lkErr) { leftOutKey = ''; }
+                    if (!leftOutKey) leftOutKey = base;
+                    if (leftOutKey && _leftOutAtUpload[leftOutKey.toLowerCase()] && _isLeftOutItem(rItem)) {
+                        // Left out at upload on purpose (basename AND path say so):
+                        // never bind it to a same-named collected file. Counted as
+                        // missing so the panel's left-out note fires.
+                        _relinkStats.missing++;
+                        if (_relinkStats.missingNames.length < 30) _relinkStats.missingNames.push(base);
+                        $.writeln("Blitzkrieg: relink skipped (left out at upload): " + base);
+                        continue;
+                    }
+                    _buildFootageIndex();
                     var match = base ? _footageIndex[base.toLowerCase()] : null;
                     if (match && match.exists) {
                         try {
@@ -2187,6 +2506,14 @@ function importComp(aepPath, displayName) {
                         } else {
                             _relinkStats.survivingMissing++;
                             if (_relinkStats.survivingNames.length < 30) _relinkStats.survivingNames.push(_nm);
+                            // File basename (not the item name, which can be renamed)
+                            // so the panel can match it against the files the stash
+                            // left out at upload.
+                            if (_relinkStats.survivingFileNames.length < 30) {
+                                var _fnm = '';
+                                try { if (sItem.mainSource && sItem.mainSource.file) _fnm = _stashFileBasename(sItem.mainSource.file); } catch (e) { _fnm = ''; }
+                                _relinkStats.survivingFileNames.push(_fnm || _nm);
+                            }
                         }
                     }
                 }
@@ -2266,7 +2593,12 @@ function importComp(aepPath, displayName) {
         if (_relinkStats.survivingMissing > 0) {
             var _shown = _relinkStats.survivingNames.slice(0, 5).join(", ");
             if (_relinkStats.survivingMissing > 5) _shown += ", ...";
-            _resultMsg += " [BLITZ_MISSING:" + _relinkStats.survivingMissing + "] Warning: " +
+            // [BLITZ_MISSING_FILES:[...]] carries the file basenames (JSON array)
+            // so the panel can tell "left out at upload on purpose" from broken.
+            var _fileList = '';
+            try { _fileList = JSON.stringify(_relinkStats.survivingFileNames); } catch (e) { _fileList = ''; }
+            _resultMsg += " [BLITZ_MISSING:" + _relinkStats.survivingMissing + "]" +
+                (_fileList ? " [BLITZ_MISSING_FILES:" + _fileList + "]" : "") + " Warning: " +
                 _relinkStats.survivingMissing + " source file" + (_relinkStats.survivingMissing === 1 ? "" : "s") +
                 " could not be relinked" + (_shown ? " (" + _shown + ")" : "") +
                 ". Open the comp and relink, or re-stash the template.";
@@ -3067,7 +3399,7 @@ function clearBlitzkriegSignedUrlCache() {
  * Stash selected comp to a system temp directory (for cloud upload).
  * Reuses the existing stashSelectedComp logic but targets temp folder.
  */
-function stashSelectedCompToTemp(categoryName) {
+function stashSelectedCompToTemp(categoryName, maxSourceFileBytes, expectedCompId) {
     var tempFolder = getSafeTempFolder();
     var tempLibPath = tempFolder.fsName + '/blitzkrieg_temp';
 
@@ -3076,7 +3408,7 @@ function stashSelectedCompToTemp(categoryName) {
     if (!tempLib.exists) tempLib.create();
 
     // Call existing stash logic with temp path
-    var result = stashSelectedComp(tempLibPath, categoryName);
+    var result = stashSelectedComp(tempLibPath, categoryName, maxSourceFileBytes, expectedCompId);
 
     // Return the temp path so the JS layer can read the files
     return JSON.stringify({
@@ -3095,9 +3427,17 @@ function stashSelectedCompToTemp(categoryName) {
  * misleading over-count. Never renders, reduces, copies, or mutates anything. Any
  * failure returns { error } so the JS layer falls back to the generic message.
  */
-function estimateStashFootprint() {
+function estimateStashFootprint(maxFileBytes, reuseSizes) {
     try {
         if (!app.project) return JSON.stringify({ error: 'no project' });
+        // Per-file cap (panel-supplied, 0 = none). Sources over it are left out of
+        // the bundle by stashSelectedComp, so they are reported separately here and
+        // NOT summed into bytes; the total then matches what actually uploads.
+        var fileCap = 0;
+        try { fileCap = Number(maxFileBytes) || 0; } catch (capErr) { fileCap = 0; }
+        // reuseSizes: the Add-Template re-run passes 1 to keep the OS sizes the
+        // modal-open estimate read seconds ago; the modal-open call starts fresh.
+        if (!reuseSizes) _sourceFileSizeCache = {};
         // Estimate the SAME comp the stash will export (selected-or-active) so the
         // pre-flight size warning matches the actual bundle.
         var targetComp = resolveTargetComp();
@@ -3108,6 +3448,18 @@ function estimateStashFootprint() {
         var seenFoot = {};
         var totalBytes = 0;
         var missing = 0;
+        var oversizeCount = 0;
+        var oversizeBytes = 0;
+        var oversize = [];
+        var OVERSIZE_LIST_CAP = 30;
+        // Kept and oversize files alike are tallied per file path, not per item,
+        // to match the stash (collectedFiles / skippedOversizeSeen): two
+        // FootageItems on one clip is one copied file, or one left-out file.
+        // Missing footage stays per ITEM, because that is how the stash's
+        // _recordMissing counts it and its Warning is what the editor acts on.
+        var seenPath = {};
+        // Files to size after the walk, so the OS re-reads batch into one call.
+        var pendingFiles = [];
 
         function addFootage(item) {
             if (!item || seenFoot['f' + item.id]) return;
@@ -3117,8 +3469,12 @@ function estimateStashFootprint() {
             if (!file) { try { if (item.file) file = item.file; } catch (e2) {} }
             if (!file) return; // solid / placeholder / plugin source: nothing to copy
             try {
-                if (file.exists) totalBytes += (file.length || 0);
-                else missing++;
+                if (!file.exists) { missing++; return; }
+                var pathKey = '';
+                try { pathKey = String(file.fsName || ''); } catch (e4) { pathKey = ''; }
+                if (pathKey && seenPath[pathKey]) return;
+                if (pathKey) seenPath[pathKey] = true;
+                pendingFiles.push(file);
             } catch (e3) { /* unreadable, ignore */ }
         }
 
@@ -3139,7 +3495,33 @@ function estimateStashFootprint() {
         }
 
         walkComp(targetComp);
-        return JSON.stringify({ bytes: totalBytes, footageMissing: missing });
+        // One OS call for every source File.length cannot size (on Windows: one
+        // console window per submit, not one per raw clip), then the tally.
+        // Confirmed size only; -1 is unknown and is neither summed nor left out,
+        // matching the stash, which copies it.
+        _prefetchSourceFileSizes(pendingFiles);
+        for (var pf = 0; pf < pendingFiles.length; pf++) {
+            try {
+                var len = _sourceFileSizeBytes(pendingFiles[pf]);
+                if (fileCap > 0 && len > fileCap) {
+                    oversizeCount++;
+                    oversizeBytes += len;
+                    if (oversize.length < OVERSIZE_LIST_CAP) oversize.push({ name: _stashFileBasename(pendingFiles[pf]), bytes: len });
+                } else if (len > 0) {
+                    totalBytes += len;
+                }
+            } catch (e5) { /* unreadable, ignore */ }
+        }
+        // compId: the comp this estimate describes, so the panel can tell when
+        // the AE selection moved between the Add modal opening and Add Template.
+        return JSON.stringify({
+            compId: targetComp.id,
+            bytes: totalBytes,
+            footageMissing: missing,
+            oversizeCount: oversizeCount,
+            oversizeBytes: oversizeBytes,
+            oversize: oversize
+        });
     } catch (e) {
         return JSON.stringify({ error: e.toString() });
     }
@@ -3547,8 +3929,14 @@ function generatePreviewsToDisk(aepPath, outputDir, thumbnailOnly) {
         _currentStep = 'check_missing_footage';
         var hasMissingFootage = false;
         var missingFootageNames = [];
+        // File basenames of the missing sources (the item name can be renamed)
+        // and the full count, so the panel can tell 'left out at upload on
+        // purpose' from a broken template before it overwrites previews.
+        var missingFootageFiles = [];
+        var missingFootageCount = 0;
         try {
             var _checkedComps = {};
+            var _checkedItems = {};
             var _checkedCounter = 0;
             var _checkCompMissing = function(comp) {
                 if (!comp) return false;
@@ -3566,8 +3954,22 @@ function generatePreviewsToDisk(aepPath, outputDir, thumbnailOnly) {
                         if (!src) continue;
                         if (src instanceof FootageItem && src.footageMissing) {
                             found = true;
-                            if (missingFootageNames.length < 5) {
-                                try { missingFootageNames.push(src.name); } catch (e) {}
+                            // Count each missing ITEM once, however many layers use
+                            // it, so the count and the (capped) file list agree and
+                            // the panel's left-out match is per file, like the stash.
+                            var _mfKey = (src.id !== undefined && src.id !== null) ? ('id_' + src.id) : '';
+                            if (!_mfKey || !_checkedItems[_mfKey]) {
+                                if (_mfKey) _checkedItems[_mfKey] = true;
+                                if (missingFootageNames.length < 5) {
+                                    try { missingFootageNames.push(src.name); } catch (e) {}
+                                }
+                                missingFootageCount++;
+                                if (missingFootageFiles.length < 30) {
+                                    var _mfName = '';
+                                    try { if (src.mainSource && src.mainSource.file) _mfName = _stashFileBasename(src.mainSource.file); } catch (e) { _mfName = ''; }
+                                    if (!_mfName) { try { _mfName = String(src.name || ''); } catch (e) { _mfName = ''; } }
+                                    missingFootageFiles.push(_mfName);
+                                }
                             }
                         }
                         if (src instanceof CompItem) {
@@ -3757,6 +4159,8 @@ function generatePreviewsToDisk(aepPath, outputDir, thumbnailOnly) {
                 height: compHeight,
                 thumbnailOnly: true,
                 missingFootage: missingFootageNames,
+                missingFootageFiles: missingFootageFiles,
+                missingFootageCount: missingFootageCount,
                 outputDir: outFolder.fsName
             };
             if (_relocatedRoot) _toResult.relocatedTempDir = _relocatedRoot;
@@ -4188,6 +4592,7 @@ function getActiveCompInfo() {
         if (!comp || !(comp instanceof CompItem)) return 'null';
 
         return JSON.stringify({
+            id: comp.id,
             name: comp.name,
             width: comp.width,
             height: comp.height,
