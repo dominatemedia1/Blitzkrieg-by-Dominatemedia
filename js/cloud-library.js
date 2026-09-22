@@ -900,6 +900,12 @@
                 // hasAep:false (written by the backfill onto folders that truly have
                 // no .aep, or by a future upload path) gates the tile.
                 hasAep: (meta.hasAep !== false),
+                // Source files the stash left out at upload (raw footage over the
+                // per-file cap), [{name, bytes, path}]. Older metadata lacks it: empty.
+                skippedSourceFiles: Array.isArray(meta.skippedSourceFiles) ? meta.skippedSourceFiles : [],
+                // comp.png actually landed (the upload path records the truth; the
+                // generate flow sets it too). Only an explicit true counts.
+                hasCompPng: (meta.hasCompPng === true),
                 storagePath: storagePath,
                 contentVersion: contentVersion,
             });

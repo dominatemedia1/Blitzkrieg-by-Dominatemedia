@@ -370,6 +370,12 @@
     // AE comp name captured when the Add-to-Library modal opens; the fallback
     // Title if the user clears the field (the visible "Adding X" subtitle is gone).
     var _addCompActiveName = '';
+    // Footprint estimate started when the Add modal opens, reused by executeAddComp
+    // so the comp tree is walked once per submit. Null between modals.
+    var _addCompEstimate = null;
+    // Comp id resolved when the Add Comp modal opened. The host refuses to export
+    // any other comp, so a selection change after the modal opened is caught.
+    var _addCompOpenCompId = 0;
 
     var renameModal = document.getElementById('rename-comp-modal');
     var compToRenameCurrentName = document.getElementById('comp-to-rename-current-name');
@@ -584,6 +590,11 @@
     // to push absurdly large bundles. Raised from 3 GB to fit the library's real
     // heaviest templates (~3.4 GB) with headroom now that residence is bounded.
     var MAX_UPLOAD_TOTAL_BYTES = 6 * 1024 * 1024 * 1024; // 6 GB
+    // Per-source-file cap handed to the host stash. Any single footage file over
+    // this could never upload (see MAX_UPLOAD_FILE_BYTES), so the host leaves it out
+    // of the bundle (raw footage) and the comp still submits with everything else,
+    // instead of the whole submission failing. Derived, never a second literal.
+    var STASH_SKIP_SOURCE_OVER_BYTES = MAX_UPLOAD_FILE_BYTES;
 
     var bulkSelectedIds = new Set(); // Track selected items for bulk operations
     var bulkMode = false; // Whether bulk selection mode is active
@@ -1418,7 +1429,10 @@
         return 'file:///' + normalized;
     }
 
-    function showToast(message, isError) {
+    // durationMs: optional, how long the toast stays up. Default 4s; the few
+    // toasts that carry a list of file names, or must outlive an AE freeze, pass
+    // their own.
+    function showToast(message, isError, durationMs) {
         if (toastTimeout) clearTimeout(toastTimeout);
         message = message.replace(/^(Success!|Success:|Error:)\s*/, '');
         toastElement.textContent = message;
@@ -1428,9 +1442,10 @@
         } else {
             toastElement.classList.add('success');
         }
+        var ms = (typeof durationMs === 'number' && durationMs > 0) ? durationMs : 4000;
         toastTimeout = setTimeout(function () {
             toastElement.classList.remove('show');
-        }, 4000);
+        }, ms);
     }
 
     function showSpinner() { loadingSpinner.style.display = 'block'; }
@@ -1852,7 +1867,7 @@
         });
         if (confirmLocalRedownloadBtn) confirmLocalRedownloadBtn.addEventListener('click', executeLocalRedownload);
 
-        cancelAddBtn.addEventListener('click', function () { addCompModal.style.display = 'none'; });
+        cancelAddBtn.addEventListener('click', function () { addCompModal.style.display = 'none'; _addCompEstimate = null; });
         confirmAddBtn.addEventListener('click', executeAddComp);
         existingCategorySelect.addEventListener('change', _syncAddCategoryField);
 
@@ -3846,10 +3861,14 @@
         setStashInProgress(true, 'generateCloudThumbnail');
         showToast('Generating thumbnail + preview for "' + compName + '"...');
 
-        generateCloudThumbnail(comp).then(function() {
+        generateCloudThumbnail(comp).then(function(res) {
             setStashInProgress(false, 'generateCloudThumbnail');
             hideSpinner();
-            showToast('Thumbnail + preview generated for "' + compName + '"!');
+            if (res && res.reason === 'left_out_at_upload') {
+                showToast('Kept the existing thumbnail + preview for "' + compName + '". Its raw footage was left out at upload and is not on this machine.');
+            } else {
+                showToast('Thumbnail + preview generated for "' + compName + '"!');
+            }
             // Invalidate cache and reload to pick up new thumb + preview frames
             window.cloudLibrary.invalidateCache();
             loadLibrary();
@@ -3895,6 +3914,9 @@
             // Remember the AE comp name as the fallback title if the user clears
             // the field. (No redundant "Adding X..." subtitle anymore.)
             _addCompActiveName = info.name || '';
+            // The gate id comes from this synchronous read, not the estimate, so a
+            // slow or failed estimate never lets a later-selected comp through.
+            _addCompOpenCompId = (typeof info.id === 'number') ? info.id : 0;
 
             // Leave the Title BLANK with a hint placeholder rather than force-filling
             // the comp's AE name (often a long auto-descriptive string). If the user
@@ -3924,6 +3946,21 @@
 
             confirmAddBtn.textContent = 'Add Template';
             addCompModal.style.display = 'flex';
+            // Footage heads-up inside the modal. The one decision that matters
+            // (cancel, swap in a proxy, then add) can only be made before Add
+            // Template, and executeAddComp reuses this estimate.
+            var noteEl = document.getElementById('add-comp-footage-note');
+            if (noteEl) { noteEl.textContent = ''; noteEl.style.display = 'none'; }
+            var thisEst = _estimateStashFootprint();
+            _addCompEstimate = thisEst;
+            thisEst.then(function (est) {
+                // A slow resolve from an earlier modal open must not write into this one.
+                if (_addCompEstimate !== thisEst || !noteEl) return;
+                if (est && typeof est.oversizeCount === 'number' && est.oversizeCount > 0) {
+                    noteEl.textContent = _leftOutSentence(est.oversize, est.oversizeCount, 'note').replace(/^\s+/, '');
+                    noteEl.style.display = 'block';
+                }
+            });
             // Focus + select the Title so the user can type a name immediately, no click.
             try { var _t = document.getElementById('add-comp-title-input'); if (_t) { _t.focus(); _t.select(); } } catch (e) {}
         });
@@ -3933,7 +3970,10 @@
     // {bytes, footageMissing} or null (missing/failed/no-host), with an 8s safety timeout
     // so a stuck host bridge can never hang the submit. safeEvalScript always invokes its
     // callback, so in normal operation this resolves promptly.
-    function _estimateStashFootprint() {
+    // reuseSizes: true for the Add-Template re-run, so the host keeps the OS file
+    // sizes it read when the modal opened (on Windows each read is a console
+    // window) instead of reading them again seconds later.
+    function _estimateStashFootprint(reuseSizes) {
         return new Promise(function(resolve) {
             var settled = false;
             function done(v) { if (!settled) { settled = true; resolve(v); } }
@@ -3942,7 +3982,7 @@
             // A longer budget makes the gate actually fire on those instead of failing open.
             setTimeout(function() { done(null); }, 15000);
             try {
-                safeEvalScript('estimateStashFootprint()', function(estRaw) {
+                safeEvalScript('estimateStashFootprint(' + STASH_SKIP_SOURCE_OVER_BYTES + (reuseSizes ? ', 1' : '') + ')', function(estRaw) {
                     try { done(JSON.parse(estRaw)); }
                     catch (e) { done(null); }
                 });
@@ -4016,13 +4056,35 @@
         // it can never be published, so we stop BEFORE the risky export and point to the
         // offline path. A missing/failed estimate resolves null and never blocks a valid
         // upload (the post-export gates still enforce the real limits).
-        _estimateStashFootprint().then(function(est) {
+        // Always estimated NOW, at click time. The modal-open estimate only feeds
+        // the modal's heads-up: the modal does not block AE, so between opening
+        // it and Add Template the editor can drag more footage into the same
+        // comp (same id, bigger bundle) or select another comp, and the 6 GB
+        // gate, the pre-flight toast and the left-out list must describe the comp
+        // as it is when it gets exported. The re-run is cheap: the host keeps the
+        // OS file sizes it read at modal open (reuseSizes), so no second round of
+        // stat calls, only a tree walk.
+        _addCompEstimate = null;
+        _estimateStashFootprint(true).then(function(est) {
+            // est.bytes already EXCLUDES sources over STASH_SKIP_SOURCE_OVER_BYTES (the
+            // host leaves those out of the bundle), so the block below is on what
+            // will actually upload. The left-out files are reported separately.
             var estBytes = (est && typeof est.bytes === 'number') ? est.bytes : null;
             var footageMissing = (est && typeof est.footageMissing === 'number') ? est.footageMissing : 0;
+            var oversizeCount = (est && typeof est.oversizeCount === 'number') ? est.oversizeCount : 0;
 
             if (estBytes !== null && estBytes > MAX_UPLOAD_TOTAL_BYTES) {
                 var gbOver = estBytes / (1024 * 1024 * 1024);
-                showToast('This composition bundles about ' + gbOver.toFixed(1) + ' GB of footage, over the ' + formatBytesShort(MAX_UPLOAD_TOTAL_BYTES) + ' limit. It cannot be submitted, and collecting it may make After Effects unresponsive. Reduce or relink the footage, or add it via the offline library.', true);
+                var blockedMsg = 'This composition bundles about ' + gbOver.toFixed(1) + ' GB of footage, over the ' + formatBytesShort(MAX_UPLOAD_TOTAL_BYTES) + ' limit. It cannot be submitted, and collecting it may make After Effects unresponsive. Reduce or relink the footage, or add it via the offline library.';
+                // The total already excludes the oversize sources, so say so: the
+                // editor otherwise removes the obvious 3 GB raw file and is blocked
+                // again at the same number.
+                if (oversizeCount > 0) {
+                    blockedMsg += ' ' + oversizeCount + ' file(s) over ' + formatBytesShort(STASH_SKIP_SOURCE_OVER_BYTES) + ' are already left out of this total.';
+                }
+                // 10+ wrapped lines at half panel width; 4 s is gone before the
+                // sentence that stops the second blocked attempt can be read.
+                showToast(blockedMsg, true, 12000);
                 _fireSubmitEnd('blocked_oversize', estBytes + ' bytes');
                 setStashInProgress(false, 'stash');
                 hideSpinner();
@@ -4043,19 +4105,41 @@
             if (footageMissing > 0) {
                 preMsg = (preMsg ? preMsg + ' ' : '') + footageMissing + ' source file(s) are offline, so the bundle may be incomplete.';
             }
-            showToast(preMsg || 'Exporting from After Effects. AE may pause briefly...');
+            // The export starts in this same tick, so this toast never says
+            // "cancel" (that advice lives in the modal note, before Add Template)
+            // and the left-out sentence is appended to the export line, never in
+            // place of it: the editor must still read that AE is exporting.
+            var exportMsg = preMsg || 'Exporting from After Effects. AE may pause briefly...';
+            if (oversizeCount > 0) {
+                exportMsg += ' ' + _leftOutSentence(est.oversize, oversizeCount, 'exporting').replace(/^\s+/, '');
+            }
+            // This toast has to be on screen for the whole synchronous export ("AE
+            // will pause, do not force-quit"), and the default 4s vanished exactly
+            // when the force-quit happens. The stash callback replaces it on every
+            // branch, so the long duration is only a ceiling for a wedged host.
+            showToast(exportMsg, false, IMPORT_EVAL_TIMEOUT_MS);
 
             // Crash breadcrumb — persisted BEFORE the synchronous export.
             if (window.blitzkriegAnalytics && window.blitzkriegAnalytics.trackSubmitStart) {
                 window.blitzkriegAnalytics.trackSubmitStart(submitTraceId, categoryName, estBytes, footageMissing);
             }
 
-        safeEvalScript('stashSelectedCompToTemp("' + safeCategory + '")', function(result) {
+        // The host refuses to export a different comp than the one the modal opened
+        // on (its name is the default title and its footage note is what the editor
+        // read). The click-time estimate resolves whatever is selected now, so it
+        // only stands in when the modal-open estimate never resolved.
+        var gatedCompId = _addCompOpenCompId || ((est && typeof est.compId === 'number') ? est.compId : 0);
+        safeEvalScript('stashSelectedCompToTemp("' + safeCategory + '", ' + STASH_SKIP_SOURCE_OVER_BYTES + ', ' + gatedCompId + ')', function(result) {
             (async function() {
                 try {
                     var parsed = JSON.parse(result);
                     if (parsed.result && parsed.result.indexOf('Error') === 0) {
                         showToast(parsed.result, true);
+                        // The host refused before exporting (no comp selected, the
+                        // selection changed after Add Comp opened). Close the crash
+                        // breadcrumb: a submit_start left open here reads as an AE
+                        // crash in analytics.
+                        _fireSubmitEnd('failed', parsed.result);
                         setStashInProgress(false, 'stash');
                         hideSpinner();
                         return;
@@ -4240,7 +4324,10 @@
 
                         // Close the crash breadcrumb: a submit_start with this matching
                         // submit_end proves the synchronous export did NOT crash AE.
-                        _fireSubmitEnd(publishOk ? 'success' : 'failed', publishOk ? null : publishErr);
+                        var skippedAtUpload = _skippedSourceCount(files.metadata);
+                        _fireSubmitEnd(publishOk ? 'success' : 'failed', publishOk
+                            ? (skippedAtUpload > 0 ? 'skipped_oversize=' + skippedAtUpload : null)
+                            : publishErr);
                         if (window.blitzkriegAnalytics && window.blitzkriegAnalytics.trackStash) {
                             var totalBytes = 0;
                             try {
@@ -4275,7 +4362,12 @@
                                     debugLog('Favorite-on-add failed: ' + (favErr && favErr.message || favErr), 'warn');
                                 }
                             }
-                            showToast('Added to the library!');
+                            // Name the sources left out at upload here, on the toast
+                            // the editor actually reads. The host's Warning sentence
+                            // is overwritten by the progress toasts, and the pre-flight
+                            // heads-up is long gone by the time the export returns.
+                            var leftOut = _leftOutSentence(files.metadata && files.metadata.skippedSourceFiles, _skippedSourceCount(files.metadata), 'done');
+                            showToast('Added to the library!' + leftOut, false, leftOut ? 12000 : undefined);
                             window.cloudLibrary.invalidateCache();
                             // Show it in its live category immediately.
                             activeCategory = categoryName;
@@ -4570,15 +4662,46 @@
             var relPath = normalizeBundleRelativePath(allRelFiles[bf]);
             if (isSupportFile(relPath, aepName)) continue;
             // Same OOM guard for collected footage. A single oversized source can
-            // never round-trip through base64, so fail the whole upload with a
-            // clear message rather than shipping a broken bundle or crashing.
+            // never round-trip through base64. The host already leaves such files
+            // out of the bundle; if one still got here, leave it out too and record
+            // it, rather than failing the submission after the export already ran.
             var assetSize = await fileSizeAsync(compDir + '/' + relPath);
+            // -1 is fileSizeAsync's generic "unknown" (a bridge hiccup, a host
+            // throw), not a size. Retry once; an unknown size is never treated as
+            // over the cap, because then a transient stat error would ship the
+            // template without that clip and label it raw footage on every surface.
+            if (assetSize < 0) assetSize = await fileSizeAsync(compDir + '/' + relPath);
             if (assetSize > MAX_UPLOAD_FILE_BYTES) {
-                throw new Error('Footage file "' + relPath + '" is ' + formatBytesShort(assetSize) +
-                    ', over the ' + formatBytesShort(MAX_UPLOAD_FILE_BYTES) +
-                    ' panel-upload limit. Use lighter footage (proxy/transcode) or upload this template manually.');
+                // relPath comes from ExtendScript File.name, which is URI-encoded
+                // (spaces as %20). Record the decoded basename so it matches the
+                // displayName the host reports at import and reads right in review.
+                var skipBase = relPath.substring(relPath.lastIndexOf('/') + 1);
+                try { skipBase = decodeURIComponent(skipBase); } catch (decErr) { /* keep raw */ }
+                debugLog('readTempFiles: leaving out "' + relPath + '" (' + formatBytesShort(assetSize) +
+                    ', over the ' + formatBytesShort(MAX_UPLOAD_FILE_BYTES) + ' per-file limit)', 'warn');
+                if (!Array.isArray(metadata.skippedSourceFiles)) metadata.skippedSourceFiles = [];
+                var alreadyListed = false;
+                for (var sk = 0; sk < metadata.skippedSourceFiles.length; sk++) {
+                    if (metadata.skippedSourceFiles[sk] && metadata.skippedSourceFiles[sk].name === skipBase) { alreadyListed = true; break; }
+                }
+                if (!alreadyListed) {
+                    // Count BEFORE the push: with no host-side count, the helper
+                    // falls back to the list length, which would already include
+                    // this entry and count it twice.
+                    var priorSkipped = _skippedSourceCount(metadata);
+                    metadata.skippedSourceFiles.push({ name: skipBase, bytes: assetSize });
+                    metadata.skippedSourceCount = Math.max(priorSkipped + 1, metadata.skippedSourceFiles.length);
+                    metadata.skippedSourceBytes = (typeof metadata.skippedSourceBytes === 'number' ? metadata.skippedSourceBytes : 0) + assetSize;
+                }
+                continue;
             }
-            totalBytes += assetSize;
+            if (assetSize < 0) {
+                // Still unknown after the retry: upload it as before (the read
+                // either works or fails the submission loudly), never drop it.
+                debugLog('readTempFiles: could not size "' + relPath + '", uploading it anyway', 'warn');
+            } else {
+                totalBytes += assetSize;
+            }
             if (totalBytes > MAX_UPLOAD_TOTAL_BYTES) {
                 throw new Error('This template totals ' + formatBytesShort(totalBytes) +
                     ', over the ' + formatBytesShort(MAX_UPLOAD_TOTAL_BYTES) +
@@ -5125,6 +5248,148 @@
     }
 
     /**
+     * Size tag for a left-out source: ' (3.2 GB)' when known, ' (over 2 GB)' for
+     * the host's -1 (ExtendScript File.length is 32-bit signed), '' when absent.
+     */
+    function _leftOutSizeLabel(bytes) {
+        if (typeof bytes !== 'number') return '';
+        if (bytes < 0) return ' (over 2 GB)';
+        return ' (' + formatBytesShort(bytes) + ')';
+    }
+
+    /**
+     * How many source files the stash left out at upload, from a metadata object.
+     * skippedSourceCount is the full count; older metadata (or a panel-side skip)
+     * may carry only the list, so its length is the fallback.
+     */
+    function _skippedSourceCount(meta) {
+        if (!meta) return 0;
+        if (typeof meta.skippedSourceCount === 'number' && meta.skippedSourceCount > 0) return meta.skippedSourceCount;
+        return Array.isArray(meta.skippedSourceFiles) ? meta.skippedSourceFiles.length : 0;
+    }
+
+    /**
+     * Sentence naming the sources the stash leaves out (or left out) at upload.
+     * One helper drives the modal note, the pre-flight toast and the final toast
+     * so the surfaces agree. Leading space, ASCII. Empty string when nothing is
+     * left out.
+     * @param {Array} list - [{name, bytes}] (the host estimate's oversize list or
+     *        metadata.skippedSourceFiles), possibly capped
+     * @param {number} [totalCount] - the true count when the list is capped
+     * @param {string} mode - 'note': the modal, before Add Template (5 names with
+     *        sizes, cancel advice; the only surface where cancel is possible).
+     *        'exporting': the pre-flight toast, the export is already running
+     *        (3 names, no sizes, no advice). 'done': the final toast (3 names,
+     *        no sizes, past tense; the proxy advice already ran in the modal).
+     */
+    function _leftOutSentence(list, totalCount, mode) {
+        list = Array.isArray(list) ? list : [];
+        if (!list.length) return '';
+        var total = (typeof totalCount === 'number' && totalCount > list.length) ? totalCount : list.length;
+        var cap = formatBytesShort(STASH_SKIP_SOURCE_OVER_BYTES);
+        var isNote = (mode === 'note');
+        // The toast has no max-width and shrinks to half the panel, so toasts get
+        // 3 bare names (same cap as _skippedFootageSentence); the modal has room.
+        var maxNames = isNote ? 5 : 3;
+        var shown = [];
+        for (var i = 0; i < list.length && i < maxNames; i++) {
+            var entry = list[i] || {};
+            shown.push((entry.name || 'unnamed file') + (isNote ? _leftOutSizeLabel(entry.bytes) : ''));
+        }
+        var text = shown.join(', ');
+        if (total > shown.length) text += ' and ' + (total - shown.length) + ' more';
+        var head;
+        if (mode === 'done') {
+            head = ' ' + total + ' large file(s) were left out (raw footage over ' + cap + '): ' + text + '.';
+        } else if (mode === 'exporting') {
+            head = ' ' + total + ' large file(s) stay out of the bundle (raw footage over ' + cap + '): ' + text + '.';
+        } else {
+            head = ' ' + total + ' large file(s) will stay out of the bundle (raw footage over ' + cap + '): ' + text + '.';
+        }
+        var tail = ' Those layers import offline for other editors.';
+        if (isNote) tail += ' If a clip matters to the template, cancel, swap in a proxy under ' + cap + ', then add it.';
+        return head + tail;
+    }
+
+    /**
+     * The sources the stash left out at upload for this template, as a JSON
+     * array of {name, path} (lowercased basename, original location as the
+     * stash recorded it) escaped for an evalScript string. importComp refuses to
+     * basename-relink an item whose name AND path say it is the left-out one, so
+     * a left-out raw clip is never bound to a same-named collected file and a
+     * same-named collected proxy still relinks. '[]' when nothing is known.
+     */
+    function _leftOutNamesArg(storagePath) {
+        var entries = [];
+        if (storagePath) {
+            for (var ci = 0; ci < allComps.length; ci++) {
+                if (allComps[ci].storagePath !== storagePath) continue;
+                var list = Array.isArray(allComps[ci].skippedSourceFiles) ? allComps[ci].skippedSourceFiles : [];
+                for (var i = 0; i < list.length; i++) {
+                    if (!list[i] || !list[i].name) continue;
+                    entries.push({ name: String(list[i].name).toLowerCase(), path: list[i].path ? String(list[i].path) : '' });
+                }
+                break;
+            }
+        }
+        return escapeForExtendScript(JSON.stringify(entries));
+    }
+
+    /**
+     * Match the host's missing-file basenames against the files the stash left out
+     * at upload (comp.skippedSourceFiles, carried from metadata.json by
+     * buildCompsFromMetadata). Returns {count, names}. Every host entry whose
+     * basename is on the skipped list counts (AE can hold two FootageItems on one
+     * file, and the stash records that file once); names stay deduped for the
+     * sentence. When the host sent no name list (older host), falls back to
+     * explaining up to the number left out.
+     */
+    function _uploadSkippedMatch(storagePath, hostListJson, missing) {
+        var none = { count: 0, names: [] };
+        if (!storagePath) return none;
+        var comp = null;
+        for (var ci = 0; ci < allComps.length; ci++) {
+            if (allComps[ci].storagePath === storagePath) { comp = allComps[ci]; break; }
+        }
+        var skipped = (comp && Array.isArray(comp.skippedSourceFiles)) ? comp.skippedSourceFiles : [];
+        if (!skipped.length) return none;
+        var skippedLower = {};
+        var skippedNames = [];
+        for (var si = 0; si < skipped.length; si++) {
+            var nm = skipped[si] && skipped[si].name;
+            if (!nm) continue;
+            skippedLower[String(nm).toLowerCase()] = nm;
+            skippedNames.push(nm);
+        }
+        var hostNames = null;
+        if (hostListJson) {
+            try { hostNames = JSON.parse(hostListJson); } catch (e) { hostNames = null; }
+        }
+        // No usable name list, or the host capped it (30 names) short of the
+        // count, so the unnamed remainder cannot be matched: explain at most what
+        // the stash recorded. Otherwise 31 left-out clips would leave one
+        // "unexplained" and flag a complete template for re-stash.
+        if (!Array.isArray(hostNames) || hostNames.length < missing) {
+            var n = Math.min(missing, skippedNames.length);
+            return { count: n, names: skippedNames.slice(0, n) };
+        }
+        var matchedCount = 0;
+        var matchedNames = [];
+        var namedSeen = {};
+        // Every missing item whose basename is on the record counts as explained.
+        // AE often holds two FootageItems on one file while the stash records the
+        // file once, so counting per record would flag healthy templates. The
+        // trade: a same-name proxy that also failed to collect passes as explained.
+        for (var hi = 0; hi < hostNames.length; hi++) {
+            var key = String(hostNames[hi] || '').toLowerCase();
+            if (!key || !skippedLower[key]) continue;
+            matchedCount++;
+            if (!namedSeen[key]) { namedSeen[key] = true; matchedNames.push(skippedLower[key]); }
+        }
+        return { count: matchedCount, names: matchedNames };
+    }
+
+    /**
      * Show the right toast for an importComp result. The host appends a
      * [BLITZ_MISSING:N] marker plus a human-readable warning when N source files
      * could not be relinked from the (Footage)/ bundle — surface that to the user
@@ -5145,33 +5410,68 @@
         var res = result || '';
         var panelSkipped = (skipInfo && skipInfo.count) || 0;
         var skipNote = panelSkipped > 0 ? ' ' + _skippedFootageSentence(skipInfo) : '';
-        var m = /\[BLITZ_MISSING:(\d+)\]\s*/.exec(res);
+        // The host follows [BLITZ_MISSING:N] with an optional [BLITZ_MISSING_FILES:[...]]
+        // JSON list of the missing file basenames, then always ' Warning: '. Both
+        // markers are stripped from the human text. The list is anchored on that
+        // Warning so a ']]' inside a file name cannot end the match early.
+        var m = /\[BLITZ_MISSING:(\d+)\]\s*(?:\[BLITZ_MISSING_FILES:(\[[\s\S]*?\])\]\s*(?=Warning:))?/.exec(res);
         if (m && parseInt(m[1], 10) > 0) {
             var missing = parseInt(m[1], 10);
             var warn = res.substring(m.index + m[0].length).replace(/^Warning:\s*/i, '').trim();
+            // Files the stash itself left out at upload (raw footage over the per-file
+            // cap) are recorded on the template's metadata. A missing source whose
+            // basename is on that list is expected, not a broken template.
+            var uploadSkip = _uploadSkippedMatch(storagePath, m[2], missing);
+            // Name who has the clip: templateSubmitters fills from the approved rows
+            // list and may be empty before it loads, so fall back to the generic line.
+            var who = storagePath ? (templateSubmitters[storagePath] || '') : '';
+            var uploadNote = '';
+            if (uploadSkip.count > 0) {
+                var noteNames = uploadSkip.names.slice(0, 3).join(', ');
+                if (uploadSkip.names.length > 3) noteNames += ' and ' + (uploadSkip.names.length - 3) + ' more';
+                uploadNote = ' Left out at upload (raw footage over ' + formatBytesShort(STASH_SKIP_SOURCE_OVER_BYTES) + '): ' + noteNames + '. Those layers import offline.';
+                if (who) {
+                    uploadNote += ' ' + who + ' has the original clip if you need it.';
+                } else {
+                    uploadNote += ' Relink from the original footage if you need it.';
+                }
+            }
+            var explained = panelSkipped + uploadSkip.count;
             // Everything the host could not relink is accounted for by what the panel
-            // declined to download. The template is fine: say so plainly, name the
-            // files, and leave the sync state completely alone.
-            if (missing - panelSkipped <= 0) {
+            // declined to download or the stash left out. The template is fine: say
+            // so plainly, name the files, and leave the sync state completely alone.
+            // The left-out note names files and who has them, so it gets the same
+            // 12 s the final submit toast gets; 4 s is gone before the names read.
+            var importToastMs = uploadNote ? 12000 : undefined;
+            if (missing - explained <= 0) {
                 debugLog('IMPORT: host reported ' + missing + ' missing source file(s) for ' + storagePath +
-                    ' and the panel skipped ' + panelSkipped + ' - shortfall is the import size cap, NOT a broken template. Sync state untouched.', 'warn');
-                showToast(successMsg + skipNote);
+                    ', the panel skipped ' + panelSkipped + ' and the stash left out ' + uploadSkip.count + ' at upload - NOT a broken template. Sync state untouched.', 'warn');
+                showToast(successMsg + skipNote + uploadNote, false, importToastMs);
                 return;
             }
             // The .aep references footage that is not in the bundle (and, per the storage
             // audit, not in the cloud either) — the template was stashed incomplete.
             // Flag it broken so the Sync view surfaces it as "needs re-stash" and full
             // sync stops trying to "complete" a bundle that can never be complete.
-            var unexplained = missing - panelSkipped;
+            var unexplained = missing - explained;
             if (storagePath && window.localSync && window.localSync.markBroken) {
                 // Kind 'source': genuine missing footage surfaced at import. The mirror
                 // may still be complete (imports from its .aep) so this shows as a muted
                 // "re-stash to fix footage" advisory, not a hard broken state.
                 // With skips in play the host's own sentence names files the panel
                 // chose to leave out, so it would misreport what needs re-stashing.
-                var reason = panelSkipped > 0
-                    ? unexplained + ' source file(s) missing beyond the ' + panelSkipped + ' the panel did not download'
-                    : (warn || (unexplained + ' source file(s) missing'));
+                // Name only the kinds of skip that actually happened: this string
+                // is the Sync and Analytics chip, so a template with nothing left
+                // out at upload must not claim otherwise.
+                var reason;
+                if (explained > 0) {
+                    var beyond = [];
+                    if (panelSkipped > 0) beyond.push(panelSkipped + ' the panel did not download');
+                    if (uploadSkip.count > 0) beyond.push(uploadSkip.count + ' left out at upload');
+                    reason = unexplained + ' source file(s) missing beyond the ' + beyond.join(' and the ');
+                } else {
+                    reason = warn || (unexplained + ' source file(s) missing');
+                }
                 window.localSync.markBroken(storagePath, reason, 'source');
                 _updateSyncNavCount();
             }
@@ -5180,7 +5480,7 @@
             // stashed incomplete. The actionable "needs re-stash" detail now lives
             // only on the Sync and Analytics chip (markBroken above), so imports do
             // not nag with a red toast every time.
-            showToast(successMsg + ' Some bundled footage is missing; this template is flagged for re-stash in Sync and Analytics.' + skipNote);
+            showToast(successMsg + ' Some bundled footage is missing; this template is flagged for re-stash in Sync and Analytics.' + skipNote + uploadNote, false, importToastMs);
         } else {
             // Image-only missing: decorative, non-critical. Do NOT flag re-stash;
             // just add a calm one-liner so the user has accurate info.
@@ -5265,7 +5565,7 @@
             showToast('Import is taking too long. If After Effects is showing a dialog, dismiss it in AE, then try again.', true);
             _releaseImportGuard(guardToken);
         }, IMPORT_EVAL_TIMEOUT_MS);
-        safeEvalScript('importComp("' + safePath + '","' + safeDisplayName + '")', function(result) {
+        safeEvalScript('importComp("' + safePath + '","' + safeDisplayName + '","' + _leftOutNamesArg(storagePath) + '")', function(result) {
             if (_settled) return;
             _settled = true;
             clearTimeout(_timer);
@@ -5518,7 +5818,7 @@
                         _e._wedge = true;
                         reject(_e);
                     }, IMPORT_EVAL_TIMEOUT_MS);
-                    safeEvalScript('importComp("' + safePath + '","' + safeDisplayName + '")', function(result) {
+                    safeEvalScript('importComp("' + safePath + '","' + safeDisplayName + '","' + _leftOutNamesArg(storagePath) + '")', function(result) {
                         if (_settled) return;
                         _settled = true;
                         clearTimeout(_timer);
@@ -5771,7 +6071,7 @@
         var safePath = escapeForExtendScript(aepPath);
         var safeDisplayName = _trackComp ? escapeForExtendScript(_trackComp.name) : '';
 
-        safeEvalScript('importComp("' + safePath + '","' + safeDisplayName + '")', function (result) {
+        safeEvalScript('importComp("' + safePath + '","' + safeDisplayName + '","' + _leftOutNamesArg(storagePath) + '")', function (result) {
             _setImportStash(false, _guardToken);
             hideSpinner();
             _releaseImportGuard(_guardToken);
@@ -7133,6 +7433,19 @@
                 }
                 if (meta.submitterName) {
                     html += '<div class="submission-detail-meta-item"><span class="submission-detail-meta-label">Submitter</span><span class="submission-detail-meta-value">' + escapeHTML(meta.submitterName) + '</span></div>';
+                }
+                if (meta.skippedSourceFiles && meta.skippedSourceFiles.length) {
+                    var leftOutNames = [];
+                    for (var lo = 0; lo < meta.skippedSourceFiles.length; lo++) {
+                        var loEntry = meta.skippedSourceFiles[lo] || {};
+                        leftOutNames.push((loEntry.name || 'unnamed file') + _leftOutSizeLabel(loEntry.bytes));
+                    }
+                    var leftOutTotal = _skippedSourceCount(meta);
+                    var leftOutText = leftOutNames.join(', ');
+                    if (leftOutTotal > leftOutNames.length) leftOutText += ' and ' + (leftOutTotal - leftOutNames.length) + ' more';
+                    html += '<div class="submission-detail-meta-item"><span class="submission-detail-meta-label">Left out</span><span class="submission-detail-meta-value">' +
+                        leftOutTotal + ' file(s) left out at upload (raw footage over ' + formatBytesShort(STASH_SKIP_SOURCE_OVER_BYTES) + '): ' +
+                        escapeHTML(leftOutText) + '</span></div>';
                 }
                 html += '</div>';
 
@@ -11005,11 +11318,14 @@
         });
     }
 
-    /** Get a file's size in bytes via ExtendScript; resolves -1 if unknown. */
+    /** Get a file's size in bytes via ExtendScript; resolves -1 if unknown.
+     *  _sourceFileSizeBytes re-reads a negative File.length (any file over 2 GB,
+     *  some network mounts) through the OS, so a real size comes back where the
+     *  raw length alone would say -1. */
     function fileSizeAsync(filePath) {
         return new Promise(function(resolve) {
             safeEvalScript(
-                '(function(){try{var f=new File("' + escapeForExtendScript(filePath) + '");return f.exists?String(f.length):"-1";}catch(e){return "-1";}})()',
+                '(function(){try{var f=new File("' + escapeForExtendScript(filePath) + '");return f.exists?String(_sourceFileSizeBytes(f)):"-1";}catch(e){return "-1";}})()',
                 function(r) {
                     var n = parseInt(r, 10);
                     resolve(isNaN(n) ? -1 : n);
@@ -11111,7 +11427,7 @@
      * reads rendered files, uploads to Supabase.
      * Queued sequentially to avoid concurrent ExtendScript calls.
      */
-    function generateCloudThumbnail(comp, thumbnailOnly) {
+    function generateCloudThumbnail(comp, thumbnailOnly, forceRender) {
         if (!comp || !comp.storagePath) return Promise.reject(new Error('No storage path'));
         if (!refreshCepBridgeState()) {
             return Promise.reject(new Error('Requires After Effects'));
@@ -11263,6 +11579,20 @@
                 if (relocatedTempDir) _cleanupTempDir(relocatedTempDir);
                 return Promise.resolve({ skipped: true, reason: renderResult.skipReason });
             }
+            // Footage left out at upload (raw over the per-file cap) is missing on
+            // every machine but the submitter's. The stash-time thumbnail and frames
+            // were rendered with it present, so a regen here could only replace them
+            // with placeholder frames and zero previews. Keep what the editor made,
+            // but only when comp.png actually landed at submit (hasCompPng is the
+            // upload's own record; thumbnailVerified is also true on frames alone)
+            // and this panel has not seen it 404 (thumbBlacklist), otherwise a
+            // template with no thumbnail could never get one.
+            if (renderResult.thumbnailOnly && comp.hasCompPng && !forceRender && !thumbBlacklist[comp.storagePath] && _missingAllLeftOut(comp, renderResult)) {
+                debugLog('GEN: kept the stash-time thumbnail + previews for ' + comp.name + ' (the missing footage was left out at upload on purpose)', 'warn');
+                _cleanupTempDir(tempDir);
+                if (relocatedTempDir) _cleanupTempDir(relocatedTempDir);
+                return Promise.resolve({ skipped: true, reason: 'left_out_at_upload' });
+            }
             debugLog('GEN: reading rendered files and uploading...');
             var thumbPath = effectiveOutputDir + '/comp.png';
             return readFileAsBlobAsync(thumbPath, 'image/png').then(function(thumbBlobRaw) {
@@ -11384,6 +11714,31 @@
             throw err;
         });
         }); // end _enqueueGeneration
+    }
+
+    /**
+     * True when every footage file the preview render found missing is one the
+     * stash left out at upload (comp.skippedSourceFiles). False when the host
+     * sent no file list, so an unknown missing file is never explained away.
+     * When the host capped the list (30 names) short of the count, the unnamed
+     * remainder is explained only up to the number the stash recorded, the same
+     * rule _uploadSkippedMatch applies at import.
+     */
+    function _missingAllLeftOut(comp, renderResult) {
+        var skipped = (comp && Array.isArray(comp.skippedSourceFiles)) ? comp.skippedSourceFiles : [];
+        if (!skipped.length || !renderResult) return false;
+        var files = Array.isArray(renderResult.missingFootageFiles) ? renderResult.missingFootageFiles : null;
+        if (!files || !files.length) return false;
+        var count = (typeof renderResult.missingFootageCount === 'number') ? renderResult.missingFootageCount : files.length;
+        if (count > files.length && count > skipped.length) return false;
+        var lower = {};
+        for (var si = 0; si < skipped.length; si++) {
+            if (skipped[si] && skipped[si].name) lower[String(skipped[si].name).toLowerCase()] = true;
+        }
+        for (var fi = 0; fi < files.length; fi++) {
+            if (!lower[String(files[fi] || '').toLowerCase()]) return false;
+        }
+        return true;
     }
 
     /** Clean up temp directory and purge AE caches (used after generation) */
@@ -11532,9 +11887,13 @@
             return;
         }
 
-        // Clear blacklist for templates we're about to generate
+        // Clear blacklist for templates we're about to generate. Remember which
+        // ones were blacklisted: that 404 is why the run picked them, so the
+        // left-out-at-upload guard below must not keep a thumbnail that is gone.
+        var wasBlacklisted = {};
         compsToProcess.forEach(function(c) {
             if (c.storagePath && thumbBlacklist[c.storagePath]) {
+                wasBlacklisted[c.storagePath] = true;
                 delete thumbBlacklist[c.storagePath];
             }
         });
@@ -11660,11 +12019,17 @@
             updateProgress();
             var comp = compsToProcess[processed];
 
-            generateCloudThumbnail(comp, thumbnailOnlyMode).then(function(res) {
+            generateCloudThumbnail(comp, thumbnailOnlyMode, !!(comp.storagePath && wasBlacklisted[comp.storagePath])).then(function(res) {
                 if (res && res.skipped) {
                     // Rendered nothing usable (missing footage / memory limit). Count it
                     // honestly as skipped, not "generated" — the thumbnail is still absent.
                     skipped++;
+                    // Left out at upload keeps the stash-time thumbnail + previews on
+                    // purpose, so a backfill run must retire it here or it re-downloads
+                    // and re-imports the whole bundle on every run.
+                    if (previewBackfill && comp.storagePath && res.reason === 'left_out_at_upload') {
+                        _markPreviewZero(comp.storagePath);
+                    }
                 } else {
                     succeeded++;
                     // A successful render clears any prior cosmetic thumb-failure mark
